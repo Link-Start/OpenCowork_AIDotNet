@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.86] - 2026-05-07
+
+### Added
+
+- Added OpenAI image part support utilities and `request_debug` event type for richer streaming observability.
+- Added model context length and max output token parsing so discovered model capabilities are reflected in provider settings.
+- Added `request_debug` event emission in cron execution, image content filtering, and a 20-result cap on search tool output for consistency across environments.
+
+### Changed
+
+- Improved OpenAI chat provider with structured token usage tracking and image part support for more accurate streaming metadata.
+- Normalized search result limits across SSH, local, and cron tool execution paths to cap at 20 results uniformly.
+
+### Fixed
+
+- Stopped auto-scroll when `AskUserQuestion` is pending, preventing the message list from jumping during user input prompts.
+
 ## [0.9.85] - 2026-04-25
 
 ### Added
