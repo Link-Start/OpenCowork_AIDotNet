@@ -232,6 +232,10 @@ type TransferCounters = {
 
 type SearchLimitReason = 'max_results' | 'max_output_bytes' | 'timeout' | 'max_depth' | null
 
+const DEFAULT_SSH_GLOB_LIMIT = 100
+const DEFAULT_SSH_GREP_LIMIT = 100
+const DEFAULT_SSH_RIPGREP_LIMIT = 200
+
 const SSH_SEARCH_IGNORE_DIRS = [
   'node_modules',
   '.git',
@@ -372,6 +376,13 @@ function appendSshGrepExcludeDirs(cmd: string): string {
     next += ` --exclude-dir=${shellEscape(dir)}`
   }
   return next
+}
+
+function clampSshSearchLimit(value: unknown, fallback: number): number {
+  if (!Number.isFinite(value)) return fallback
+  const normalized = Math.floor(Number(value))
+  if (normalized <= 0) return fallback
+  return Math.min(normalized, fallback)
 }
 
 function createSshGrepResult(args: {
@@ -3579,18 +3590,22 @@ export function registerSshHandlers(): void {
 
   ipcMain.handle(
     'ssh:fs:glob',
-    async (_event, args: { connectionId: string; pattern: string; path?: string }) => {
+    async (
+      _event,
+      args: { connectionId: string; pattern: string; path?: string; limit?: number }
+    ) => {
       try {
         return await withFileSession(args.connectionId, async (session) => {
           const cwdInput = args.path || '.'
           const cwd = await resolveSftpPath(session, cwdInput)
           const gitIgnoreMatcher = await createRemoteGitIgnoreContext(session, cwd)
           const maxDepth = 5
+          const limit = clampSshSearchLimit(args.limit, DEFAULT_SSH_GLOB_LIMIT)
           const result = await sshExec(
             session,
             `cd ${shellEscape(cwd)} && find . -maxdepth ${maxDepth} ` +
               `${buildSshFindPruneExpression(args.pattern)}-name ${shellEscape(args.pattern)} ` +
-              `-print 2>/dev/null | head -100`
+              `-print 2>/dev/null | head -${limit}`
           )
           if (result.exitCode !== 0) {
             return createSshGlobResult({
@@ -3624,8 +3639,8 @@ export function registerSshHandlers(): void {
             searchRoot: cwd,
             pattern: args.pattern,
             matches,
-            truncated: rawLines.length >= 100,
-            limitReason: rawLines.length >= 100 ? 'max_results' : null,
+            truncated: rawLines.length >= limit,
+            limitReason: rawLines.length >= limit ? 'max_results' : null,
             warnings: ['SSH glob uses remote find and may be truncated'],
             maxDepth
           })
@@ -3650,7 +3665,13 @@ export function registerSshHandlers(): void {
     'ssh:fs:grep',
     async (
       _event,
-      args: { connectionId: string; pattern: string; path?: string; include?: string }
+      args: {
+        connectionId: string
+        pattern: string
+        path?: string
+        include?: string
+        limit?: number
+      }
     ) => {
       try {
         return await withFileSession(args.connectionId, async (session) => {
@@ -3660,10 +3681,11 @@ export function registerSshHandlers(): void {
           const hasRipgrep = await checkRemoteCommandExists(session, 'rg')
 
           if (hasRipgrep) {
+            const limit = clampSshSearchLimit(args.limit, DEFAULT_SSH_RIPGREP_LIMIT)
             let cmd = `cd ${shellEscape(cwd)} && rg --json --line-number --color never --no-messages --ignore-case --hidden --max-filesize 10M`
             cmd = appendSshRipgrepDefaultGlobs(cmd)
             if (args.include) cmd += ` --glob ${shellEscape(args.include)}`
-            cmd += ` ${shellEscape(args.pattern)} . 2>/dev/null | head -200`
+            cmd += ` ${shellEscape(args.pattern)} . 2>/dev/null | head -${limit}`
 
             const result = await sshExec(session, cmd)
             if (result.exitCode !== 0 && result.exitCode !== 1) {
@@ -3707,7 +3729,7 @@ export function registerSshHandlers(): void {
                 parseFailed = true
               }
             }
-            const truncated = rawMatchCount >= 200
+            const truncated = rawMatchCount >= limit
             return createSshGrepResult({
               searchRoot: cwd,
               pattern: args.pattern,
@@ -3722,11 +3744,12 @@ export function registerSshHandlers(): void {
             })
           }
 
+          const limit = clampSshSearchLimit(args.limit, DEFAULT_SSH_GREP_LIMIT)
           let cmd = `grep -rn`
           cmd = appendSshGrepExcludeDirs(cmd)
           if (args.include) cmd += ` --include=${shellEscape(args.include)}`
           cmd += ` ${shellEscape(args.pattern)} ${shellEscape(cwd)}`
-          cmd += ' 2>/dev/null | head -100'
+          cmd += ` 2>/dev/null | head -${limit}`
 
           const result = await sshExec(session, cmd)
           if (result.exitCode !== 0 && result.exitCode !== 1) {
@@ -3753,8 +3776,8 @@ export function registerSshHandlers(): void {
             pattern: args.pattern,
             include: args.include,
             matches,
-            truncated: rawLines.length >= 100,
-            limitReason: rawLines.length >= 100 ? 'max_results' : null,
+            truncated: rawLines.length >= limit,
+            limitReason: rawLines.length >= limit ? 'max_results' : null,
             warnings: ['SSH grep uses remote grep and may be truncated by result limits']
           })
         })

@@ -40,7 +40,7 @@ type GrepToolResult = {
   error?: string
 }
 
-const PROMPT_SEARCH_MAX_MATCHES = 50
+const PROMPT_SEARCH_MAX_MATCHES = 20
 const PROMPT_SEARCH_FETCH_LIMIT = PROMPT_SEARCH_MAX_MATCHES + 1
 const PROMPT_SEARCH_MAX_OUTPUT_BYTES = 8 * 1024
 const PROMPT_GREP_MAX_LINE_LENGTH = 160
@@ -436,7 +436,7 @@ function normalizeGrepResult(
 const globHandler: ToolHandler = {
   definition: {
     name: 'Glob',
-    description: 'Fast file pattern matching tool',
+    description: 'Fast file pattern matching tool (returns at most 20 matches)',
     inputSchema: {
       type: 'object',
       properties: {
@@ -490,7 +490,7 @@ const globHandler: ToolHandler = {
 const grepHandler: ToolHandler = {
   definition: {
     name: 'Grep',
-    description: 'Search file contents using regular expressions',
+    description: 'Search file contents using regular expressions (returns at most 20 matches)',
     inputSchema: {
       type: 'object',
       properties: {

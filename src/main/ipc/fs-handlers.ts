@@ -40,6 +40,7 @@ const MAX_FILE_READ_BYTES = 50 * 1024 * 1024 // 50 MB
 const MAX_IMAGE_READ_BYTES = 20 * 1024 * 1024 // 20 MB
 const MAX_LIST_DIR_ITEMS = 1_000
 const MAX_GLOB_MATCHES = 1_000
+const SEARCH_TOOL_MAX_RESULTS = 20
 
 async function assertFileSize(filePath: string, limit: number): Promise<number> {
   const stat = await fs.promises.stat(filePath)
@@ -204,7 +205,7 @@ const GREP_BINARY_EXTENSIONS = new Set([
   '.sqlite3'
 ])
 
-const GREP_MAX_RESULTS = 50
+const GREP_MAX_RESULTS = SEARCH_TOOL_MAX_RESULTS
 const GREP_MAX_FILE_SIZE = 10 * 1024 * 1024
 const GREP_TIMEOUT_MS = 30000
 const GREP_MAX_LINE_LENGTH = 160
@@ -319,6 +320,8 @@ function createGlobToolResult(args: {
   searchRoot: string
   pattern: string
   matches: Array<{ path: string; type?: 'file' | 'directory' }>
+  truncated?: boolean
+  limitReason?: GrepLimitReason
   warnings?: string[]
   error?: string
 }): GlobToolResult {
@@ -328,6 +331,8 @@ function createGlobToolResult(args: {
     meta: createSearchMeta({
       searchRoot: args.searchRoot,
       pattern: args.pattern,
+      truncated: args.truncated,
+      limitReason: args.limitReason,
       warnings: args.warnings,
       pathStyle: 'absolute'
     }),
@@ -994,6 +999,7 @@ export function registerFsHandlers(): void {
         const matcher = await createLocalGitIgnoreContext(cwd)
         const filteredMatches: Array<{ path: string; type?: 'file' | 'directory' }> = []
         const limit = clampToolResultLimit(args.limit, MAX_GLOB_MATCHES)
+        let truncated = false
         const globber = new Glob(args.pattern, {
           cwd,
           mark: true,
@@ -1009,13 +1015,18 @@ export function registerFsHandlers(): void {
           if (await matcher.ignores(absolutePath, isDir)) continue
           filteredMatches.push({ path: absolutePath, type: isDir ? 'directory' : 'file' })
 
-          if (limit !== null && filteredMatches.length >= limit) break
+          if (limit !== null && filteredMatches.length >= limit) {
+            truncated = true
+            break
+          }
         }
 
         return createGlobToolResult({
           searchRoot: cwd,
           pattern: args.pattern,
-          matches: filteredMatches
+          matches: filteredMatches,
+          truncated,
+          limitReason: truncated ? 'max_results' : null
         })
       } catch (err) {
         return createGlobToolResult({
