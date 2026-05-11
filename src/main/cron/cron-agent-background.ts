@@ -28,14 +28,12 @@ import {
   resolveResponsesWebsocketConfig,
   type ResponsesWebsocketMode
 } from '../../shared/openai-responses-websocket'
+import { normalizeMessagesForAnthropicToolReplay } from '../../shared/anthropic-tool-replay'
 import {
   summarizeOpenAITextAndImages,
   supportsOpenAIImageParts
 } from '../../shared/openai-message-support'
-import {
-  compactShellOutputPayload,
-  compactShellText
-} from '../../shared/shell-output-compactor'
+import { compactShellOutputPayload, compactShellText } from '../../shared/shell-output-compactor'
 import { ResponsesWebSocketSessionManager } from '../lib/responses-websocket-session-manager'
 import { applyDefaultApiUserAgent } from '../lib/api-user-agent'
 
@@ -2289,7 +2287,7 @@ function formatAnthropicMessages(
   promptCacheEnabled = false,
   cacheBudget = createAnthropicCacheControlBudget(false)
 ): unknown[] {
-  const filteredMessages = normalizeMessagesForReplay(messages).filter(
+  const filteredMessages = normalizeMessagesForAnthropicToolReplay(messages).filter(
     (message) => message.role !== 'system'
   )
   const cacheTargets = promptCacheEnabled
@@ -5382,9 +5380,7 @@ function buildToolHandlers(): Record<string, ToolHandler> {
           if (settled) return
           settled = true
           clearTimeout(timer)
-          resolve(
-            encodeShellToolResult({ exitCode: 1, stdout, stderr: err.message || stderr })
-          )
+          resolve(encodeShellToolResult({ exitCode: 1, stdout, stderr: err.message || stderr }))
         })
         child.on('exit', (code) => {
           if (settled) return

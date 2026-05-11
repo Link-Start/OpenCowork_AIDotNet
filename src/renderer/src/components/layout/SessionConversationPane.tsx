@@ -1,4 +1,5 @@
 import { useCallback, useMemo, useState } from 'react'
+import { AnimatePresence, motion } from 'motion/react'
 import {
   Check,
   ClipboardCopy,
@@ -46,6 +47,7 @@ import { sessionToMarkdown } from '@renderer/lib/utils/export-chat'
 import { cn } from '@renderer/lib/utils'
 import { dataUrlToBlob, writeImageBlobToClipboard } from '@renderer/lib/utils/image-clipboard'
 import { useChatStore } from '@renderer/stores/chat-store'
+import { useSettingsStore } from '@renderer/stores/settings-store'
 import { useUIStore } from '@renderer/stores/ui-store'
 import { toast } from 'sonner'
 
@@ -57,6 +59,10 @@ interface SessionConversationPaneProps {
 
 const EXPORT_IMAGE_PLACEHOLDER_DATA_URL =
   'data:image/gif;base64,R0lGODlhAQABAAAAACwAAAAAAQABAAA='
+const TERMINAL_DOCK_TRANSITION = {
+  duration: 0.24,
+  ease: [0.22, 1, 0.36, 1] as const
+}
 
 function isRemoteImageSrc(value: string | null): value is string {
   return typeof value === 'string' && /^https?:\/\//i.test(value)
@@ -166,6 +172,7 @@ export function SessionConversationPane({
       ? Boolean(state.bottomTerminalDockOpenByProjectId[sessionView.projectId])
       : false
   )
+  const animationsEnabled = useSettingsStore((state) => state.animationsEnabled)
   const isStreaming = Boolean(streamingMessageId)
   const {
     sendMessage,
@@ -191,6 +198,11 @@ export function SessionConversationPane({
   const hasTranscriptActions = sessionView.messageCount > 0
   const showSessionActionBar =
     hasProjectFolderAction || hasTranscriptActions || allowOpenInNewWindow
+  const showTerminalDock = Boolean(
+    sessionView.projectId &&
+      terminalDockOpen &&
+      (sessionView.workingFolder || sessionView.sshConnectionId)
+  )
 
   const updateSessionProjectDirectory = useCallback(
     async (patch: Partial<{ workingFolder: string | null; sshConnectionId: string | null }>) => {
@@ -608,16 +620,39 @@ export function SessionConversationPane({
           onCompressContext={manualCompressContext}
           isStreaming={isStreaming}
         />
-        {sessionView.projectId &&
-          terminalDockOpen &&
-          (sessionView.workingFolder || sessionView.sshConnectionId) && (
-            <ProjectTerminalDock
-              projectId={sessionView.projectId}
-              projectName={sessionView.projectName}
-              workingFolder={sessionView.workingFolder ?? null}
-              sshConnectionId={sessionView.sshConnectionId}
-            />
-          )}
+        {animationsEnabled ? (
+          <AnimatePresence initial={false}>
+            {showTerminalDock ? (
+              <motion.div
+                key={`terminal-dock-${sessionView.projectId}`}
+                initial={{ height: 0, opacity: 0, y: 12 }}
+                animate={{ height: 'auto', opacity: 1, y: 0 }}
+                exit={{ height: 0, opacity: 0, y: 12 }}
+                transition={{
+                  height: TERMINAL_DOCK_TRANSITION,
+                  y: TERMINAL_DOCK_TRANSITION,
+                  opacity: { duration: 0.16, ease: 'easeOut' }
+                }}
+                className="min-h-0 overflow-hidden"
+                style={{ willChange: 'height, opacity, transform' }}
+              >
+                <ProjectTerminalDock
+                  projectId={sessionView.projectId!}
+                  projectName={sessionView.projectName}
+                  workingFolder={sessionView.workingFolder ?? null}
+                  sshConnectionId={sessionView.sshConnectionId}
+                />
+              </motion.div>
+            ) : null}
+          </AnimatePresence>
+        ) : showTerminalDock ? (
+          <ProjectTerminalDock
+            projectId={sessionView.projectId!}
+            projectName={sessionView.projectName}
+            workingFolder={sessionView.workingFolder ?? null}
+            sshConnectionId={sessionView.sshConnectionId}
+          />
+        ) : null}
       </div>
 
       <Dialog open={renameDialogOpen} onOpenChange={setRenameDialogOpen}>

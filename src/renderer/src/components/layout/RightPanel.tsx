@@ -169,6 +169,11 @@ export function RightPanel({ compact = false }: { compact?: boolean }): React.JS
     tabs[0]
   const hasBrowserTab = tabs.some((tab) => tab.kind === 'browser') && browserPluginEnabled
   const browserSessionId = activeScopedSessionId ?? activeSessionId ?? null
+  const browserPanelKey = browserSessionId
+    ? `session:${browserSessionId}`
+    : activeProjectId
+      ? `project:${activeProjectId}`
+      : 'global'
   const activeTab =
     selectedTab?.kind === 'browser' && !browserPluginEnabled
       ? (tabs.find((tab) => tab.kind === 'review') ?? selectedTab)
@@ -307,7 +312,11 @@ export function RightPanel({ compact = false }: { compact?: boolean }): React.JS
 
           {hasBrowserTab ? (
             <div className={cn('absolute inset-0', activeTab?.kind !== 'browser' && 'hidden')}>
-              <BrowserPanel key={browserSessionId ?? 'global'} sessionId={browserSessionId} />
+              <BrowserPanel
+                key={browserPanelKey}
+                sessionId={browserSessionId}
+                projectId={activeProjectId}
+              />
             </div>
           ) : null}
         </div>

@@ -27,7 +27,8 @@ import {
   Languages,
   Pencil,
   Volume2,
-  Share2
+  Share2,
+  GitFork
 } from 'lucide-react'
 import { FadeIn, ScaleIn } from '@renderer/components/animate-ui'
 import { ImageGeneratingLoader } from './ImageGeneratingLoader'
@@ -553,12 +554,14 @@ function ActionIconButton({
   label,
   icon,
   onClick,
-  danger = false
+  danger = false,
+  disabled = false
 }: {
   label: string
   icon: ReactNode
   onClick: () => void
   danger?: boolean
+  disabled?: boolean
 }): React.JSX.Element {
   return (
     <Tooltip>
@@ -567,7 +570,8 @@ function ActionIconButton({
           type="button"
           aria-label={label}
           onClick={onClick}
-          className={`flex size-7 items-center justify-center rounded-md border border-border/50 bg-background/90 text-muted-foreground transition-colors hover:bg-accent ${danger ? 'hover:text-destructive' : 'hover:text-accent-foreground'}`}
+          disabled={disabled}
+          className={`flex size-7 items-center justify-center rounded-md border border-border/50 bg-background/90 text-muted-foreground transition-colors hover:bg-accent disabled:pointer-events-none disabled:opacity-50 ${danger ? 'hover:text-destructive' : 'hover:text-accent-foreground'}`}
         >
           {icon}
         </button>
@@ -1218,9 +1222,12 @@ export function AssistantMessage({
     ? (requestDebugInfo ?? (msgId ? getLastDebugInfo(msgId) : undefined))
     : undefined
   const openTranslatePage = useUIStore((s) => s.openTranslatePage)
+  const navigateToSession = useUIStore((s) => s.navigateToSession)
   const setTranslateSourceText = useTranslateStore((s) => s.setSourceText)
   const openImageEditor = useImageEditStore((s) => s.openEditor)
+  const forkSessionFromMessage = useChatStore((s) => s.forkSessionFromMessage)
   const [collapsed, setCollapsed] = useState(false)
+  const [forking, setForking] = useState(false)
   const sessionModelBinding = useChatStore(
     useShallow((state) => {
       const sessionIndex = sessionId ? state.sessionsById[sessionId] : undefined
@@ -2013,6 +2020,27 @@ export function AssistantMessage({
     }
   }, [plainText, t])
 
+  const handleFork = useCallback(async (): Promise<void> => {
+    if (!sessionId || !msgId || forking) return
+
+    setForking(true)
+    try {
+      const forkedSessionId = await forkSessionFromMessage(sessionId, msgId)
+      if (!forkedSessionId) {
+        toast.error(t('messageActions.forkFailed'))
+        return
+      }
+
+      navigateToSession(forkedSessionId)
+      toast.success(t('messageActions.forked'))
+    } catch (error) {
+      console.error('[AssistantMessage] Failed to fork session:', error)
+      toast.error(t('messageActions.forkFailed'))
+    } finally {
+      setForking(false)
+    }
+  }, [forkSessionFromMessage, forking, msgId, navigateToSession, sessionId, t])
+
   const handleDeleteAndRegenerate = useCallback((): void => {
     if (!showRetry || !onRetry || !msgId) return
     onRetry(msgId)
@@ -2156,6 +2184,7 @@ export function AssistantMessage({
         )}
         {!isStreaming &&
           (plainText ||
+            (isLiveMode && sessionId && msgId) ||
             (msgId && onDelete) ||
             (devMode && debugInfo) ||
             (showContinue && onContinue) ||
@@ -2170,6 +2199,14 @@ export function AssistantMessage({
                   onClick={handleCopy}
                 />
               )}
+              {isLiveMode && sessionId && msgId ? (
+                <ActionIconButton
+                  label={t('messageActions.fork')}
+                  icon={<GitFork className="size-3.5" />}
+                  onClick={() => void handleFork()}
+                  disabled={forking}
+                />
+              ) : null}
               {showContinue && onContinue ? (
                 <Tooltip>
                   <TooltipTrigger asChild>
@@ -2217,6 +2254,12 @@ export function AssistantMessage({
                     <Copy className="size-4" />
                     {t('action.copy', { ns: 'common' })}
                   </DropdownMenuItem>
+                  {isLiveMode && sessionId && msgId ? (
+                    <DropdownMenuItem onSelect={() => void handleFork()} disabled={forking}>
+                      <GitFork className="size-4" />
+                      {t('messageActions.fork')}
+                    </DropdownMenuItem>
+                  ) : null}
                   <DropdownMenuItem onSelect={handleTranslate} disabled={!plainText.trim()}>
                     <Languages className="size-4" />
                     {t('messageActions.translate')}

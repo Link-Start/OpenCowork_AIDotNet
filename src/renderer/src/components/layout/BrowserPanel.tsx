@@ -7,22 +7,24 @@ import { useTranslation } from 'react-i18next'
 import { BUILTIN_BROWSER_PARTITION } from '../../../../shared/browser-plugin'
 
 export function BrowserPanel({
-  sessionId = null
+  sessionId = null,
+  projectId = null
 }: {
   sessionId?: string | null
+  projectId?: string | null
 }): React.JSX.Element {
   const { t } = useTranslation('layout')
 
-  const storedUrl = useUIStore((s) => s.getBrowserState(sessionId).url)
+  const storedUrl = useUIStore((s) => s.getBrowserState(sessionId, projectId).url)
   const setBrowserUrl = useUIStore((s) => s.setBrowserUrl)
-  const loading = useUIStore((s) => s.getBrowserState(sessionId).loading)
+  const loading = useUIStore((s) => s.getBrowserState(sessionId, projectId).loading)
   const setBrowserLoading = useUIStore((s) => s.setBrowserLoading)
   const setBrowserPageTitle = useUIStore((s) => s.setBrowserPageTitle)
-  const canGoBack = useUIStore((s) => s.getBrowserState(sessionId).canGoBack)
+  const canGoBack = useUIStore((s) => s.getBrowserState(sessionId, projectId).canGoBack)
   const setBrowserCanGoBack = useUIStore((s) => s.setBrowserCanGoBack)
-  const canGoForward = useUIStore((s) => s.getBrowserState(sessionId).canGoForward)
+  const canGoForward = useUIStore((s) => s.getBrowserState(sessionId, projectId).canGoForward)
   const setBrowserCanGoForward = useUIStore((s) => s.setBrowserCanGoForward)
-  const errorInfo = useUIStore((s) => s.getBrowserState(sessionId).errorInfo)
+  const errorInfo = useUIStore((s) => s.getBrowserState(sessionId, projectId).errorInfo)
   const setBrowserErrorInfo = useUIStore((s) => s.setBrowserErrorInfo)
   const setBrowserWebviewRef = useUIStore((s) => s.setBrowserWebviewRef)
 
@@ -35,12 +37,12 @@ export function BrowserPanel({
   }
 
   useEffect(() => {
-    setBrowserWebviewRef(webviewRef, sessionId)
+    setBrowserWebviewRef(webviewRef, sessionId, projectId)
     return () => {
-      setBrowserWebviewRef(null, sessionId)
-      setBrowserLoading(false, sessionId)
+      setBrowserWebviewRef(null, sessionId, projectId)
+      setBrowserLoading(false, sessionId, projectId)
     }
-  }, [sessionId, setBrowserLoading, setBrowserWebviewRef])
+  }, [projectId, sessionId, setBrowserLoading, setBrowserWebviewRef])
 
   useEffect(() => {
     setInputUrl(storedUrl)
@@ -64,11 +66,12 @@ export function BrowserPanel({
           desc: reason ?? 'Blocked by browser plugin domain rules',
           url
         },
-        sessionId
+        sessionId,
+        projectId
       )
-      setBrowserLoading(false, sessionId)
+      setBrowserLoading(false, sessionId, projectId)
     },
-    [sessionId, setBrowserErrorInfo, setBrowserLoading]
+    [projectId, sessionId, setBrowserErrorInfo, setBrowserLoading]
   )
 
   const canNavigateTo = useCallback(
@@ -88,14 +91,14 @@ export function BrowserPanel({
       setInputUrl(normalized)
       if (!canNavigateTo(normalized)) return
       setCommittedUrl(normalized)
-      setBrowserUrl(normalized, sessionId)
-      setBrowserErrorInfo(null, sessionId)
+      setBrowserUrl(normalized, sessionId, projectId)
+      setBrowserErrorInfo(null, sessionId, projectId)
       const wv = webviewRef.current
       if (wv) {
         wv.src = normalized
       }
     },
-    [canNavigateTo, sessionId, setBrowserUrl, setBrowserErrorInfo]
+    [canNavigateTo, projectId, sessionId, setBrowserUrl, setBrowserErrorInfo]
   )
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>): void => {
@@ -105,47 +108,48 @@ export function BrowserPanel({
   const updateNavState = useCallback(() => {
     const wv = webviewRef.current
     if (!wv) return
-    setBrowserCanGoBack(wv.canGoBack(), sessionId)
-    setBrowserCanGoForward(wv.canGoForward(), sessionId)
-  }, [sessionId, setBrowserCanGoBack, setBrowserCanGoForward])
+    setBrowserCanGoBack(wv.canGoBack(), sessionId, projectId)
+    setBrowserCanGoForward(wv.canGoForward(), sessionId, projectId)
+  }, [projectId, sessionId, setBrowserCanGoBack, setBrowserCanGoForward])
 
   useEffect(() => {
     const wv = webviewRef.current
     if (!wv) return
 
     const onStartLoading = (): void => {
-      setBrowserLoading(true, sessionId)
-      setBrowserErrorInfo(null, sessionId)
+      setBrowserLoading(true, sessionId, projectId)
+      setBrowserErrorInfo(null, sessionId, projectId)
     }
 
     const onStopLoading = (): void => {
-      setBrowserLoading(false, sessionId)
+      setBrowserLoading(false, sessionId, projectId)
       updateNavState()
     }
 
     const onNavigate = (e: Electron.DidNavigateEvent): void => {
       setInputUrl(e.url)
-      setBrowserUrl(e.url, sessionId)
+      setBrowserUrl(e.url, sessionId, projectId)
       updateNavState()
     }
 
     const onNavigateInPage = (e: Electron.DidNavigateInPageEvent): void => {
       setInputUrl(e.url)
-      setBrowserUrl(e.url, sessionId)
+      setBrowserUrl(e.url, sessionId, projectId)
       updateNavState()
     }
 
     const onTitleUpdated = (e: Electron.PageTitleUpdatedEvent): void => {
-      setBrowserPageTitle(e.title, sessionId)
+      setBrowserPageTitle(e.title, sessionId, projectId)
     }
 
     const onFailLoad = (e: Electron.DidFailLoadEvent): void => {
       if (!e.isMainFrame || e.errorCode === -3) return
       setBrowserErrorInfo(
         { code: e.errorCode, desc: e.errorDescription, url: e.validatedURL },
-        sessionId
+        sessionId,
+        projectId
       )
-      setBrowserLoading(false, sessionId)
+      setBrowserLoading(false, sessionId, projectId)
     }
 
     const onWillNavigate = (e: Event & { url?: string; preventDefault: () => void }): void => {
@@ -181,6 +185,7 @@ export function BrowserPanel({
   }, [
     canNavigateTo,
     committedUrl,
+    projectId,
     sessionId,
     setBrowserLoading,
     setBrowserErrorInfo,
@@ -287,7 +292,7 @@ export function BrowserPanel({
                 variant="outline"
                 size="sm"
                 onClick={() => {
-                  setBrowserErrorInfo(null, sessionId)
+                  setBrowserErrorInfo(null, sessionId, projectId)
                   webviewRef.current?.reload()
                 }}
               >

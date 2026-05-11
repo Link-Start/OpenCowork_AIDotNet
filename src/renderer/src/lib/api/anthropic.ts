@@ -9,6 +9,7 @@ import type {
 } from './types'
 import { ipcStreamRequest, maskHeaders } from '../ipc/api-stream'
 import { registerProvider } from './provider'
+import { normalizeMessagesForAnthropicToolReplay } from '../../../../shared/anthropic-tool-replay'
 import { sanitizeMessagesForToolReplay } from '../tools/tool-input-sanitizer'
 
 function buildAnthropicCacheControl(): { type: 'ephemeral' } {
@@ -730,51 +731,7 @@ class AnthropicProvider implements APIProvider {
   }
 
   private normalizeMessagesForAnthropic(messages: UnifiedMessage[]): UnifiedMessage[] {
-    const normalized: UnifiedMessage[] = []
-    const validToolUseIds = new Set<string>()
-
-    for (let index = 0; index < messages.length; index += 1) {
-      const message = messages[index]
-      if (message.role === 'system' || typeof message.content === 'string') {
-        normalized.push(message)
-        continue
-      }
-
-      const blocks = message.content as ContentBlock[]
-      const replayableToolUseIds = new Set(
-        blocks
-          .filter(
-            (block): block is Extract<ContentBlock, { type: 'tool_use' }> =>
-              block.type === 'tool_use'
-          )
-          .map((block) => block.id)
-      )
-
-      const pairedToolUseIds = new Set<string>()
-      if (replayableToolUseIds.size > 0) {
-        const nextMessage = messages[index + 1]
-        if (nextMessage?.role === 'user' && Array.isArray(nextMessage.content)) {
-          for (const block of nextMessage.content as ContentBlock[]) {
-            if (block.type !== 'tool_result' || !replayableToolUseIds.has(block.toolUseId)) continue
-            pairedToolUseIds.add(block.toolUseId)
-            validToolUseIds.add(block.toolUseId)
-          }
-        }
-      }
-
-      const sanitizedBlocks = blocks.filter((block) => {
-        if (block.type === 'tool_use') {
-          return pairedToolUseIds.has(block.id)
-        }
-        if (block.type !== 'tool_result') return true
-        return validToolUseIds.has(block.toolUseId)
-      })
-
-      if (sanitizedBlocks.length === 0) continue
-      normalized.push({ ...message, content: sanitizedBlocks })
-    }
-
-    return normalized
+    return normalizeMessagesForAnthropicToolReplay(messages)
   }
 
   formatTools(

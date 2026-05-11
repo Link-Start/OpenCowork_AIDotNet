@@ -509,6 +509,7 @@ interface ChatStore {
   clearSessionPromptSnapshot: (sessionId: string) => void
   clearSessionMessages: (sessionId: string) => void
   duplicateSession: (sessionId: string) => Promise<string | null>
+  forkSessionFromMessage: (sessionId: string, messageId: string) => Promise<string | null>
   togglePinSession: (sessionId: string) => void
   restoreSession: (session: Session) => void
   importSession: (session: Session, projectId?: string | null) => string
@@ -782,11 +783,19 @@ function rowToMessage(row: MessageRow): UnifiedMessage {
 
 function cloneImportedMessages(messages: UnifiedMessage[] | undefined): UnifiedMessage[] {
   const source = Array.isArray(messages) ? messages : []
-  const cloned = JSON.parse(JSON.stringify(source)) as UnifiedMessage[]
-  return cloned.map((message) => ({
-    ...message,
-    id: nanoid()
-  }))
+  return cloneMessagesForNewSession(source)
+}
+
+function cloneMessagesForNewSession(messages: UnifiedMessage[]): UnifiedMessage[] {
+  const cloned = JSON.parse(JSON.stringify(messages)) as UnifiedMessage[]
+  return cloned.map((message) => {
+    const next = {
+      ...message,
+      id: nanoid()
+    }
+    delete next._revision
+    return next
+  })
 }
 
 function trimSessionMessageWindow(session: Session): void {
@@ -2627,10 +2636,7 @@ export const useChatStore = create<ChatStore>()(
       if (!source) return null
       const newId = nanoid()
       const now = Date.now()
-      const clonedMessages: UnifiedMessage[] =
-        typeof structuredClone === 'function'
-          ? structuredClone(source.messages)
-          : JSON.parse(JSON.stringify(source.messages))
+      const clonedMessages = cloneMessagesForNewSession(source.messages)
       const newSession: Session = {
         id: newId,
         title: `${source.title} (copy)`,
@@ -2658,6 +2664,54 @@ export const useChatStore = create<ChatStore>()(
           state.activeProjectId = source.projectId
         }
       })
+      dbCreateSession(newSession)
+      clonedMessages.forEach((msg, i) => dbAddMessage(newId, msg, i))
+      useTaskStore.getState().clearTasks()
+      usePlanStore.getState().setActivePlan(null)
+      useUIStore.getState().syncSessionScopedState(newId)
+      return newId
+    },
+
+    forkSessionFromMessage: async (sessionId, messageId) => {
+      await get().loadSessionMessages(sessionId)
+      const source = get().sessions.find((s) => s.id === sessionId)
+      if (!source) return null
+
+      const messageIndex = source.messages.findIndex((message) => message.id === messageId)
+      if (messageIndex < 0) return null
+
+      const newId = nanoid()
+      const now = Date.now()
+      const clonedMessages = cloneMessagesForNewSession(source.messages.slice(0, messageIndex + 1))
+      const newSession: Session = {
+        id: newId,
+        title: source.title,
+        icon: source.icon,
+        mode: source.mode,
+        messages: clonedMessages,
+        messageCount: clonedMessages.length,
+        messagesLoaded: true,
+        loadedRangeStart: 0,
+        loadedRangeEnd: clonedMessages.length,
+        lastKnownMessageCount: clonedMessages.length,
+        createdAt: now,
+        updatedAt: now,
+        projectId: source.projectId,
+        workingFolder: source.workingFolder,
+        sshConnectionId: source.sshConnectionId,
+        providerId: source.providerId,
+        modelId: source.modelId
+      }
+
+      set((state) => {
+        state.sessions.push(newSession)
+        syncSessionsById(state)
+        state.activeSessionId = newId
+        if (source.projectId) {
+          state.activeProjectId = source.projectId
+        }
+      })
+
       dbCreateSession(newSession)
       clonedMessages.forEach((msg, i) => dbAddMessage(newId, msg, i))
       useTaskStore.getState().clearTasks()
