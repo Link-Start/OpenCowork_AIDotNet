@@ -16,13 +16,19 @@ import {
   Wrench,
   Brain,
   ShieldCheck,
-  Archive
+  Archive,
+  Target,
+  Pause,
+  Play,
+  Pencil,
+  X
 } from 'lucide-react'
 import { Button } from '@renderer/components/ui/button'
 import { Separator } from '@renderer/components/ui/separator'
 import { useChatStore } from '@renderer/stores/chat-store'
 import { useSettingsStore } from '@renderer/stores/settings-store'
 import { useAgentStore } from '@renderer/stores/agent-store'
+import { useGoalStore } from '@renderer/stores/goal-store'
 import { useProviderStore } from '@renderer/stores/provider-store'
 import { useTeamStore } from '@renderer/stores/team-store'
 import { useUIStore } from '@renderer/stores/ui-store'
@@ -36,6 +42,13 @@ import {
 } from '@renderer/lib/format-tokens'
 import { ipcClient } from '@renderer/lib/ipc/ipc-client'
 import { useChatActions } from '@renderer/hooks/use-chat-actions'
+import { toast } from 'sonner'
+import {
+  formatGoalElapsedSeconds,
+  formatGoalTokens,
+  goalStatusLabel,
+  validateGoalObjective
+} from '@renderer/lib/agent/goal-context'
 import {
   getCompressionTriggerTokens,
   getEffectiveContextWindow,
@@ -142,6 +155,9 @@ export function ContextPanel(): React.JSX.Element {
     activeProjectId,
     workingFolder
   })
+  const goal = useGoalStore((s) =>
+    activeSessionId ? s.goalsBySession[activeSessionId] : undefined
+  )
 
   const handleSelectFolder = async (): Promise<void> => {
     if (!resolvedProjectId) return
@@ -155,6 +171,39 @@ export function ContextPanel(): React.JSX.Element {
       workingFolder: result.path,
       sshConnectionId: null
     })
+  }
+
+  const handleGoalStatus = async (status: 'active' | 'paused'): Promise<void> => {
+    if (!activeSessionId) return
+    const result = await useGoalStore.getState().updateGoal(activeSessionId, { status })
+    if (!result.success) {
+      toast.error('Goal update failed', { description: result.error })
+    }
+  }
+
+  const handleGoalClear = async (): Promise<void> => {
+    if (!activeSessionId) return
+    const result = await useGoalStore.getState().clearGoal(activeSessionId)
+    if (!result.success) {
+      toast.error('Goal clear failed', { description: result.error })
+    }
+  }
+
+  const handleGoalEdit = async (): Promise<void> => {
+    if (!activeSessionId || !goal) return
+    const next = window.prompt('Edit goal objective', goal.objective)
+    if (next === null) return
+    const validation = validateGoalObjective(next)
+    if (validation) {
+      toast.error('Goal objective invalid', { description: validation })
+      return
+    }
+    const result = await useGoalStore
+      .getState()
+      .updateGoal(activeSessionId, { objective: next.trim() })
+    if (!result.success) {
+      toast.error('Goal edit failed', { description: result.error })
+    }
   }
 
   return (
@@ -224,6 +273,74 @@ export function ContextPanel(): React.JSX.Element {
       {activeSession && (
         <>
           <Separator />
+          {goal && (
+            <>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <h4 className="flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                    <Target className="size-3.5" />
+                    Goal
+                  </h4>
+                  <span className="rounded border border-border/70 px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                    {goalStatusLabel(goal.status)}
+                  </span>
+                </div>
+                <p className="line-clamp-4 break-words text-xs leading-relaxed text-foreground/85">
+                  {goal.objective}
+                </p>
+                <div className="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+                  <span>{formatGoalElapsedSeconds(goal.timeUsedSeconds)}</span>
+                  <span>
+                    {goal.tokenBudget !== undefined && goal.tokenBudget !== null
+                      ? `${formatGoalTokens(goal.tokensUsed)} / ${formatGoalTokens(goal.tokenBudget)} tokens`
+                      : `${formatGoalTokens(goal.tokensUsed)} tokens`}
+                  </span>
+                </div>
+                <div className="flex items-center gap-1">
+                  {goal.status === 'active' ? (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="size-7"
+                      title="Pause goal"
+                      onClick={() => void handleGoalStatus('paused')}
+                    >
+                      <Pause className="size-3.5" />
+                    </Button>
+                  ) : goal.status === 'paused' ? (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="size-7"
+                      title="Resume goal"
+                      onClick={() => void handleGoalStatus('active')}
+                    >
+                      <Play className="size-3.5" />
+                    </Button>
+                  ) : null}
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="size-7"
+                    title="Edit goal"
+                    onClick={() => void handleGoalEdit()}
+                  >
+                    <Pencil className="size-3.5" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="size-7 text-destructive/80"
+                    title="Clear goal"
+                    onClick={() => void handleGoalClear()}
+                  >
+                    <X className="size-3.5" />
+                  </Button>
+                </div>
+              </div>
+              <Separator />
+            </>
+          )}
           <div className="space-y-2">
             <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
               {t('context.sessionInfo')}

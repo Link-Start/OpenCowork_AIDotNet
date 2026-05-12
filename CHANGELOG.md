@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.93] - 2026-05-12
+
+### Added
+
+- Added persistent session goals with database storage, sync events, and goal-aware runtime tools for `get_goal`, `create_goal`, and `update_goal`.
+- Added a built-in `/goal` slash command plus context-panel controls to view, edit, pause, resume, and clear the active session goal.
+- Added goal usage accounting and auto-continue support so active goals can carry across turns with token/time tracking and budget limits.
+- Added task-page controls to abort active runs and render cron plans with second-level precision in the calendar view.
+
+### Changed
+
+- Improved cron schedule validation to use `node-cron`, normalize cron expressions and time zones, and reject invalid schedules before enabling them.
+- Reduced task-run loading to the visible calendar window so the task page scales better with larger run histories.
+- Hardened OpenAI-compatible chat streaming with a pre-stream OAuth refresh retry for 401/403 failures and better handling for providers that delay terminal SSE chunks.
+
+### Fixed
+
+- Fixed Claude base64 image payloads on the cron Anthropic path to send `media_type` instead of `mediaType`.
+- Fixed scheduled-state propagation for cron run completion payloads and broadened OAuth expiry parsing for providers that return nonstandard `expires_at` fields.
+
 ## [0.9.92] - 2026-05-12
 
 ### Added

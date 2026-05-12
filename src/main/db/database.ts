@@ -304,6 +304,25 @@ export function getDb(): Database.Database {
       ON messages(session_id, sort_order);
   `)
 
+  // --- Session Goals table ---
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS session_goals (
+      session_id TEXT PRIMARY KEY NOT NULL,
+      goal_id TEXT NOT NULL,
+      objective TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('active', 'paused', 'budget_limited', 'complete')),
+      token_budget INTEGER,
+      tokens_used INTEGER NOT NULL DEFAULT 0,
+      time_used_seconds INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_session_goals_status
+      ON session_goals(status);
+  `)
+
   // Migration: add icon column if missing
   try {
     db.exec(`ALTER TABLE sessions ADD COLUMN icon TEXT`)
