@@ -16,7 +16,6 @@ import {
   icons
 } from 'lucide-react'
 import Markdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
 import { Badge } from '@renderer/components/ui/badge'
 import { Button } from '@renderer/components/ui/button'
 import { HoverCard, HoverCardContent, HoverCardTrigger } from '@renderer/components/ui/hover-card'
@@ -29,6 +28,10 @@ import { decodeStructuredToolResult } from '@renderer/lib/tools/tool-result-form
 import type { ToolCallState } from '@renderer/lib/agent/types'
 import type { ToolResultContent, UnifiedMessage } from '@renderer/lib/api/types'
 import { cn } from '@renderer/lib/utils'
+import {
+  MARKDOWN_REHYPE_PLUGINS,
+  MARKDOWN_REMARK_PLUGINS
+} from '@renderer/lib/preview/viewers/markdown-components'
 
 const DAY_MS = 24 * 60 * 60 * 1000
 const EMPTY_SESSION_MESSAGES: UnifiedMessage[] = []
@@ -803,7 +806,12 @@ function SubAgentRunCard({
                 </div>
                 {summary ? (
                   <div className="prose prose-sm max-w-none prose-headings:text-foreground prose-p:text-foreground/90 prose-li:text-foreground/90 prose-strong:text-foreground dark:prose-invert">
-                    <Markdown remarkPlugins={[remarkGfm]}>{summary}</Markdown>
+                    <Markdown
+                      remarkPlugins={MARKDOWN_REMARK_PLUGINS}
+                      rehypePlugins={MARKDOWN_REHYPE_PLUGINS}
+                    >
+                      {summary}
+                    </Markdown>
                   </div>
                 ) : (
                   <div className="text-sm text-muted-foreground/70">

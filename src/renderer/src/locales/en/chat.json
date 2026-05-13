@@ -271,6 +271,8 @@
     "start": "Start",
     "clear": "Clear",
     "save": "Save",
+    "show": "Show",
+    "hide": "Hide",
     "managerTitle": "Goal Manager",
     "statusLabel": "Status",
     "tokensLabel": "Tokens",

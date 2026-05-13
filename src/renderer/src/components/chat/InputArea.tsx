@@ -2267,7 +2267,6 @@ export function InputArea({
       )}
 
       <div className="mx-auto w-full max-w-[820px]">
-        {draftSessionId && <GoalSessionBar sessionId={draftSessionId} />}
         {projectScoped && draftSessionId && <InlineStepsPanel sessionId={draftSessionId} />}
         <div
           ref={containerRef}
@@ -2987,6 +2986,7 @@ export function InputArea({
             </div>
           </div>
         </div>
+        {draftSessionId && <GoalSessionBar sessionId={draftSessionId} />}
       </div>
     </div>
   )

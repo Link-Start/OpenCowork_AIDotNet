@@ -271,6 +271,8 @@
     "start": "启动",
     "clear": "清空",
     "save": "保存",
+    "show": "查看",
+    "hide": "收起",
     "managerTitle": "Goal 管理器",
     "statusLabel": "状态",
     "tokensLabel": "Tokens",

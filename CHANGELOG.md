@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.94] - 2026-05-13
+
+### Changed
+
+- Unified Markdown rendering across changelog, preview/detail panels, system command cards, team notifications, plan reviews, context compression summaries, AskUserQuestion previews, sub-agent reports, and thinking blocks by reusing the shared preview Markdown plugin set.
+- Moved the session goal bar below the chat input and made it collapsible, with localized show/hide controls to keep the input area calmer while preserving quick goal access.
+
+### Fixed
+
+- Fixed completed team workflows leaving an empty assistant placeholder stuck at the bottom as "thinking" after all team tasks were marked complete.
+
 ## [0.9.93] - 2026-05-12
 
 ### Added

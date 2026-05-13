@@ -4,6 +4,7 @@ import type { TFunction } from 'i18next'
 import { toast } from 'sonner'
 import {
   AlertTriangle,
+  ChevronUp,
   CheckCircle2,
   Clock,
   Pause,
@@ -554,71 +555,103 @@ export function GoalSessionBar({
   const { t } = useTranslation('chat')
   const { goal, events } = useGoalSession(sessionId)
   const actions = useGoalActions(sessionId, goal)
+  const [expanded, setExpanded] = React.useState(false)
+
+  React.useEffect(() => {
+    setExpanded(false)
+  }, [sessionId])
 
   if (!sessionId) return null
 
   return (
     <>
-      <div
-        className={cn(
-          'mb-2 rounded-lg border border-border/70 bg-background/80 px-3 py-2 shadow-sm',
-          className
-        )}
-      >
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="flex min-w-0 flex-1 items-center gap-2">
+      <div className={cn('mt-2 flex flex-col items-end gap-2', className)}>
+        {!expanded ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-7 max-w-full gap-1.5 rounded-full px-2.5 text-xs text-muted-foreground hover:text-foreground"
+            aria-expanded={false}
+            title={t('goal.show')}
+            onClick={() => setExpanded(true)}
+          >
             <Target className="size-3.5 shrink-0 text-primary/80" />
-            <span className="shrink-0 text-xs font-medium">{t('goal.title')}</span>
+            <span className="shrink-0 font-medium">{t('goal.title')}</span>
             <GoalStatusBadge status={goal?.status} />
+            <span className="shrink-0 text-[11px]">{t('goal.show')}</span>
+          </Button>
+        ) : (
+          <div className="w-full rounded-lg border border-border/70 bg-background/80 px-3 py-2 shadow-sm">
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="flex min-w-0 flex-1 items-center gap-2">
+                <Target className="size-3.5 shrink-0 text-primary/80" />
+                <span className="shrink-0 text-xs font-medium">{t('goal.title')}</span>
+                <GoalStatusBadge status={goal?.status} />
+                {goal ? (
+                  <span className="min-w-0 truncate text-xs text-foreground/85">
+                    {goal.objective}
+                  </span>
+                ) : (
+                  <span className="text-xs text-muted-foreground">{t('goal.noSessionGoal')}</span>
+                )}
+              </div>
+              <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                <Clock className="size-3" />
+                <GoalUsageLine goal={goal} />
+              </div>
+              <div className="flex items-center gap-1">
+                {goal?.status === 'active' ? (
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="size-7"
+                    title={t('goal.pause')}
+                    onClick={() => void actions.setGoalStatus('paused')}
+                  >
+                    <Pause className="size-3.5" />
+                  </Button>
+                ) : goal && goal.status !== 'complete' ? (
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="size-7"
+                    title={t('goal.resume')}
+                    onClick={() => void actions.setGoalStatus('active')}
+                  >
+                    <Play className="size-3.5" />
+                  </Button>
+                ) : null}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 gap-1.5 px-2 text-xs"
+                  title={goal ? t('goal.manage') : t('goal.set')}
+                  onClick={actions.openManager}
+                >
+                  {goal ? <Pencil className="size-3.5" /> : <Plus className="size-3.5" />}
+                  {goal ? t('goal.manage') : t('goal.set')}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-7"
+                  title={t('goal.hide')}
+                  aria-label={t('goal.hide')}
+                  aria-expanded={true}
+                  onClick={() => setExpanded(false)}
+                >
+                  <ChevronUp className="size-3.5" />
+                </Button>
+              </div>
+            </div>
             {goal ? (
-              <span className="min-w-0 truncate text-xs text-foreground/85">{goal.objective}</span>
-            ) : (
-              <span className="text-xs text-muted-foreground">{t('goal.noSessionGoal')}</span>
-            )}
-          </div>
-          <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-            <Clock className="size-3" />
-            <GoalUsageLine goal={goal} />
-          </div>
-          <div className="flex items-center gap-1">
-            {goal?.status === 'active' ? (
-              <Button
-                variant="ghost"
-                size="icon"
-                className="size-7"
-                title={t('goal.pause')}
-                onClick={() => void actions.setGoalStatus('paused')}
-              >
-                <Pause className="size-3.5" />
-              </Button>
-            ) : goal && goal.status !== 'complete' ? (
-              <Button
-                variant="ghost"
-                size="icon"
-                className="size-7"
-                title={t('goal.resume')}
-                onClick={() => void actions.setGoalStatus('active')}
-              >
-                <Play className="size-3.5" />
-              </Button>
+              <div className="mt-2">
+                <LatestGoalNotice events={events} />
+              </div>
             ) : null}
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-7 gap-1.5 px-2 text-xs"
-              title={goal ? t('goal.manage') : t('goal.set')}
-              onClick={actions.openManager}
-            >
-              {goal ? <Pencil className="size-3.5" /> : <Plus className="size-3.5" />}
-              {goal ? t('goal.manage') : t('goal.set')}
-            </Button>
           </div>
-        </div>
-        {goal ? (
-          <div className="mt-2">
-            <LatestGoalNotice events={events} />
-          </div>
-        ) : null}
+        )}
       </div>
       <GoalManagerDialog goal={goal} events={events} actions={actions} />
     </>
