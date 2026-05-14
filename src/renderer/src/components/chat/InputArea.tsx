@@ -122,7 +122,6 @@ import { ipcClient } from '@renderer/lib/ipc/ipc-client'
 import { cn } from '@renderer/lib/utils'
 import { resolveProjectMemoryTextFile } from '@renderer/lib/agent/memory-files'
 import { isProjectSession, workspaceContextAvailable } from '@renderer/lib/session-scope'
-import { InlineStepsPanel } from '@renderer/components/cowork/StepsPanel'
 import { GoalSessionBar } from '@renderer/components/goal/GoalSessionControls'
 
 interface ContextRingProps {
@@ -266,7 +265,9 @@ function ContextRing({
             <p className="text-muted-foreground">
               {isCompressing
                 ? t('input.compressingContext', { defaultValue: 'Compressing context...' })
-                : t('input.doubleClickCompressContext', { defaultValue: 'Double-click to compress context' })}
+                : t('input.doubleClickCompressContext', {
+                    defaultValue: 'Double-click to compress context'
+                  })}
             </p>
           )}
         </div>
@@ -2032,7 +2033,9 @@ export function InputArea({
       case 'skipped':
         return t('input.contextCompressionSkipped', { defaultValue: 'No compression needed' })
       case 'blocked':
-        return t('input.contextCompressionBlocked', { defaultValue: 'Compression temporarily unavailable' })
+        return t('input.contextCompressionBlocked', {
+          defaultValue: 'Compression temporarily unavailable'
+        })
       case 'failed':
         return t('input.contextCompressionFailed', { defaultValue: 'Compression failed' })
       default:
@@ -2267,7 +2270,6 @@ export function InputArea({
       )}
 
       <div className="mx-auto w-full max-w-[820px]">
-        {projectScoped && draftSessionId && <InlineStepsPanel sessionId={draftSessionId} />}
         <div
           ref={containerRef}
           className={cn(
@@ -2363,7 +2365,9 @@ export function InputArea({
                               <div className="space-y-2">
                                 <div className="flex items-center justify-between gap-2">
                                   <span className="text-[10px] font-medium text-muted-foreground">
-                                    {t('input.queueEditing', { defaultValue: 'Edit queued message' })}
+                                    {t('input.queueEditing', {
+                                      defaultValue: 'Edit queued message'
+                                    })}
                                   </span>
                                   <div className="flex items-center gap-1">
                                     <Button
@@ -2504,11 +2508,14 @@ export function InputArea({
                 <AlertDialogContent size="sm">
                   <AlertDialogHeader>
                     <AlertDialogTitle>
-                      {t('input.queueClearConfirmTitle', { defaultValue: 'Clear queued messages?' })}
+                      {t('input.queueClearConfirmTitle', {
+                        defaultValue: 'Clear queued messages?'
+                      })}
                     </AlertDialogTitle>
                     <AlertDialogDescription>
                       {t('input.queueClearConfirmDesc', {
-                        defaultValue: 'This will delete {{count}} pending messages in the current session.',
+                        defaultValue:
+                          'This will delete {{count}} pending messages in the current session.',
                         count: queuedMessages.length
                       })}
                     </AlertDialogDescription>
@@ -2706,7 +2713,8 @@ export function InputArea({
                 placeholder={
                   pendingReviewPlanId
                     ? t('input.placeholderPlanReview', {
-                        defaultValue: 'Enter suggestions for this plan, or click the card above to implement it...'
+                        defaultValue:
+                          'Enter suggestions for this plan, or click the card above to implement it...'
                       })
                     : (effectivePlaceholder ??
                       (shouldRecommendInit
@@ -2758,13 +2766,17 @@ export function InputArea({
                       >
                         <FolderOpen className="size-3.5 shrink-0" />
                         <span>
-                          {t('input.noWorkingFolderSelected', { defaultValue: 'Please select a working directory first' })}
+                          {t('input.noWorkingFolderSelected', {
+                            defaultValue: 'Please select a working directory first'
+                          })}
                         </span>
                       </button>
                     ) : fileSearchLoading ? (
                       <div className="flex items-center gap-2 px-2 py-3 text-xs text-muted-foreground">
                         <Spinner className="size-3.5" />
-                        <span>{t('input.loadingFiles', { defaultValue: 'Searching files...' })}</span>
+                        <span>
+                          {t('input.loadingFiles', { defaultValue: 'Searching files...' })}
+                        </span>
                       </div>
                     ) : fileSearchResults.length === 0 ? (
                       <div className="px-2 py-3 text-xs text-muted-foreground">
@@ -2808,7 +2820,9 @@ export function InputArea({
                 <div className="composer-flyout absolute inset-x-0 bottom-full z-30 mb-2 overflow-hidden rounded-[18px]">
                   <div className="composer-flyout-header flex items-center gap-2 px-3 py-2 text-[11px] text-muted-foreground">
                     <Command className="size-3.5" />
-                    <span>{t('input.commandSuggestions', { defaultValue: 'Command suggestions' })}</span>
+                    <span>
+                      {t('input.commandSuggestions', { defaultValue: 'Command suggestions' })}
+                    </span>
                     <span className="composer-status-pill ml-auto rounded-full px-1.5 py-0.5 text-[10px]">
                       /{slashQuery ?? ''}
                     </span>
@@ -2817,7 +2831,9 @@ export function InputArea({
                     {slashCommandsLoading ? (
                       <div className="flex items-center gap-2 px-2 py-3 text-xs text-muted-foreground">
                         <Spinner className="size-3.5" />
-                        <span>{t('input.loadingCommands', { defaultValue: 'Loading commands...' })}</span>
+                        <span>
+                          {t('input.loadingCommands', { defaultValue: 'Loading commands...' })}
+                        </span>
                       </div>
                     ) : filteredSlashCommands.length === 0 ? (
                       <div className="px-2 py-3 text-xs text-muted-foreground">
