@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.96] - 2026-05-15
+
+### Changed
+
+- Reworked session-scoped agent runtime state so sub-agent panels, orchestration views, tool calls, background processes, and detached session surfaces stay tied to the correct active session.
+- Refined the sub-agent execution detail panel and sidebar layout with shared scoped selectors, localized sidebar labels, and cleaner runtime detail routing.
+- Improved live sub-agent transcripts with revision-aware rendering and live tool-call state mapping so streaming assistant text and tool results refresh in place.
+
+### Fixed
+
+- Fixed pending assistant placeholders so completed orchestration data does not keep a blank assistant row visible after the primary run has stopped.
+- Fixed streaming transcript handling for assistant messages that arrive before static transcript analysis includes them.
+- Marked unfinished thinking blocks complete and mirrored live tool-use blocks into sub-agent transcripts when tool-call events arrive.
+
 ## [0.9.95] - 2026-05-14
 
 ### Added

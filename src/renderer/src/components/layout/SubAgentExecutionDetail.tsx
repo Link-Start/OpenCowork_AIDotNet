@@ -20,8 +20,58 @@ import {
   findSubAgentInSelection,
   selectSessionScopedAgentState
 } from '@renderer/lib/agent/session-scoped-agent-state'
+import type { ToolCallState } from '@renderer/lib/agent/types'
 
 const EMPTY_SESSION_MESSAGES: UnifiedMessage[] = []
+
+function buildSubAgentDetailSignature(agent: SubAgentState | null): string {
+  if (!agent) return 'empty'
+  const currentAssistant = agent.currentAssistantMessageId
+    ? agent.transcript.find((message) => message.id === agent.currentAssistantMessageId)
+    : null
+  const lastMessage = agent.transcript[agent.transcript.length - 1]
+  return [
+    agent.toolUseId,
+    agent.sessionId ?? '',
+    agent.isRunning ? '1' : '0',
+    String(agent.iteration),
+    String(agent.toolCalls.length),
+    String(agent.transcript.length),
+    agent.currentAssistantMessageId ?? '',
+    String(currentAssistant?._revision ?? ''),
+    lastMessage?.id ?? '',
+    String(lastMessage?._revision ?? ''),
+    agent.toolCalls
+      .map(
+        (toolCall) =>
+          `${toolCall.id}:${toolCall.name}:${toolCall.status}:${toolCall.completedAt ?? ''}:${
+            toolCall.error ?? ''
+          }:${getToolResultLength(toolCall.output)}`
+      )
+      .join('|'),
+    String(agent.completedAt ?? ''),
+    agent.reportStatus ?? '',
+    agent.report
+  ].join('::')
+}
+
+function getToolResultLength(content?: ToolResultContent): number {
+  if (!content) return 0
+  if (typeof content === 'string') return content.length
+  return content.reduce((total, block) => {
+    if (block.type === 'text') return total + block.text.length
+    return total + (block.source.data?.length ?? block.source.url?.length ?? 0)
+  }, 0)
+}
+
+function buildLiveToolCallMap(toolCalls: ToolCallState[]): Map<string, ToolCallState> | null {
+  if (toolCalls.length === 0) return null
+  const map = new Map<string, ToolCallState>()
+  for (const toolCall of toolCalls) {
+    map.set(toolCall.id, toolCall)
+  }
+  return map
+}
 
 function extractToolResultText(content?: ToolResultContent): string {
   if (!content) return ''
@@ -238,15 +288,28 @@ export function SubAgentExecutionDetail({
       }
     })
   )
-  const sessionAgentSelection = useAgentStore((s) =>
-    selectSessionScopedAgentState(s, resolvedSessionId)
+  const agentDetail = useAgentStore(
+    useShallow((s) => {
+      const sessionAgentSelection = selectSessionScopedAgentState(s, resolvedSessionId)
+      const scopedAgent = findSubAgentInSelection(sessionAgentSelection, toolUseId)
+      const fallbackAgent =
+        toolUseId && !scopedAgent
+          ? (s.activeSubAgents[toolUseId] ??
+            s.completedSubAgents[toolUseId] ??
+            s.subAgentHistory.find((entry) => entry.toolUseId === toolUseId) ??
+            null)
+          : null
+      const agent = scopedAgent ?? fallbackAgent
+      return {
+        agent,
+        signature: scopedAgent
+          ? sessionAgentSelection.signature
+          : buildSubAgentDetailSignature(fallbackAgent)
+      }
+    })
   )
   const executedToolCalls = useAgentStore((s) => s.executedToolCalls)
-
-  const agent = React.useMemo(
-    () => findSubAgentInSelection(sessionAgentSelection, toolUseId),
-    [sessionAgentSelection, toolUseId]
-  )
+  const agent = agentDetail.agent
 
   const fallbackReportText = React.useMemo(() => {
     const fromMessages = getFallbackReportFromMessages(toolUseId, sessionMessages)
@@ -279,6 +342,13 @@ export function SubAgentExecutionDetail({
 
   const transcript = agent?.transcript ?? fallbackTranscript
   const streamingMessageId = agent?.currentAssistantMessageId ?? null
+  const transcriptRevisionKey = agent
+    ? agentDetail.signature
+    : fallbackTranscript.map((message) => `${message.id}:${message._revision ?? 0}`).join('|')
+  const liveToolCallMap = React.useMemo(
+    () => (agent ? buildLiveToolCallMap(agent.toolCalls) : null),
+    [agent, transcriptRevisionKey]
+  )
 
   if (!agent && transcript.length === 0) {
     return (
@@ -304,6 +374,9 @@ export function SubAgentExecutionDetail({
         messages={transcript}
         streamingMessageId={streamingMessageId}
         className="h-full min-h-0 flex-1"
+        revisionKey={transcriptRevisionKey}
+        sessionId={resolvedSessionId}
+        liveToolCallMap={liveToolCallMap}
       />
       {agent ? (
         <SubAgentConversationInput

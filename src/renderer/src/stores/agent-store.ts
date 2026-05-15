@@ -191,7 +191,7 @@ function trimToolCallArray(toolCalls: ToolCallState[]): void {
 
 type SubAgentReportStatus = 'pending' | 'submitted' | 'retrying' | 'fallback' | 'missing'
 
-interface SubAgentState {
+export interface SubAgentState {
   name: string
   displayName?: string
   toolUseId: string
@@ -276,7 +276,16 @@ function finalizeAssistantMessage(
   if (providerResponseId) {
     message.providerResponseId = providerResponseId
   }
-  if (usage || providerResponseId) {
+  let changed = Boolean(usage || providerResponseId)
+  if (Array.isArray(message.content)) {
+    for (const block of message.content) {
+      if (block.type === 'thinking' && !block.completedAt) {
+        block.completedAt = Date.now()
+        changed = true
+      }
+    }
+  }
+  if (changed) {
     bumpMessageRevision(message)
   }
   if (clearCurrentMessage) {
@@ -863,8 +872,6 @@ function applyProcessOutputEvent(
 
   return next
 }
-
-export type { SubAgentState }
 
 export interface AgentFileSnapshot {
   exists: boolean
@@ -1913,6 +1920,15 @@ export const useAgentStore = create<AgentStore>()(
               const sa = state.activeSubAgents[id] ?? state.completedSubAgents[id]
               if (sa) {
                 const normalizedToolCall = normalizeToolCall(event.toolCall)
+                upsertToolUseBlockInSubAgent(sa, {
+                  type: 'tool_use',
+                  id: normalizedToolCall.id,
+                  name: normalizedToolCall.name,
+                  input: normalizedToolCall.input,
+                  ...(normalizedToolCall.extraContent
+                    ? { extraContent: normalizedToolCall.extraContent }
+                    : {})
+                })
                 const existing = sa.toolCalls.find((t) => t.id === normalizedToolCall.id)
                 if (existing) {
                   Object.assign(existing, normalizedToolCall)

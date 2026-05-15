@@ -719,12 +719,17 @@ function MessageListInner(props: MessageListProps): React.JSX.Element {
     isSessionRunning: isAgentSessionRunning,
     hasOrchestrationData: hasAgentOrchestrationData
   } = useAgentStore((s) => selectSessionScopedAgentState(s, activeSessionId, { mode: 'coarse' }))
+  const primarySessionStatus = useAgentStore((s) =>
+    activeSessionId ? (s.runningSessions[activeSessionId] ?? null) : null
+  )
   const {
     activeTeam,
     teamHistory,
     isTeamRunning,
     hasOrchestrationData: hasTeamOrchestrationData
   } = useTeamStore((s) => selectSessionScopedTeamState(s, activeSessionId))
+  const isPrimarySessionRunning =
+    primarySessionStatus === 'running' || primarySessionStatus === 'retrying'
   const isSessionRunning = isAgentSessionRunning || isTeamRunning || hasStreamingMessage
   const hasSessionOrchestrationData = React.useMemo(
     () => hasAgentOrchestrationData || hasTeamOrchestrationData,
@@ -829,7 +834,7 @@ function MessageListInner(props: MessageListProps): React.JSX.Element {
     if (streamingMessageId || isSessionRunning) return null
     return tailToolExecutionState?.assistantMessageId ?? null
   }, [isSessionRunning, streamingMessageId, tailToolExecutionState])
-  const showPendingAssistantRow = isSessionRunning && !streamingMessageId
+  const showPendingAssistantRow = (isPrimarySessionRunning || isTeamRunning) && !streamingMessageId
   const pendingAssistantRowKey = React.useMemo(
     () =>
       `${PENDING_ASSISTANT_ROW_KEY_PREFIX}:${activeSessionId ?? currentActiveSessionId ?? 'active'}`,
