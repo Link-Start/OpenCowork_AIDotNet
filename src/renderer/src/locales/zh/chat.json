@@ -768,6 +768,8 @@
     "conflictedHint": "有些文件在 Agent 结束后又被改动过，所以只回滚了安全可恢复的文件。",
     "runSummary": "共改动 {{files}} 个文件 · {{pending}} 个待处理",
     "filesChanged": "{{count}} 个文件已更改",
+    "showFileList": "显示 {{count}} 个变更文件",
+    "hideFileList": "收起文件列表",
     "openReview": "查看更改",
     "reviewPanelTitle": "更改审查",
     "reviewPanelDescription": "右侧查看本次运行涉及的文件列表，左侧切换文件，逐个确认或撤回改动。",

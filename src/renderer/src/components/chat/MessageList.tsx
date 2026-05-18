@@ -11,7 +11,7 @@ import {
   ArrowDown,
   MessagesSquare
 } from 'lucide-react'
-import type { ToolResultContent, UnifiedMessage } from '@renderer/lib/api/types'
+import type { ContentBlock, ToolResultContent, UnifiedMessage } from '@renderer/lib/api/types'
 import { useChatStore } from '@renderer/stores/chat-store'
 import { useUIStore } from '@renderer/stores/ui-store'
 import { useAgentStore } from '@renderer/stores/agent-store'
@@ -81,6 +81,16 @@ interface AskUserQuestionPresence {
   toolUseId: string
 }
 
+function getMessageToolUseIds(message: UnifiedMessage): string[] {
+  if (!Array.isArray(message.content)) return []
+  return message.content
+    .filter((block): block is Extract<ContentBlock, { type: 'tool_use' }> => {
+      return block.type === 'tool_use'
+    })
+    .map((block) => block.id)
+    .filter(Boolean)
+}
+
 interface UserMessageLocatorItem {
   id: string
   index: number
@@ -115,6 +125,8 @@ type TeamStoreSnapshot = ReturnType<typeof useTeamStore.getState>
 interface MessageRowProps {
   message: UnifiedMessage
   sessionId?: string | null
+  sessionAssistantMessageIds?: readonly string[]
+  sessionToolUseIds?: readonly string[]
   isStreaming: boolean
   isLastUserMessage: boolean
   isLastAssistantMessage: boolean
@@ -213,6 +225,18 @@ function areStringSetsEqual(a?: Set<string>, b?: Set<string>): boolean {
 
   for (const value of a) {
     if (!b.has(value)) return false
+  }
+
+  return true
+}
+
+function areStringArraysEqual(a?: readonly string[], b?: readonly string[]): boolean {
+  if (a === b) return true
+  if (!a || !b) return !a && !b
+  if (a.length !== b.length) return false
+
+  for (let index = 0; index < a.length; index += 1) {
+    if (a[index] !== b[index]) return false
   }
 
   return true
@@ -387,6 +411,8 @@ function areMessageRowPropsEqual(prev: MessageRowProps, next: MessageRowProps): 
   return (
     prev.message === next.message &&
     prev.sessionId === next.sessionId &&
+    areStringArraysEqual(prev.sessionAssistantMessageIds, next.sessionAssistantMessageIds) &&
+    areStringArraysEqual(prev.sessionToolUseIds, next.sessionToolUseIds) &&
     prev.isStreaming === next.isStreaming &&
     prev.isLastUserMessage === next.isLastUserMessage &&
     prev.isLastAssistantMessage === next.isLastAssistantMessage &&
@@ -622,6 +648,8 @@ function UserMessageLocator({
 const MessageRow = React.memo(function MessageRow({
   message,
   sessionId,
+  sessionAssistantMessageIds,
+  sessionToolUseIds,
   isStreaming,
   isLastUserMessage,
   isLastAssistantMessage,
@@ -654,6 +682,8 @@ const MessageRow = React.memo(function MessageRow({
         message={message}
         messageId={message.id}
         sessionId={sessionId}
+        sessionAssistantMessageIds={sessionAssistantMessageIds}
+        sessionToolUseIds={sessionToolUseIds}
         isStreaming={isStreaming}
         isLastUserMessage={isLastUserMessage}
         isLastAssistantMessage={isLastAssistantMessage}
@@ -858,6 +888,24 @@ function MessageListInner(props: MessageListProps): React.JSX.Element {
         continueAssistantMessageId
       ),
     [continueAssistantMessageId, streamingMessageId, transcriptAnalysis]
+  )
+  const assistantChangeTargets = React.useMemo(
+    () =>
+      messages
+        .filter((message) => message.role === 'assistant')
+        .map((message) => ({
+          messageId: message.id,
+          toolUseIds: getMessageToolUseIds(message)
+        })),
+    [messages]
+  )
+  const sessionAssistantMessageIds = React.useMemo(
+    () => assistantChangeTargets.map((target) => target.messageId),
+    [assistantChangeTargets]
+  )
+  const sessionToolUseIds = React.useMemo(
+    () => Array.from(new Set(assistantChangeTargets.flatMap((target) => target.toolUseIds))),
+    [assistantChangeTargets]
   )
 
   const userLocatorItems = React.useMemo<UserMessageLocatorItem[]>(() => {
@@ -1340,6 +1388,8 @@ function MessageListInner(props: MessageListProps): React.JSX.Element {
                 key={row.messageId}
                 message={message}
                 sessionId={targetSessionId}
+                sessionAssistantMessageIds={sessionAssistantMessageIds}
+                sessionToolUseIds={sessionToolUseIds}
                 isStreaming={streamingMessageId === row.messageId}
                 isLastUserMessage={row.isLastUserMessage}
                 isLastAssistantMessage={row.isLastAssistantMessage}
@@ -1393,6 +1443,8 @@ function MessageListInner(props: MessageListProps): React.JSX.Element {
                   key={row.key}
                   message={pendingAssistantMessage}
                   sessionId={targetSessionId}
+                  sessionAssistantMessageIds={sessionAssistantMessageIds}
+                  sessionToolUseIds={sessionToolUseIds}
                   isStreaming
                   isLastUserMessage={false}
                   isLastAssistantMessage
@@ -1424,6 +1476,8 @@ function MessageListInner(props: MessageListProps): React.JSX.Element {
                 key={row.key}
                 message={message}
                 sessionId={targetSessionId}
+                sessionAssistantMessageIds={sessionAssistantMessageIds}
+                sessionToolUseIds={sessionToolUseIds}
                 isStreaming={isStreaming}
                 isLastUserMessage={isLastUserMessage}
                 isLastAssistantMessage={isLastAssistantMessage}

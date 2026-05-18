@@ -768,6 +768,8 @@
     "conflictedHint": "Some files changed after the agent finished, so only safe files were reverted.",
     "runSummary": "{{files}} files changed · {{pending}} pending",
     "filesChanged": "{{count}} files changed",
+    "showFileList": "Show {{count}} changed files",
+    "hideFileList": "Hide file list",
     "openReview": "Review changes",
     "reviewPanelTitle": "Change review",
     "reviewPanelDescription": "Review the changed files from this run, switch between them, and confirm or undo each change.",

@@ -21,6 +21,8 @@ interface MessageItemProps {
   message: UnifiedMessage
   messageId: string
   sessionId?: string | null
+  sessionAssistantMessageIds?: readonly string[]
+  sessionToolUseIds?: readonly string[]
   isStreaming?: boolean
   isLastUserMessage?: boolean
   isLastAssistantMessage?: boolean
@@ -97,6 +99,8 @@ function MessageItemInner({
   message,
   messageId,
   sessionId,
+  sessionAssistantMessageIds,
+  sessionToolUseIds,
   isStreaming,
   isLastUserMessage,
   isLastAssistantMessage,
@@ -151,6 +155,8 @@ function MessageItemInner({
             toolResults={toolResults}
             msgId={message.id}
             sessionId={sessionId}
+            sessionAssistantMessageIds={sessionAssistantMessageIds}
+            sessionToolUseIds={sessionToolUseIds}
             showRetry
             showContinue={showContinue && isLastAssistantMessage}
             isLastAssistantMessage={isLastAssistantMessage}
@@ -225,6 +231,18 @@ function areStringSetsEqual(a?: Set<string>, b?: Set<string>): boolean {
   return true
 }
 
+function areStringArraysEqual(a?: readonly string[], b?: readonly string[]): boolean {
+  if (a === b) return true
+  if (!a || !b) return !a && !b
+  if (a.length !== b.length) return false
+
+  for (let index = 0; index < a.length; index += 1) {
+    if (a[index] !== b[index]) return false
+  }
+
+  return true
+}
+
 function areRequestRetryStatesEqual(
   a?: RequestRetryState | null,
   b?: RequestRetryState | null
@@ -246,6 +264,8 @@ function areEqual(prev: MessageItemProps, next: MessageItemProps): boolean {
     return (
       prev.messageId === next.messageId &&
       prev.sessionId === next.sessionId &&
+      areStringArraysEqual(prev.sessionAssistantMessageIds, next.sessionAssistantMessageIds) &&
+      areStringArraysEqual(prev.sessionToolUseIds, next.sessionToolUseIds) &&
       prev.isStreaming === next.isStreaming &&
       prev.isLastUserMessage === next.isLastUserMessage &&
       prev.isLastAssistantMessage === next.isLastAssistantMessage &&
@@ -286,6 +306,8 @@ function areEqual(prev: MessageItemProps, next: MessageItemProps): boolean {
   return (
     prev.messageId === next.messageId &&
     prev.sessionId === next.sessionId &&
+    areStringArraysEqual(prev.sessionAssistantMessageIds, next.sessionAssistantMessageIds) &&
+    areStringArraysEqual(prev.sessionToolUseIds, next.sessionToolUseIds) &&
     prev.isStreaming === next.isStreaming &&
     prev.isLastUserMessage === next.isLastUserMessage &&
     prev.isLastAssistantMessage === next.isLastAssistantMessage &&

@@ -123,6 +123,8 @@ interface AssistantMessageProps {
   liveToolCallMap?: Map<string, ToolCallState> | null
   msgId?: string
   sessionId?: string | null
+  sessionAssistantMessageIds?: readonly string[]
+  sessionToolUseIds?: readonly string[]
   showRetry?: boolean
   showContinue?: boolean
   isLastAssistantMessage?: boolean
@@ -1188,6 +1190,50 @@ function resolveRunChangeSetForMessage(
   return bestMatch?.changeSet
 }
 
+function changeSetBelongsToSession(
+  changeSet: AgentRunChangeSet,
+  sessionId?: string | null
+): boolean {
+  if (!sessionId) return false
+  return (
+    changeSet.sessionId === sessionId ||
+    changeSet.changes.some((change) => change.sessionId === sessionId)
+  )
+}
+
+function resolveLatestSessionRunChangeSet(
+  changesByRunId: Record<string, AgentRunChangeSet>,
+  sessionId?: string | null,
+  assistantMessageIds: readonly string[] = [],
+  toolUseIds: readonly string[] = []
+): AgentRunChangeSet | undefined {
+  if (!sessionId) return undefined
+
+  const uniqueChangeSets = new Map<string, AgentRunChangeSet>()
+  for (const changeSet of Object.values(changesByRunId)) {
+    uniqueChangeSets.set(changeSet.runId, changeSet)
+  }
+
+  const assistantMessageIdSet = new Set(assistantMessageIds)
+  const toolUseIdSet = new Set(toolUseIds)
+  let latest: AgentRunChangeSet | undefined
+  for (const changeSet of uniqueChangeSets.values()) {
+    const matchesSession =
+      changeSetBelongsToSession(changeSet, sessionId) ||
+      assistantMessageIdSet.has(changeSet.assistantMessageId) ||
+      assistantMessageIdSet.has(changeSet.runId) ||
+      changeSet.changes.some((change) => change.toolUseId && toolUseIdSet.has(change.toolUseId))
+
+    if (!matchesSession) continue
+    if (aggregateDisplayableRunFileChanges(changeSet.changes).length === 0) continue
+    if (!latest || changeSet.updatedAt > latest.updatedAt) {
+      latest = changeSet
+    }
+  }
+
+  return latest
+}
+
 export function AssistantMessage({
   content,
   isStreaming,
@@ -1196,6 +1242,8 @@ export function AssistantMessage({
   liveToolCallMap,
   msgId,
   sessionId,
+  sessionAssistantMessageIds = [],
+  sessionToolUseIds = [],
   showRetry,
   showContinue,
   isLastAssistantMessage,
@@ -1301,17 +1349,34 @@ export function AssistantMessage({
       )
       .map((block) => block.id)
   }, [normalizedContent])
-  const runChangeSet = useAgentStore((s) =>
-    isLiveMode
-      ? resolveRunChangeSetForMessage(s.runChangesByRunId, msgId, sessionId, messageToolUseIds)
+  const runChangeSet = useAgentStore((s) => {
+    if (!isLiveMode) return undefined
+
+    const directChangeSet = resolveRunChangeSetForMessage(
+      s.runChangesByRunId,
+      msgId,
+      sessionId,
+      messageToolUseIds
+    )
+
+    if (directChangeSet) return directChangeSet
+
+    return isLastAssistantMessage
+      ? resolveLatestSessionRunChangeSet(
+          s.runChangesByRunId,
+          sessionId,
+          sessionAssistantMessageIds,
+          sessionToolUseIds
+        )
       : undefined
-  )
+  })
   const visibleRunChanges = useMemo(
     () => (runChangeSet ? aggregateDisplayableRunFileChanges(runChangeSet.changes) : []),
     [runChangeSet]
   )
   const visibleRunChangeCount = visibleRunChanges.length
   const refreshRunChanges = useAgentStore((s) => s.refreshRunChanges)
+  const refreshSessionRunChanges = useAgentStore((s) => s.refreshSessionRunChanges)
 
   const liveToolCallIds = useMemo(() => {
     if (!isStreaming) return []
@@ -1408,7 +1473,26 @@ export function AssistantMessage({
       ...(sessionId ? { sessionId } : {}),
       ...(messageToolUseIds.length > 0 ? { toolUseIds: messageToolUseIds } : {})
     })
-  }, [isLiveMode, isStreaming, messageToolUseIds, msgId, refreshRunChanges, sessionId])
+    if (isLastAssistantMessage && sessionId) {
+      void refreshSessionRunChanges(sessionId, {
+        ...(sessionAssistantMessageIds.length > 0
+          ? { assistantMessageIds: [...sessionAssistantMessageIds] }
+          : {}),
+        ...(sessionToolUseIds.length > 0 ? { toolUseIds: [...sessionToolUseIds] } : {})
+      })
+    }
+  }, [
+    isLastAssistantMessage,
+    isLiveMode,
+    isStreaming,
+    messageToolUseIds,
+    msgId,
+    refreshRunChanges,
+    refreshSessionRunChanges,
+    sessionAssistantMessageIds,
+    sessionId,
+    sessionToolUseIds
+  ])
 
   const renderItems = useMemo(() => {
     if (!normalizedContent) return []
