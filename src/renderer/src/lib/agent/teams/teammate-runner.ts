@@ -26,6 +26,8 @@ import { requestPlanApproval, stopWorkerPlanApprovalPoller } from './plan-approv
 import { buildTeammateAddendum } from './prompts'
 import { startWorkerInboxPoller, stopWorkerInboxPoller } from './worker-inbox'
 import { DEFAULT_SUB_AGENT_MAX_TURNS, resolveSubAgentMaxTurns } from '../sub-agents/limits'
+import { refreshSubAgentRegistry } from '../sub-agents/catalog'
+import { refreshSkillTools } from '../../tools/skill-tool'
 
 const teammateAbortControllers = new Map<string, AbortController>()
 const teammateShutdownRequested = new Set<string>()
@@ -141,6 +143,9 @@ export async function runTeammate(options: RunTeammateOptions): Promise<void> {
   const sessionId = team?.sessionId
   const abortController = new AbortController()
   teammateAbortControllers.set(memberId, abortController)
+
+  await refreshSkillTools()
+  await refreshSubAgentRegistry()
 
   const leadOnlyTools = new Set(['TeamCreate', 'TeamDelete', 'TaskCreate'])
   const baseToolDefs = toolRegistry.getDefinitions().filter((tool) => !leadOnlyTools.has(tool.name))

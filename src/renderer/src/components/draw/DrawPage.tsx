@@ -48,6 +48,7 @@ import {
   SelectTrigger,
   SelectValue
 } from '@renderer/components/ui/select'
+import { Switch } from '@renderer/components/ui/switch'
 import { Textarea } from '@renderer/components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@renderer/components/ui/tooltip'
 import { ImageGenerationErrorCard } from '@renderer/components/chat/ImageGenerationErrorCard'
@@ -192,6 +193,8 @@ function formatTime(timestamp: number): string {
 
 const GIF_GRID_SIZE = 768
 const GIF_FRAME_DURATION_MS = 120
+const DRAW_STREAM_STORAGE_KEY = 'open-cowork.draw.stream-preview-enabled'
+const DRAW_STREAM_PARTIAL_IMAGES = 2
 
 type GenerateTarget = {
   provider: AIProvider
@@ -215,6 +218,39 @@ interface GifPostprocessResult {
 
 function isOpenAiTransparentProvider(config: ProviderConfig): boolean {
   return config.type === 'openai-images'
+}
+
+function supportsImageStreamPreview(config?: ProviderConfig | null): boolean {
+  if (!config) return false
+  return (
+    config.type === 'openai-images' ||
+    (config.type === 'openai-responses' && config.responsesImageGeneration?.enabled !== false)
+  )
+}
+
+function withImageStreamPreviewConfig(config: ProviderConfig, enabled: boolean): ProviderConfig {
+  if (!supportsImageStreamPreview(config)) return config
+
+  const imageGenerationStream = {
+    enabled,
+    partialImages: enabled ? DRAW_STREAM_PARTIAL_IMAGES : 0
+  }
+
+  if (config.type === 'openai-responses') {
+    return {
+      ...config,
+      imageGenerationStream,
+      responsesImageGeneration: {
+        ...(config.responsesImageGeneration ?? {}),
+        partialImages: imageGenerationStream.partialImages
+      }
+    }
+  }
+
+  return {
+    ...config,
+    imageGenerationStream
+  }
 }
 
 function buildGifProviderConfig(config: ProviderConfig): ProviderConfig {
@@ -249,6 +285,22 @@ function attachmentToPersistableReference(image: ImageAttachment | null): {
   return {
     dataUrl: image.dataUrl,
     mediaType: image.mediaType
+  }
+}
+
+function readStoredStreamPreviewEnabled(): boolean {
+  try {
+    return window.localStorage.getItem(DRAW_STREAM_STORAGE_KEY) === 'true'
+  } catch {
+    return false
+  }
+}
+
+function writeStoredStreamPreviewEnabled(enabled: boolean): void {
+  try {
+    window.localStorage.setItem(DRAW_STREAM_STORAGE_KEY, enabled ? 'true' : 'false')
+  } catch {
+    // Storage can be unavailable in unusual embedded contexts; the switch still works in memory.
   }
 }
 
@@ -292,7 +344,9 @@ function buildGifPrompt(
 
 function buildGifRunSummary(input: DrawGifInputSnapshot): string {
   const parts = [
-    input.inputMode === 'reference' ? 'Reference image mode' : `Character: ${input.characterPrompt}`,
+    input.inputMode === 'reference'
+      ? 'Reference image mode'
+      : `Character: ${input.characterPrompt}`,
     input.inputMode === 'reference' && input.characterPrompt
       ? `Character notes: ${input.characterPrompt}`
       : null,
@@ -344,6 +398,10 @@ function getRunStatusLabel(
     return t('drawPage.processingGif')
   }
 
+  if (run.previewImage) {
+    return t('drawPage.streamingPreviewStatus')
+  }
+
   return t('drawPage.generating')
 }
 
@@ -364,6 +422,7 @@ export function DrawPage(): React.JSX.Element {
   const [gifCharacterPrompt, setGifCharacterPrompt] = useState('')
   const [gifStylePrompt, setGifStylePrompt] = useState('')
   const [gifActionPrompt, setGifActionPrompt] = useState('')
+  const [streamPreviewEnabled, setStreamPreviewEnabled] = useState(readStoredStreamPreviewEnabled)
   const runs = useDrawStore((state) => state.runs)
   const commitRuns = useDrawStore((state) => state.commitRuns)
   const updateStoredRun = useDrawStore((state) => state.updateRun)
@@ -425,6 +484,10 @@ export function DrawPage(): React.JSX.Element {
     setActiveImageModel,
     setActiveImageProvider
   ])
+
+  useEffect(() => {
+    writeStoredStreamPreviewEnabled(streamPreviewEnabled)
+  }, [streamPreviewEnabled])
 
   useEffect(() => {
     let cancelled = false
@@ -495,6 +558,13 @@ export function DrawPage(): React.JSX.Element {
     [providers, selectedModel, selectedProvider]
   )
 
+  const selectedGenerationTarget = useMemo(
+    () => resolveGenerationTarget(),
+    [resolveGenerationTarget]
+  )
+  const streamPreviewSupported = supportsImageStreamPreview(selectedGenerationTarget?.config)
+  const streamPreviewActive = streamPreviewEnabled && streamPreviewSupported
+
   const resetGifForm = useCallback((): void => {
     setGifInputMode('text')
     setGifCharacterPrompt('')
@@ -529,10 +599,10 @@ export function DrawPage(): React.JSX.Element {
   }, [])
 
   const updateRun = useCallback(
-    (runId: string, updater: (run: DrawRun) => DrawRun): void => {
+    (runId: string, updater: (run: DrawRun) => DrawRun, options?: { persist?: boolean }): void => {
       const nextRun = updateStoredRun(runId, updater)
 
-      if (nextRun) {
+      if (nextRun && options?.persist !== false) {
         persistRun(nextRun)
       }
     },
@@ -544,6 +614,8 @@ export function DrawPage(): React.JSX.Element {
       updateRun(runId, (run) => ({
         ...run,
         isGenerating: false,
+        previewImage: undefined,
+        previewImageIndex: undefined,
         error:
           run.error || run.images.length > 0
             ? run.error
@@ -798,7 +870,10 @@ export function DrawPage(): React.JSX.Element {
     commitRuns((current) => [newRun, ...current])
     persistRun(newRun)
 
-    const provider = createProvider(target.config)
+    const streamPreviewEnabledForRun =
+      streamPreviewEnabled && supportsImageStreamPreview(target.config)
+    const providerConfig = withImageStreamPreviewConfig(target.config, streamPreviewEnabledForRun)
+    const provider = createProvider(providerConfig)
     const requestStartedAt = Date.now()
     const content: string | ContentBlock[] =
       attachedImages.length > 0
@@ -824,16 +899,32 @@ export function DrawPage(): React.JSX.Element {
       for await (const event of provider.sendMessage(
         messages,
         [],
-        target.config,
+        providerConfig,
         controller.signal
       )) {
         switch (event.type) {
+          case 'image_generation_partial': {
+            const image = normalizeImageSrc(event)
+            if (!image) break
+            updateRun(
+              runId,
+              (run) => ({
+                ...run,
+                previewImage: image,
+                previewImageIndex: event.partialImageIndex
+              }),
+              { persist: false }
+            )
+            break
+          }
           case 'image_generated': {
             const image = normalizeImageSrc(event)
             if (!image) break
             updateRun(runId, (run) => ({
               ...run,
               images: [...run.images, image],
+              previewImage: undefined,
+              previewImageIndex: undefined,
               error: null
             }))
             break
@@ -843,6 +934,8 @@ export function DrawPage(): React.JSX.Element {
             if (!imageError) break
             updateRun(runId, (run) => ({
               ...run,
+              previewImage: undefined,
+              previewImageIndex: undefined,
               error: {
                 code: imageError.code,
                 message: imageError.message
@@ -853,6 +946,8 @@ export function DrawPage(): React.JSX.Element {
           case 'error': {
             updateRun(runId, (run) => ({
               ...run,
+              previewImage: undefined,
+              previewImageIndex: undefined,
               error: {
                 code: 'unknown',
                 message: event.error?.message || t('drawPage.unknownError')
@@ -885,6 +980,8 @@ export function DrawPage(): React.JSX.Element {
       if (!controller.signal.aborted) {
         updateRun(runId, (run) => ({
           ...run,
+          previewImage: undefined,
+          previewImageIndex: undefined,
           error: {
             code: 'unknown',
             message: error instanceof Error ? error.message : String(error)
@@ -895,6 +992,8 @@ export function DrawPage(): React.JSX.Element {
       if (controller.signal.aborted) {
         updateRun(runId, (run) => ({
           ...run,
+          previewImage: undefined,
+          previewImageIndex: undefined,
           error:
             run.error || run.images.length > 0
               ? run.error
@@ -914,6 +1013,7 @@ export function DrawPage(): React.JSX.Element {
     persistRun,
     prompt,
     resolveGenerationTarget,
+    streamPreviewEnabled,
     t,
     updateRun,
     commitRuns
@@ -994,10 +1094,16 @@ export function DrawPage(): React.JSX.Element {
       commitRuns((current) => [newRun, ...current])
       persistRun(newRun)
 
-      const providerConfig = buildGifProviderConfig(target.config)
+      const baseProviderConfig = buildGifProviderConfig(target.config)
+      const streamPreviewEnabledForRun =
+        streamPreviewEnabled && supportsImageStreamPreview(baseProviderConfig)
+      const providerConfig = withImageStreamPreviewConfig(
+        baseProviderConfig,
+        streamPreviewEnabledForRun
+      )
       const createMessages = (): UnifiedMessage[] => {
         const promptText = buildGifPrompt(snapshot, {
-          transparentBackgroundRequested: isOpenAiTransparentProvider(providerConfig)
+          transparentBackgroundRequested: isOpenAiTransparentProvider(baseProviderConfig)
         })
         const content: string | ContentBlock[] =
           snapshot.inputMode === 'reference' && snapshot.referenceImage
@@ -1037,6 +1143,20 @@ export function DrawPage(): React.JSX.Element {
           controller.signal
         )) {
           switch (event.type) {
+            case 'image_generation_partial': {
+              const image = normalizeImageSrc(event)
+              if (!image) break
+              updateRun(
+                runId,
+                (run) => ({
+                  ...run,
+                  previewImage: image,
+                  previewImageIndex: event.partialImageIndex
+                }),
+                { persist: false }
+              )
+              break
+            }
             case 'image_generated': {
               if (processed) break
               const image = normalizeImageSrc(event)
@@ -1045,6 +1165,8 @@ export function DrawPage(): React.JSX.Element {
               updateRun(runId, (run) => ({
                 ...run,
                 error: null,
+                previewImage: undefined,
+                previewImageIndex: undefined,
                 meta: run.meta?.gif
                   ? {
                       ...run.meta,
@@ -1089,6 +1211,8 @@ export function DrawPage(): React.JSX.Element {
               if (!imageError) break
               updateRun(runId, (run) => ({
                 ...run,
+                previewImage: undefined,
+                previewImageIndex: undefined,
                 error: {
                   code: imageError.code,
                   message: imageError.message
@@ -1099,6 +1223,8 @@ export function DrawPage(): React.JSX.Element {
             case 'error': {
               updateRun(runId, (run) => ({
                 ...run,
+                previewImage: undefined,
+                previewImageIndex: undefined,
                 error: {
                   code: 'unknown',
                   message: event.error?.message || t('drawPage.unknownError')
@@ -1130,6 +1256,8 @@ export function DrawPage(): React.JSX.Element {
         if (!controller.signal.aborted) {
           updateRun(runId, (run) => ({
             ...run,
+            previewImage: undefined,
+            previewImageIndex: undefined,
             error: {
               code: 'unknown',
               message: error instanceof Error ? error.message : String(error)
@@ -1140,6 +1268,8 @@ export function DrawPage(): React.JSX.Element {
         if (controller.signal.aborted) {
           updateRun(runId, (run) => ({
             ...run,
+            previewImage: undefined,
+            previewImageIndex: undefined,
             error:
               run.error || run.images.length > 0
                 ? run.error
@@ -1159,6 +1289,7 @@ export function DrawPage(): React.JSX.Element {
       persistRun,
       postprocessGifGrid,
       resolveGenerationTarget,
+      streamPreviewEnabled,
       t,
       updateRun,
       commitRuns
@@ -1403,6 +1534,31 @@ export function DrawPage(): React.JSX.Element {
               <span className="text-muted-foreground/40">/</span>
               {selectedModel && <ModelIcon icon={selectedModel.icon} size={14} />}
               <span className="truncate">{selectedModel?.name}</span>
+            </div>
+
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-xl border bg-muted/20 px-3 py-2">
+              <div className="flex items-center gap-2">
+                <Switch
+                  size="sm"
+                  checked={streamPreviewActive}
+                  disabled={isGenerating || !streamPreviewSupported}
+                  onCheckedChange={setStreamPreviewEnabled}
+                  aria-label={t('drawPage.streamMode')}
+                />
+                <span className="text-xs font-medium text-foreground">
+                  {t('drawPage.streamMode')}
+                </span>
+              </div>
+              <span
+                className={cn(
+                  'text-xs',
+                  streamPreviewSupported ? 'text-muted-foreground' : 'text-amber-600'
+                )}
+              >
+                {streamPreviewSupported
+                  ? t('drawPage.streamModeHint', { count: DRAW_STREAM_PARTIAL_IMAGES })
+                  : t('drawPage.streamUnsupported')}
+              </span>
             </div>
 
             {drawMode === 'gif' && (
@@ -1847,6 +2003,28 @@ export function DrawPage(): React.JSX.Element {
                             <Download className="size-3.5" />
                             {t('drawPage.downloadGrid')}
                           </Button>
+                        </div>
+                      )}
+
+                      {run.isGenerating && run.previewImage && (
+                        <div className="mt-4">
+                          <div className="mb-2 flex items-center gap-2">
+                            <span className="text-xs font-medium text-muted-foreground">
+                              {t('drawPage.realtimePreview')}
+                            </span>
+                            {typeof run.previewImageIndex === 'number' && (
+                              <Badge variant="outline" className="text-[10px] font-normal">
+                                {t('drawPage.previewIndex', {
+                                  index: run.previewImageIndex + 1
+                                })}
+                              </Badge>
+                            )}
+                          </div>
+                          <ImagePreview
+                            src={run.previewImage.src}
+                            alt={run.prompt}
+                            filePath={run.previewImage.filePath}
+                          />
                         </div>
                       )}
 

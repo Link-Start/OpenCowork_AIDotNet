@@ -17,6 +17,10 @@ import {
   summarizeOpenAITextAndImages,
   supportsOpenAIImageParts
 } from '../../../../shared/openai-message-support'
+import {
+  extractOpenAIChatToolCallFragments,
+  type OpenAIChatToolCallArgumentsSource
+} from '../../../../shared/openai-chat-completions'
 
 function resolveHeaderTemplate(value: string, config: ProviderConfig): string {
   return value
@@ -113,13 +117,34 @@ function buildTokenUsage(data: any, config: ProviderConfig): TokenUsage {
 }
 
 function getGoogleThoughtSignature(
-  toolCall: { extra_content?: { google?: { thought_signature?: string } } } | null | undefined
+  extraContent: Record<string, unknown> | null | undefined
 ): string | undefined {
-  const signature = toolCall?.extra_content?.google?.thought_signature
+  const google = extraContent?.google
+  const signature =
+    google && typeof google === 'object'
+      ? (google as { thought_signature?: unknown }).thought_signature
+      : undefined
   return typeof signature === 'string' && signature.trim() ? signature : undefined
 }
 
 const OPENAI_COMPAT_TERMINAL_GRACE_MS = 1500
+
+function mergeOpenAIChatToolArguments(
+  buffer: { args: string },
+  argumentsText: string,
+  source?: OpenAIChatToolCallArgumentsSource
+): string {
+  if (source === 'message') {
+    const previousArgs = buffer.args
+    buffer.args = argumentsText
+    return argumentsText.startsWith(previousArgs)
+      ? argumentsText.slice(previousArgs.length)
+      : argumentsText
+  }
+
+  buffer.args += argumentsText
+  return argumentsText
+}
 
 function buildOpenAIChatImagePart(block: Extract<ContentBlock, { type: 'image' }>): unknown | null {
   const url =
@@ -279,6 +304,7 @@ class OpenAIChatProvider implements APIProvider {
         id: string
         name: string
         args: string
+        started: boolean
         extraContent?: { google?: { thought_signature?: string } }
       }
     >()
@@ -380,68 +406,61 @@ class OpenAIChatProvider implements APIProvider {
               yield { type: 'text_delta', text: delta.content }
             }
 
-            if (delta?.tool_calls) {
-              for (const tc of delta.tool_calls) {
-                const idx = tc.index ?? 0
-                const googleThoughtSignature = isGoogleCompatible
-                  ? getGoogleThoughtSignature(tc)
-                  : undefined
-                const googleExtraContent = googleThoughtSignature
-                  ? { google: { thought_signature: googleThoughtSignature } }
-                  : undefined
+            for (const tc of extractOpenAIChatToolCallFragments(choice)) {
+              const googleThoughtSignature = isGoogleCompatible
+                ? getGoogleThoughtSignature(tc.extraContent)
+                : undefined
+              const googleExtraContent = googleThoughtSignature
+                ? { google: { thought_signature: googleThoughtSignature } }
+                : undefined
 
-                if (
-                  googleThoughtSignature &&
-                  googleThoughtSignature !== lastGoogleThoughtSignature
-                ) {
-                  lastGoogleThoughtSignature = googleThoughtSignature
-                  yield {
-                    type: 'thinking_encrypted',
-                    thinkingEncryptedContent: googleThoughtSignature,
-                    thinkingEncryptedProvider: 'google'
-                  }
+              if (googleThoughtSignature && googleThoughtSignature !== lastGoogleThoughtSignature) {
+                lastGoogleThoughtSignature = googleThoughtSignature
+                yield {
+                  type: 'thinking_encrypted',
+                  thinkingEncryptedContent: googleThoughtSignature,
+                  thinkingEncryptedProvider: 'google'
                 }
+              }
 
-                let buf = toolBuffers.get(idx)
+              let buf = toolBuffers.get(tc.index)
 
-                if (!buf) {
-                  buf = {
-                    id: tc.id ?? '',
-                    name: tc.function?.name ?? '',
-                    args: '',
-                    extraContent: googleExtraContent
-                  }
-                  toolBuffers.set(idx, buf)
-                  if (tc.id) {
-                    yield {
-                      type: 'tool_call_start',
-                      toolCallId: tc.id,
-                      toolName: tc.function?.name,
-                      ...(buf.extraContent ? { toolCallExtraContent: buf.extraContent } : {})
-                    }
-                  }
-                } else {
-                  if (googleExtraContent && !buf.extraContent) {
-                    buf.extraContent = googleExtraContent
-                  }
-                  if (tc.id && !buf.id) {
-                    buf.id = tc.id
-                    yield {
-                      type: 'tool_call_start',
-                      toolCallId: tc.id,
-                      toolName: buf.name || tc.function?.name,
-                      ...(buf.extraContent ? { toolCallExtraContent: buf.extraContent } : {})
-                    }
-                  }
-                  if (tc.function?.name && !buf.name) buf.name = tc.function.name
+              if (!buf) {
+                buf = {
+                  id: '',
+                  name: '',
+                  args: '',
+                  started: false,
+                  extraContent: googleExtraContent
                 }
+                toolBuffers.set(tc.index, buf)
+              } else if (googleExtraContent && !buf.extraContent) {
+                buf.extraContent = googleExtraContent
+              }
 
-                if (tc.function?.arguments) {
-                  buf.args += tc.function.arguments
+              if (tc.id) buf.id = tc.id
+              if (tc.name) buf.name = tc.name
+              if (!buf.started && buf.id && buf.name) {
+                buf.started = true
+                yield {
+                  type: 'tool_call_start',
+                  toolCallId: buf.id,
+                  toolName: buf.name,
+                  ...(buf.extraContent ? { toolCallExtraContent: buf.extraContent } : {})
+                }
+              }
+
+              if (tc.argumentsText !== undefined) {
+                const argumentsDelta = mergeOpenAIChatToolArguments(
+                  buf,
+                  tc.argumentsText,
+                  tc.argumentsSource
+                )
+                if (argumentsDelta) {
                   yield {
                     type: 'tool_call_delta',
                     toolCallId: buf.id || undefined,
-                    argumentsDelta: tc.function.arguments
+                    argumentsDelta
                   }
                 }
               }

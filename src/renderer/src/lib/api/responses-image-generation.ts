@@ -92,7 +92,7 @@ export function normalizeResponsesImageGenerationOutputCompression(
 
 export function normalizeResponsesImageGenerationPartialImages(value: unknown): number | undefined {
   if (typeof value !== 'number' || !Number.isFinite(value)) return undefined
-  return clampInteger(value, 0)
+  return clampInteger(value, 0, 3)
 }
 
 export function normalizeResponsesImageGenerationInputMask(
@@ -242,7 +242,9 @@ export async function createResponsesImageBlock(
       type: 'base64',
       data: typeof persisted?.data === 'string' && persisted.data ? persisted.data : imageBase64,
       mediaType:
-        typeof persisted?.mediaType === 'string' && persisted.mediaType ? persisted.mediaType : mediaType,
+        typeof persisted?.mediaType === 'string' && persisted.mediaType
+          ? persisted.mediaType
+          : mediaType,
       ...(typeof persisted?.filePath === 'string' && persisted.filePath
         ? { filePath: persisted.filePath }
         : {})

@@ -113,6 +113,14 @@ function lineCount(text: string): number {
   return normalized.length === 0 ? 0 : normalized.split('\n').length
 }
 
+function formatCompactCount(value: number): string {
+  if (!Number.isFinite(value)) return '0'
+  return new Intl.NumberFormat(undefined, {
+    notation: value >= 10_000 ? 'compact' : 'standard',
+    maximumFractionDigits: 1
+  }).format(value)
+}
+
 type FilePreviewTone = 'create' | 'edit'
 
 function FilePreviewShell({
@@ -673,6 +681,49 @@ function ChangeStats({
   return null
 }
 
+function WriteRealtimeStats({
+  input,
+  resolvedWrite
+}: {
+  input: Record<string, unknown>
+  resolvedWrite: ResolvedWritePayload
+}): React.JSX.Element | null {
+  const { t } = useTranslation('chat')
+  const charTotal =
+    typeof input.content_chars === 'number'
+      ? input.content_chars
+      : resolvedWrite.text.length || resolvedWrite.preview.length
+  const isPreviewOnly = Boolean(input.content_truncated || input.content_omitted)
+
+  if (resolvedWrite.lineTotal <= 0 && charTotal <= 0 && !isPreviewOnly) return null
+
+  return (
+    <span className="flex shrink-0 items-center gap-1 text-[10px]">
+      {resolvedWrite.lineTotal > 0 && (
+        <span
+          className="font-medium text-emerald-500 dark:text-emerald-400/90"
+          title={t('fileChange.lineCount', { count: resolvedWrite.lineTotal })}
+        >
+          +{formatCompactCount(resolvedWrite.lineTotal)}
+        </span>
+      )}
+      {charTotal > 0 && (
+        <span
+          className="hidden rounded bg-muted/70 px-1.5 py-0.5 text-muted-foreground/70 dark:bg-white/[0.04] sm:inline"
+          title={t('fileChange.charCount', { count: charTotal })}
+        >
+          {t('fileChange.compactCharCount', { value: formatCompactCount(charTotal) })}
+        </span>
+      )}
+      {isPreviewOnly && (
+        <span className="rounded bg-violet-500/10 px-1.5 py-0.5 text-violet-500 dark:text-violet-300">
+          {t('fileChange.previewOnly')}
+        </span>
+      )}
+    </span>
+  )
+}
+
 // ── Inline Diff View ─────────────────────────────────────────────
 
 function InlineDiff({
@@ -1109,7 +1160,9 @@ export function FileChangeCard({
   const resolvedEdit = React.useMemo(() => resolveEditPayload(input), [input])
   const resolvedWrite = React.useMemo(() => resolveWritePayload(input), [input])
   const isActive = status === 'streaming' || status === 'running' || status === 'pending_approval'
-  const [collapsed, setCollapsed] = React.useState(!isActive)
+  const isRealtimeWrite =
+    name === 'Write' && !trackedChange && (status === 'streaming' || status === 'running')
+  const [collapsed, setCollapsed] = React.useState(isRealtimeWrite || !isActive)
   const undoFileChange = useAgentStore((state) => state.undoFileChange)
   const [isUndoingFile, setIsUndoingFile] = React.useState(false)
 
@@ -1139,6 +1192,14 @@ export function FileChangeCard({
     name === 'Delete'
       ? 'delete'
       : (trackedChange?.op ?? (name === 'Write' ? (writeOp ?? 'create') : 'modify'))
+  const compactActionLabel =
+    compactActionOp === 'create'
+      ? isRealtimeWrite
+        ? t('fileChange.creating')
+        : t('fileChange.created')
+      : compactActionOp === 'delete'
+        ? t('fileChange.deleted')
+        : t('fileChange.edited')
   const isOutputError = outputStr
     ? Boolean(parsedOutputError) || (!parsedOutput && outputStr.length > 0)
     : false
@@ -1281,11 +1342,7 @@ export function FileChangeCard({
             title={filePath || undefined}
           >
             <span className="shrink-0 text-[10px] font-medium text-muted-foreground">
-              {compactActionOp === 'create'
-                ? t('fileChange.created')
-                : compactActionOp === 'delete'
-                  ? t('fileChange.deleted')
-                  : t('fileChange.edited')}
+              {compactActionLabel}
             </span>
             <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-sky-500 transition-colors group-hover:text-sky-600 dark:text-sky-300 dark:group-hover:text-sky-200">
               {filePath ? (
@@ -1296,6 +1353,14 @@ export function FileChangeCard({
                 </span>
               )}
             </span>
+            {filePath && (
+              <span
+                className="hidden max-w-[12rem] shrink truncate font-mono text-[10px] text-muted-foreground/55 lg:block"
+                title={filePath}
+              >
+                {shortPath(filePath)}
+              </span>
+            )}
             {compactEditDiff ? (
               <>
                 <span className="shrink-0 text-[10px] font-medium text-emerald-500 dark:text-emerald-400/90">
@@ -1305,6 +1370,8 @@ export function FileChangeCard({
                   -{compactEditDiff.deleted}
                 </span>
               </>
+            ) : isRealtimeWrite ? (
+              <WriteRealtimeStats input={input} resolvedWrite={resolvedWrite} />
             ) : (
               <ChangeStats name={name} input={input} trackedChange={trackedChange} minimal />
             )}

@@ -119,6 +119,11 @@ function outputAsString(output: ToolResultContent | undefined): string | undefin
   return texts.join('\n') || undefined
 }
 
+function getSkillNameFromInput(input: Record<string, unknown>): string {
+  const raw = input.SkillName ?? input.skillName ?? input.name
+  return typeof raw === 'string' ? raw.trim() : ''
+}
+
 function deriveOutputError(output: string | undefined): string | null {
   if (!output) return null
   const trimmed = output.trim()
@@ -1885,6 +1890,10 @@ function StructuredInput({
 }): React.JSX.Element {
   const { t } = useTranslation('chat')
 
+  if (name === 'Skill') {
+    return <></>
+  }
+
   // Bash: command in terminal-style block + description/timeout as fields
   if (name === 'Bash') {
     const command = String(input.command ?? '')
@@ -2542,6 +2551,39 @@ function ToolCallCardInner({
     shouldRenderOutputPanels &&
     (hasFocusedExpandedOutput(name, output, outputText) || settledBashHasFocusedOutput)
   const shouldShowStructuredInput = !(showSettledWriteContent || hasFocusedOutput)
+
+  if (name === 'Skill') {
+    const skillName = getSkillNameFromInput(input)
+    return (
+      <div className="my-2 min-w-0 overflow-hidden">
+        <div className="inline-flex max-w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-xs text-muted-foreground">
+          <ToolStatusDot status={status} />
+          <FileText className="size-3 shrink-0 text-emerald-500 dark:text-emerald-400" />
+          <span className="shrink-0 font-medium text-foreground/80">
+            {isProcessing ? t('toolCall.skillLoading') : t('toolCall.skillUsed')}
+          </span>
+          {skillName ? (
+            <span
+              className="min-w-0 truncate rounded-md border border-emerald-500/15 bg-emerald-500/10 px-1.5 py-0.5 font-mono text-[11px] text-emerald-700 dark:text-emerald-300"
+              title={skillName}
+            >
+              {skillName}
+            </span>
+          ) : null}
+          {elapsed ? (
+            <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground/55">
+              {elapsed}
+            </span>
+          ) : null}
+        </div>
+        {displayError ? (
+          <div className="mt-1.5 max-w-xl rounded-md border border-destructive/20 bg-destructive/[0.035] px-3 py-2 text-xs text-destructive">
+            {displayError}
+          </div>
+        ) : null}
+      </div>
+    )
+  }
 
   return (
     <div

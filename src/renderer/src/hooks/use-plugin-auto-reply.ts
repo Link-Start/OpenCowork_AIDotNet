@@ -35,7 +35,11 @@ import type { UnifiedMessage, ProviderConfig, ContentBlock } from '@renderer/lib
 import type { Session } from '@renderer/stores/chat-store'
 import { hasPendingSessionMessagesForSession } from '@renderer/hooks/use-chat-actions'
 import { recordUsageEvent } from '@renderer/lib/usage-analytics'
-import { buildSystemPromptContextCacheKey } from '@renderer/lib/chat-mode-tools'
+import {
+  buildSystemPromptContextCacheKey,
+  haveSameToolDefinitions
+} from '@renderer/lib/chat-mode-tools'
+import { ensureRequestToolCatalogFresh } from '@renderer/lib/tools/dynamic-tool-catalog'
 import {
   summarizeToolInputForHistory,
   summarizeToolInputForLiveCard
@@ -166,7 +170,9 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
     const ready = await ensureProviderAuthReady(targetProviderId)
     if (!ready) {
       console.error('[PluginAutoReply] Provider auth missing')
-      await sendChannelNotice('Model provider not configured or authentication incomplete, please configure in settings and try again.')
+      await sendChannelNotice(
+        'Model provider not configured or authentication incomplete, please configure in settings and try again.'
+      )
       return
     }
   }
@@ -174,7 +180,9 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
   const providerConfig = getProviderConfig(channelMeta?.providerId, channelMeta?.model)
   if (!providerConfig) {
     console.error('[PluginAutoReply] No provider config — API key not configured')
-    await sendChannelNotice('Model provider or API Key not configured, please configure in settings and try again.')
+    await sendChannelNotice(
+      'Model provider or API Key not configured, please configure in settings and try again.'
+    )
     return
   }
 
@@ -197,7 +205,9 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
 
     const ready = await ensureProviderAuthReady(speechProviderId)
     if (!ready) {
-      await sendChannelNotice('Speech recognition provider authentication incomplete, please complete authentication in Settings → Model and try again.')
+      await sendChannelNotice(
+        'Speech recognition provider authentication incomplete, please complete authentication in Settings → Model and try again.'
+      )
       return
     }
 
@@ -237,7 +247,9 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
         baseUrl: openAiConfig.config.baseUrl
       })
 
-      effectiveContent = transcript.trim() ? transcript : '[Voice transcribed, but content is empty]'
+      effectiveContent = transcript.trim()
+        ? transcript
+        : '[Voice transcribed, but content is empty]'
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       await sendChannelNotice(`Voice transcription failed: ${msg}`)
@@ -448,6 +460,8 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
     registerPluginTools()
   }
 
+  await ensureRequestToolCatalogFresh()
+
   // ── Build tools (same as main agent's cowork branch) ──
   const allToolDefs = toolRegistry.getDefinitions()
   const settings = useSettingsStore.getState()
@@ -503,6 +517,7 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
     cachedPromptSnapshot.projectId === session.projectId &&
     cachedPromptSnapshot.sshConnectionId === session.sshConnectionId &&
     cachedPromptSnapshot.contextCacheKey === promptContextCacheKey &&
+    haveSameToolDefinitions(cachedPromptSnapshot.toolDefs, allToolDefs) &&
     // Discard stale snapshots that lack plugin tools (issue #73).
     cachedPromptSnapshot.toolDefs.some((t) => t.name === 'PluginSendMessage')
 

@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { ipcClient } from '@renderer/lib/ipc/ipc-client'
 import { IPC } from '@renderer/lib/ipc/channels'
+import { refreshDynamicToolCatalog } from '@renderer/lib/tools/dynamic-tool-catalog'
 
 export type ResourceKind = 'agents' | 'commands'
 export type ResourceSource = 'user' | 'bundled'
@@ -296,6 +297,10 @@ export const useResourcesStore = create<ResourcesStore>((set, get) => ({
         const error = result?.error || 'Save failed'
         set({ saving: false, error })
         return { success: false, error }
+      }
+
+      if (selectedResource.kind === 'agents') {
+        await refreshDynamicToolCatalog()
       }
 
       await get().loadItems(selectedResource.kind)

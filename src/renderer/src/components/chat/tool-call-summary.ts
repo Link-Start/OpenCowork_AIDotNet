@@ -219,6 +219,10 @@ export function inputSummary(
   input: Record<string, unknown>,
   outputText?: string
 ): string {
+  if (name === 'Skill') {
+    const skillName = input.SkillName ?? input.skillName ?? input.name
+    return typeof skillName === 'string' ? skillName.trim() : ''
+  }
   if (name === 'Bash') return summarizeBashInput(input, outputText)
   if (name === 'LS') return summarizeLsInput(input, outputText)
   if (['Read', 'Write', 'SavePlan'].includes(name)) {

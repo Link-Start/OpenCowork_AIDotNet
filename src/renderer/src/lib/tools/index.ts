@@ -7,9 +7,7 @@ import {
   isWebSearchToolRegistered
 } from './web-search-tool'
 import { registerBashTools } from './bash-tool'
-import { registerSubAgents } from '../agent/sub-agents/builtin'
 import { registerTeamTools } from '../agent/teams/register'
-import { registerSkillTools } from './skill-tool'
 import { registerWidgetTools } from './widget-tool'
 import { registerAskUserTools } from './ask-user-tool'
 import { registerPlanTools } from './plan-tool'
@@ -17,6 +15,7 @@ import { registerCronTools } from './cron-tool'
 import { registerNotifyTool } from './notify-tool'
 import { registerGoalTools } from './goal-tool'
 import { updateWikiToolRegistration } from './wiki-tool'
+import { refreshDynamicToolCatalog } from './dynamic-tool-catalog'
 
 let _allToolsRegistered = false
 
@@ -30,7 +29,6 @@ export async function registerAllTools(): Promise<void> {
   // Note: WebSearchTool is NOT registered here — it's registered/unregistered dynamically
   // based on the webSearchEnabled setting (see web-search-tool.ts)
   registerBashTools()
-  await registerSkillTools()
   registerWidgetTools()
   registerAskUserTools()
   registerPlanTools()
@@ -38,8 +36,9 @@ export async function registerAllTools(): Promise<void> {
   registerNotifyTool()
   registerGoalTools()
 
-  // SubAgents (dynamically loaded from ~/.open-cowork/agents/*.md via IPC, then registered as unified Task tool)
-  await registerSubAgents()
+  // Skills and SubAgents are user-editable catalogs; load them once here and
+  // refresh them again before every request via ensureRequestToolCatalogFresh().
+  await refreshDynamicToolCatalog()
 
   // Agent Team tools
   registerTeamTools()
@@ -58,3 +57,4 @@ export function updateWebSearchToolRegistration(enabled: boolean): void {
 }
 
 export { updateWikiToolRegistration }
+export { ensureRequestToolCatalogFresh, refreshDynamicToolCatalog } from './dynamic-tool-catalog'

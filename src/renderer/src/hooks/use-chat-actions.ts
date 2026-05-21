@@ -159,8 +159,10 @@ import {
   buildChatModeSystemPrompt,
   buildSystemPromptContextCacheKey,
   filterChatModeToolDefinitions,
-  hasChatModePluginTools
+  hasChatModePluginTools,
+  haveSameToolDefinitions
 } from '@renderer/lib/chat-mode-tools'
+import { ensureRequestToolCatalogFresh } from '@renderer/lib/tools/dynamic-tool-catalog'
 import {
   buildGoalRuntimeContext,
   goalStatusLabel,
@@ -341,15 +343,6 @@ function resolveActiveMcpContext(projectId?: string | null): {
   }
 
   return { activeMcps, activeMcpTools }
-}
-
-function haveSameToolDefinitionNames(
-  left: readonly Pick<ToolDefinition, 'name'>[],
-  right: readonly Pick<ToolDefinition, 'name'>[]
-): boolean {
-  if (left.length !== right.length) return false
-  const rightNames = new Set(right.map((tool) => tool.name))
-  return left.every((tool) => rightNames.has(tool.name))
 }
 
 function summarizeActiveTeamForPromptCache(activeTeam: ActiveTeam | null | undefined): {
@@ -3300,6 +3293,8 @@ export function useChatActions(): {
         const abortController = new AbortController()
         sessionAbortControllers.set(sessionId, abortController)
 
+        await ensureRequestToolCatalogFresh()
+
         const mode = sessionMode
         const activeChannels = useChannelStore.getState().getActiveChannels()
         const needsPluginTools = activeChannels.length > 0 || !!session?.pluginId
@@ -3597,7 +3592,7 @@ export function useChatActions(): {
             (cachedPromptSnapshot.workingFolder ?? null) === (sessionWorkingFolder ?? null) &&
             (cachedPromptSnapshot.sshConnectionId ?? null) === (session?.sshConnectionId ?? null) &&
             cachedPromptSnapshot.contextCacheKey === promptContextCacheKey &&
-            haveSameToolDefinitionNames(cachedPromptSnapshot.toolDefs, finalEffectiveToolDefs) &&
+            haveSameToolDefinitions(cachedPromptSnapshot.toolDefs, finalEffectiveToolDefs) &&
             // Plugin-bound sessions require plugin tools in the cached snapshot.
             // A stale snapshot (built when plugin tools were unregistered) must be
             // discarded so the system prompt + tool list are rebuilt. Issue #73.

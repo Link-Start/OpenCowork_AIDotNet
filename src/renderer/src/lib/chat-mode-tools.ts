@@ -68,6 +68,28 @@ export function filterChatModeToolDefinitions(toolDefs: ToolDefinition[]): ToolD
   return toolDefs.filter((tool) => isChatModeToolName(tool.name))
 }
 
+export function buildToolDefinitionCacheKey(
+  toolDefs: readonly Pick<ToolDefinition, 'name' | 'description' | 'inputSchema'>[]
+): string {
+  return stableSerializePromptCacheValue(
+    toolDefs
+      .map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        inputSchema: tool.inputSchema
+      }))
+      .sort((left, right) => left.name.localeCompare(right.name))
+  )
+}
+
+export function haveSameToolDefinitions(
+  left: readonly Pick<ToolDefinition, 'name' | 'description' | 'inputSchema'>[],
+  right: readonly Pick<ToolDefinition, 'name' | 'description' | 'inputSchema'>[]
+): boolean {
+  if (left.length !== right.length) return false
+  return buildToolDefinitionCacheKey(left) === buildToolDefinitionCacheKey(right)
+}
+
 export function buildSystemPromptContextCacheKey(options: {
   language?: string
   userRules?: string

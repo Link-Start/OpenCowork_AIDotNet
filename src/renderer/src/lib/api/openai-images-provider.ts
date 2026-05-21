@@ -11,6 +11,8 @@ import type {
 import {
   generateImagesFromText,
   editImageWithPrompt,
+  streamImagesFromText,
+  streamImageEditWithPrompt,
   OpenAIImagesRequestError,
   type Base64ImageInput,
   type GeneratedImage
@@ -83,6 +85,16 @@ async function persistGeneratedImage(image: GeneratedImage): Promise<ImageBlock>
   }
 }
 
+function createTransientImageBlock(image: GeneratedImage): ImageBlock {
+  return {
+    type: 'image',
+    source:
+      image.sourceType === 'base64'
+        ? { type: 'base64', mediaType: image.mediaType, data: image.data }
+        : { type: 'url', url: image.data }
+  }
+}
+
 class OpenAIImagesProvider implements APIProvider {
   readonly name = 'OpenAI Images'
   readonly type = 'openai-images' as const
@@ -142,26 +154,65 @@ class OpenAIImagesProvider implements APIProvider {
         textPrompt = 'Edit this image'
       }
 
-      // Call appropriate API based on whether we have an image
-      let results
-      if (imageInput) {
-        // Image editing - no text delta, just generate
-        results = await editImageWithPrompt({
-          config,
-          prompt: textPrompt,
-          image: imageInput,
-          signal
-        })
-      } else {
-        // Text-to-image generation - no text delta, just generate
-        results = await generateImagesFromText({
-          config,
-          prompt: textPrompt,
-          signal
-        })
+      if (config.imageGenerationStream?.enabled === true) {
+        const stream = imageInput
+          ? streamImageEditWithPrompt({
+              config,
+              prompt: textPrompt,
+              image: imageInput,
+              signal
+            })
+          : streamImagesFromText({
+              config,
+              prompt: textPrompt,
+              signal
+            })
+
+        let firstImageAt: number | null = null
+        for await (const event of stream) {
+          if (firstImageAt === null) firstImageAt = Date.now()
+          if (event.kind === 'partial') {
+            yield {
+              type: 'image_generation_partial',
+              imageBlock: createTransientImageBlock(event.image),
+              ...(typeof event.partialImageIndex === 'number'
+                ? { partialImageIndex: event.partialImageIndex }
+                : {})
+            }
+            continue
+          }
+
+          const imageBlock = await persistGeneratedImage(event.image)
+          yield { type: 'image_generated', imageBlock }
+        }
+
+        const requestCompletedAt = Date.now()
+        yield {
+          type: 'message_end',
+          stopReason: 'stop',
+          timing: {
+            totalMs: requestCompletedAt - requestStartedAt,
+            ttftMs: firstImageAt
+              ? firstImageAt - requestStartedAt
+              : requestCompletedAt - requestStartedAt
+          }
+        }
+        return
       }
 
-      // Yield each generated image as an image_generated event
+      const results = imageInput
+        ? await editImageWithPrompt({
+            config,
+            prompt: textPrompt,
+            image: imageInput,
+            signal
+          })
+        : await generateImagesFromText({
+            config,
+            prompt: textPrompt,
+            signal
+          })
+
       for (const img of results) {
         const imageBlock = await persistGeneratedImage(img)
         yield { type: 'image_generated', imageBlock }

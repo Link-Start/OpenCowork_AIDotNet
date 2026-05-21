@@ -932,6 +932,19 @@ export const routinAiPreset: BuiltinProviderPreset = {
     },
     // ── Google Gemini ──
     {
+      id: 'gemini-3.5-flash',
+      name: 'Gemini 3.5 Flash',
+      icon: 'gemini',
+      enabled: true,
+      contextLength: 1_048_576,
+      maxOutputTokens: 65_536,
+      supportsVision: true,
+      supportsFunctionCall: true,
+      inputPrice: 1.5,
+      outputPrice: 9,
+      cacheHitPrice: 0.15
+    },
+    {
       id: 'gemini-3-flash-preview',
       name: 'Gemini 3 Flash Preview',
       icon: 'gemini',

@@ -38,6 +38,10 @@ import {
   summarizeOpenAITextAndImages,
   supportsOpenAIImageParts
 } from '../../shared/openai-message-support'
+import {
+  extractOpenAIChatToolCallFragments,
+  type OpenAIChatToolCallArgumentsSource
+} from '../../shared/openai-chat-completions'
 import { compactShellOutputPayload, compactShellText } from '../../shared/shell-output-compactor'
 import { ResponsesWebSocketSessionManager } from '../lib/responses-websocket-session-manager'
 import { applyDefaultApiUserAgent } from '../lib/api-user-agent'
@@ -2028,7 +2032,10 @@ function buildImageGenerationTool(
   if (config.size) tool.size = config.size
   if (typeof config.outputCompression === 'number')
     tool.output_compression = config.outputCompression
-  const partialImages = typeof config.partialImages === 'number' ? config.partialImages : 3
+  const partialImages =
+    typeof config.partialImages === 'number'
+      ? Math.max(0, Math.min(3, Math.floor(config.partialImages)))
+      : 3
   tool.partial_images = partialImages
   return tool
 }
@@ -2634,6 +2641,23 @@ async function sendFetchRequest(
   return response
 }
 
+function mergeOpenAIChatToolArguments(
+  buffer: { args: string },
+  argumentsText: string,
+  source?: OpenAIChatToolCallArgumentsSource
+): string {
+  if (source === 'message') {
+    const previousArgs = buffer.args
+    buffer.args = argumentsText
+    return argumentsText.startsWith(previousArgs)
+      ? argumentsText.slice(previousArgs.length)
+      : argumentsText
+  }
+
+  buffer.args += argumentsText
+  return argumentsText
+}
+
 async function* sendOpenAIChat(
   messages: UnifiedMessage[],
   tools: ToolDefinition[],
@@ -2719,7 +2743,13 @@ async function* sendOpenAIChat(
   )
   const toolBuffers = new Map<
     number,
-    { id: string; name: string; args: string; extraContent?: Record<string, unknown> }
+    {
+      id: string
+      name: string
+      args: string
+      started: boolean
+      extraContent?: Record<string, unknown>
+    }
   >()
   for await (const sse of parseSSEStream(response)) {
     if (!sse.data || sse.data === '[DONE]') continue
@@ -2804,48 +2834,48 @@ async function* sendOpenAIChat(
       continue
     }
     const delta = choice?.delta
-    if (!delta) continue
-    if (delta.content) {
+    if (delta?.content) {
       if (firstTokenAt === null) firstTokenAt = Date.now()
       yield { type: 'text_delta', text: delta.content }
     }
-    if (delta.reasoning_content) {
+    if (delta?.reasoning_content) {
       if (firstTokenAt === null) firstTokenAt = Date.now()
       yield { type: 'thinking_delta', thinking: delta.reasoning_content }
     }
-    if (delta.tool_calls) {
-      for (const tc of delta.tool_calls) {
-        const index = Number(tc.index ?? 0)
-        const existing = toolBuffers.get(index) ?? {
-          id: String(tc.id ?? ''),
-          name: String(tc.function?.name ?? ''),
-          args: '',
-          extraContent: tc.extra_content
+    for (const tc of extractOpenAIChatToolCallFragments(choice)) {
+      const existing = toolBuffers.get(tc.index) ?? {
+        id: '',
+        name: '',
+        args: '',
+        started: false
+      }
+      if (tc.id) existing.id = tc.id
+      if (tc.name) existing.name = tc.name
+      if (tc.extraContent) existing.extraContent = tc.extraContent
+      if (!existing.started && existing.id && existing.name) {
+        existing.started = true
+        yield {
+          type: 'tool_call_start',
+          toolCallId: existing.id,
+          toolName: existing.name,
+          ...(existing.extraContent ? { toolCallExtraContent: existing.extraContent } : {})
         }
-        if (tc.id) existing.id = tc.id
-        if (tc.function?.name) {
-          const isFirst = !existing.name
-          existing.name = tc.function.name
-          if (isFirst && existing.id) {
-            yield {
-              type: 'tool_call_start',
-              toolCallId: existing.id,
-              toolName: existing.name,
-              ...(existing.extraContent ? { toolCallExtraContent: existing.extraContent } : {})
-            }
-          }
-        }
-        if (tc.extra_content) existing.extraContent = tc.extra_content
-        if (tc.function?.arguments) {
-          existing.args += tc.function.arguments
+      }
+      if (tc.argumentsText !== undefined) {
+        const argumentsDelta = mergeOpenAIChatToolArguments(
+          existing,
+          tc.argumentsText,
+          tc.argumentsSource
+        )
+        if (argumentsDelta) {
           yield {
             type: 'tool_call_delta',
             toolCallId: existing.id || undefined,
-            argumentsDelta: tc.function.arguments
+            argumentsDelta
           }
         }
-        toolBuffers.set(index, existing)
       }
+      toolBuffers.set(tc.index, existing)
     }
     const finishReason = choice.finish_reason as string | null | undefined
     if (

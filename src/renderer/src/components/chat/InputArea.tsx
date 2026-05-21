@@ -119,6 +119,7 @@ import {
   DropdownMenuTrigger
 } from '@renderer/components/ui/dropdown-menu'
 import { ipcClient } from '@renderer/lib/ipc/ipc-client'
+import { IPC } from '@renderer/lib/ipc/channels'
 import { cn } from '@renderer/lib/utils'
 import { resolveProjectMemoryTextFile } from '@renderer/lib/agent/memory-files'
 import { isProjectSession, workspaceContextAvailable } from '@renderer/lib/session-scope'
@@ -343,6 +344,13 @@ interface FileSearchItem {
 
 const EMPTY_QUEUED_MESSAGES: PendingSessionMessageItem[] = []
 const INTERNAL_FILE_DRAG_MIME = 'application/x-opencowork-file-paths'
+const IMAGE_MEDIA_TYPE_BY_EXTENSION: Record<string, string> = {
+  gif: 'image/gif',
+  jpeg: 'image/jpeg',
+  jpg: 'image/jpeg',
+  png: 'image/png',
+  webp: 'image/webp'
+}
 const MIN_INPUT_HEIGHT = 120
 const DEFAULT_SESSION_INPUT_HEIGHT = 160
 const MAX_INPUT_HEIGHT = 500
@@ -414,6 +422,16 @@ function isReferenceOnlyDocument(document: EditorDocumentNode[]): boolean {
   if (document.length === 0) return false
 
   return document.every((node) => node.type === 'file' || node.text.trim().length === 0)
+}
+
+function getImageMediaTypeForPath(filePath: string): string | null {
+  const normalized = filePath.split(/[?#]/, 1)[0]?.toLowerCase() ?? ''
+  const extension = normalized.match(/\.([a-z0-9]+)$/)?.[1]
+  return extension ? (IMAGE_MEDIA_TYPE_BY_EXTENSION[extension] ?? null) : null
+}
+
+function createImageAttachmentId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `image-${Date.now()}-${Math.random().toString(36)}`
 }
 
 interface InputAreaProps {
@@ -494,7 +512,6 @@ export function InputArea({
   )
   const contentScrollRef = React.useRef<HTMLDivElement>(null)
   const editorRef = React.useRef<FileAwareEditorHandle | null>(null)
-  const fileInputRef = React.useRef<HTMLInputElement>(null)
   const queueFileInputRef = React.useRef<HTMLInputElement>(null)
   const rootRef = React.useRef<HTMLDivElement>(null)
   const draftSaveTimerRef = React.useRef<ReturnType<typeof setTimeout>>(undefined)
@@ -1531,6 +1548,29 @@ export function InputArea({
     setAttachedImages((prev) => prev.filter((img) => img.id !== id))
   }, [])
 
+  const readImagePathAsAttachment = React.useCallback(
+    async (filePath: string): Promise<ImageAttachment | null> => {
+      const mediaType = getImageMediaTypeForPath(filePath)
+      if (!mediaType) return null
+
+      const result = (await ipcClient.invoke(IPC.FS_READ_FILE_BINARY, { path: filePath })) as {
+        data?: string
+        error?: string
+      }
+      if (result.error || !result.data) {
+        console.warn('[InputArea] Failed to read selected image:', result.error ?? filePath)
+        return null
+      }
+
+      return {
+        id: createImageAttachmentId(),
+        dataUrl: `data:${mediaType};base64,${result.data}`,
+        mediaType
+      }
+    },
+    []
+  )
+
   const addFilesToEditor = React.useCallback(
     (filePaths: string[], selection?: { start: number; end: number }) => {
       const nextSelection = selection ??
@@ -1560,6 +1600,86 @@ export function InputArea({
     },
     [editorSelection.end, editorSelection.start, replaceSelectionWithText, workingFolder]
   )
+
+  const handleAttachMedia = React.useCallback(async (): Promise<void> => {
+    try {
+      const result = (await ipcClient.invoke(IPC.FS_SELECT_FILE, {
+        multiSelections: true,
+        filters: [
+          {
+            name: t('input.mediaFilter'),
+            extensions: [
+              'png',
+              'jpg',
+              'jpeg',
+              'gif',
+              'webp',
+              'md',
+              'txt',
+              'docx',
+              'pdf',
+              'html',
+              'csv',
+              'json',
+              'xml',
+              'yaml',
+              'yml',
+              'ts',
+              'js',
+              'tsx',
+              'jsx'
+            ]
+          },
+          { name: t('input.allFilesFilter'), extensions: ['*'] }
+        ]
+      })) as { canceled?: boolean; path?: string; paths?: string[] }
+
+      const paths = Array.from(
+        new Set(
+          (Array.isArray(result.paths) && result.paths.length > 0
+            ? result.paths
+            : result.path
+              ? [result.path]
+              : []
+          ).filter((filePath): filePath is string => Boolean(filePath))
+        )
+      )
+      if (result.canceled || paths.length === 0) return
+
+      const imagePaths = supportsVision
+        ? paths.filter((filePath) => Boolean(getImageMediaTypeForPath(filePath)))
+        : []
+      const filePaths = paths.filter((filePath) => !imagePaths.includes(filePath))
+      const imageFallbackPaths: string[] = []
+
+      if (imagePaths.length > 0) {
+        setPendingImageReads((prev) => prev + imagePaths.length)
+        try {
+          const images = await Promise.all(
+            imagePaths.map(async (filePath) => {
+              const attachment = await readImagePathAsAttachment(filePath)
+              if (!attachment) imageFallbackPaths.push(filePath)
+              return attachment
+            })
+          )
+          const validImages = images.filter((image): image is ImageAttachment => Boolean(image))
+          if (validImages.length > 0) {
+            setAttachedImages((prev) => [...prev, ...validImages])
+          }
+        } finally {
+          setPendingImageReads((prev) => Math.max(0, prev - imagePaths.length))
+        }
+      }
+
+      const pathsForFileReferences = [...filePaths, ...imageFallbackPaths]
+      if (pathsForFileReferences.length > 0) {
+        addFilesToEditor(pathsForFileReferences)
+      }
+    } catch (error) {
+      console.error('[InputArea] Failed to attach media:', error)
+      toast.error(t('input.attachMediaFailed'))
+    }
+  }, [addFilesToEditor, readImagePathAsAttachment, supportsVision, t])
 
   const handlePreviewFile = React.useCallback(
     (fileId: string) => {
@@ -2150,9 +2270,7 @@ export function InputArea({
       onSelectCommand={(name) => {
         insertSlashCommand(name)
       }}
-      onAttachMedia={() => {
-        fileInputRef.current?.click()
-      }}
+      onAttachMedia={() => void handleAttachMedia()}
       disabled={disabled || isStreaming}
       projectId={activeProjectId}
       showChannels={mode !== 'chat'}
@@ -2921,18 +3039,6 @@ export function InputArea({
               if (e.target.files) {
                 void addQueuedImages(Array.from(e.target.files))
               }
-              e.target.value = ''
-            }}
-          />
-
-          {/* Hidden file input for image upload */}
-          <input
-            ref={fileInputRef}
-            type="file"
-            multiple
-            className="hidden"
-            onChange={(e) => {
-              handleDropFiles(e.target.files)
               e.target.value = ''
             }}
           />

@@ -142,6 +142,7 @@ const THINK_OPEN_TAG_RE = /<\s*think\s*>/i
 const SPECIAL_TOOLS = new Set([
   'TaskCreate',
   'TaskUpdate',
+  'Skill',
   'Write',
   'Edit',
   'Delete',
@@ -154,6 +155,7 @@ const SPECIAL_TOOLS = new Set([
   DESKTOP_TYPE_TOOL_NAME
 ])
 const WORKSPACE_PERSISTENT_TOOLS = new Set([
+  'Skill',
   'AskUserQuestion',
   'ExitPlanMode',
   'visualize_show_widget',
@@ -1796,6 +1798,27 @@ export function AssistantMessage({
               output={liveTc?.output ?? result?.content}
               status={statusValue}
               error={liveTc?.error}
+            />
+          </ScaleIn>
+        )
+      }
+      if (block.name === 'Skill') {
+        const toolCallState = buildToolCallRenderState(block, {
+          isStreaming,
+          toolResults,
+          liveToolCallMap: effectiveLiveToolCallMap
+        })
+        return (
+          <ScaleIn key={key} className={liveScaleInClassName}>
+            <ToolCallCard
+              toolUseId={toolCallState.toolUseId}
+              name={toolCallState.name}
+              input={toolCallState.input}
+              output={toolCallState.output}
+              status={toolCallState.status}
+              error={toolCallState.error}
+              startedAt={toolCallState.startedAt}
+              completedAt={toolCallState.completedAt}
             />
           </ScaleIn>
         )

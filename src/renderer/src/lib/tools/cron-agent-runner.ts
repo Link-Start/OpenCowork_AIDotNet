@@ -20,6 +20,7 @@ import { useChatStore } from '../../stores/chat-store'
 import { cronEvents } from './cron-events'
 import { ipcClient } from '../ipc/ipc-client'
 import { IPC } from '../ipc/channels'
+import { ensureRequestToolCatalogFresh } from './dynamic-tool-catalog'
 import type {
   UnifiedMessage,
   ProviderConfig,
@@ -361,6 +362,8 @@ async function _runCronAgentAsync(
     })
     return
   }
+
+  await ensureRequestToolCatalogFresh()
 
   const agentName = agentId || DEFAULT_AGENT
   const definition =

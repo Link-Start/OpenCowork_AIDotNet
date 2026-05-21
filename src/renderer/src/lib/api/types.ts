@@ -340,6 +340,11 @@ export interface ResponsesImageGenerationConfig {
   size?: ResponsesImageGenerationSize
 }
 
+export interface ImageGenerationStreamConfig {
+  enabled?: boolean
+  partialImages?: number
+}
+
 export type AuthMode = 'apiKey' | 'oauth' | 'channel'
 export type OAuthFlowType = 'authorization_code' | 'device_code'
 export type OAuthRequestMode = 'form' | 'json'
@@ -601,6 +606,8 @@ export interface ProviderConfig {
   responseSummary?: ResponseSummary
   /** OpenAI Responses: image_generation tool configuration */
   responsesImageGeneration?: ResponsesImageGenerationConfig
+  /** Request-scoped image streaming preview control for drawing flows. */
+  imageGenerationStream?: ImageGenerationStreamConfig
   /** OpenAI Responses: enable prompt caching with session-based key */
   enablePromptCache?: boolean
   /** Whether OpenAI Computer Use should be enabled for this request */

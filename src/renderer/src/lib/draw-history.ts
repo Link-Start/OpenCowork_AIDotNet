@@ -53,6 +53,8 @@ export interface DrawRun {
   isGenerating: boolean
   images: DrawRunImage[]
   error: DrawRunError | null
+  previewImage?: DrawRunImage
+  previewImageIndex?: number
 }
 
 interface DrawRunRow {

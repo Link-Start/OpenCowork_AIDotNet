@@ -9,6 +9,9 @@
     "placeholderInitWorkspace": "当前工作目录还没有 AGENTS.md，推荐先输入 /init 初始化项目上下文...",
     "noApiKey": "未配置 API Key，点击此处打开设置。",
     "attachImages": "附加图片（也支持粘贴或拖放）",
+    "attachMediaFailed": "添加所选文件失败",
+    "mediaFilter": "图片和文档",
+    "allFilesFilter": "所有文件",
     "dropImages": "拖放图片或文件",
     "dropFiles": "拖放文件以插入路径",
     "disableThinking": "关闭深度思考",
@@ -358,7 +361,8 @@
       "TaskGet": "获取任务",
       "TaskUpdate": "更新任务",
       "TaskList": "任务列表",
-      "Delete": "删除"
+      "Delete": "删除",
+      "Skill": "技能"
     }
   },
   "toolCall": {
@@ -386,6 +390,8 @@
     "content": "内容",
     "diff": "差异",
     "appliedSuccessfully": "已成功应用",
+    "skillUsed": "已使用技能",
+    "skillLoading": "正在加载技能",
     "receivingArgs": "正在接收参数...",
     "executing": "正在执行...",
     "showAll": "显示全部（{{chars}} 字符，{{lines}} 行）",
@@ -612,7 +618,11 @@
   "skills": {
     "addActions": "添加操作",
     "addToChat": "添加到对话",
+    "attachMedia": "添加照片和文件",
     "commandsLabel": "命令",
+    "availableCommands": "可用命令",
+    "loadingCommands": "正在加载命令...",
+    "noCommands": "未找到命令",
     "skillsLabel": "技能",
     "availableSkills": "可用技能",
     "loadingSkills": "加载技能中...",
@@ -635,12 +645,26 @@
     "activeChannels": "活跃频道：",
     "activeMcpServers": "活跃的 MCP 服务器：",
     "mcpToolCount": "{{count}} 个工具",
+    "mcpToolCount_one": "{{count}} 个工具",
+    "mcpToolCount_other": "{{count}} 个工具",
     "mcpCount": "{{count}} 个 MCP"
   },
   "userMessage": {
     "you": "你",
     "copied": "已复制",
     "edit": "编辑",
+    "skillLabel": "技能",
+    "addSkill": "添加技能",
+    "changeSkill": "切换技能",
+    "removeSkill": "移除技能",
+    "selectSkill": "选择技能",
+    "imageCopied": "图片已复制",
+    "copyImageFailed": "复制图片失败",
+    "imageAttachment": "图片附件",
+    "copyImageShortcut": "聚焦图片后按 Ctrl/Cmd+C 复制图片",
+    "copyImage": "复制图片",
+    "removeImage": "移除图片",
+    "imagePreview": "图片预览",
     "saveAndResend": "保存并重发"
   },
   "assistantMessage": {
@@ -743,6 +767,7 @@
   },
   "fileChange": {
     "created": "已创建",
+    "creating": "创建中",
     "new": "新建",
     "deleted": "已删除",
     "edited": "已编辑",
@@ -758,6 +783,8 @@
     "patchSummary": "{{hunks}} 个 hunk · -{{deleted}} / +{{added}} 行",
     "lineCount": "{{count}} 行",
     "charCount": "{{count}} 字符",
+    "compactCharCount": "{{value}} 字符",
+    "previewOnly": "预览",
     "streaming": "流式生成中",
     "kept": "该文件已保留。",
     "restored": "该文件已恢复。",
