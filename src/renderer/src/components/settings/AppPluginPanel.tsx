@@ -48,11 +48,17 @@ import {
   type AppPluginInstance,
   type AppPluginToolName
 } from '@renderer/lib/app-plugin/types'
+import {
+  BROWSER_USER_DATA_SOURCES,
+  type BrowserUserDataSource
+} from '../../../../shared/browser-plugin'
 
 interface BrowserEmulationStatus {
   reuseEnabled: boolean
+  browserUserDataSource: BrowserUserDataSource
   browserName: string | null
   browserProfilePath: string | null
+  browserProfileDisplayName: string | null
   usingDetectedBrowserProfile: boolean
   userAgent: string
   acceptLanguages: string
@@ -145,6 +151,7 @@ export function AppPluginPanel(): React.JSX.Element {
   const updatePlugin = useAppPluginStore((state) => state.updatePlugin)
   const togglePluginEnabled = useAppPluginStore((state) => state.togglePluginEnabled)
   const browserUserDataReuseEnabled = useSettingsStore((state) => state.browserUserDataReuseEnabled)
+  const browserUserDataSource = useSettingsStore((state) => state.browserUserDataSource)
   const updateSettings = useSettingsStore((state) => state.updateSettings)
   const providers = useProviderStore((state) => state.providers)
   const activeImageProviderId = useProviderStore((state) => state.activeImageProviderId)
@@ -226,7 +233,7 @@ export function AppPluginPanel(): React.JSX.Element {
     return () => {
       cancelled = true
     }
-  }, [browserUserDataReuseEnabled])
+  }, [browserUserDataReuseEnabled, browserUserDataSource])
 
   const handleClearBrowserCookies = async (): Promise<void> => {
     setClearingCookies(true)
@@ -510,11 +517,42 @@ export function AppPluginPanel(): React.JSX.Element {
                     />
                   </div>
 
+                  <div className="mt-3 grid gap-2 sm:grid-cols-[minmax(0,1fr)_16rem] sm:items-center">
+                    <div>
+                      <p className="text-xs font-medium">
+                        {t('plugin.browser.userDataSource')}
+                      </p>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        {t('plugin.browser.userDataSourceDesc')}
+                      </p>
+                    </div>
+                    <Select
+                      value={browserUserDataSource}
+                      onValueChange={(value) => {
+                        updateSettings({ browserUserDataSource: value as BrowserUserDataSource })
+                        toast.info(t('plugin.browser.restartRequired'))
+                      }}
+                      disabled={!browserUserDataReuseEnabled}
+                    >
+                      <SelectTrigger className="h-8 text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {BROWSER_USER_DATA_SOURCES.map((source) => (
+                          <SelectItem key={source} value={source} className="text-xs">
+                            {t(`plugin.browser.sources.${source}`)}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
                   <div className="mt-3 space-y-1 text-xs text-muted-foreground">
                     {browserEmulationStatus?.usingDetectedBrowserProfile ? (
                       <p>
                         {t('plugin.browser.activeProfile', {
                           browserName: browserEmulationStatus.browserName,
+                          profileName: browserEmulationStatus.browserProfileDisplayName,
                           path: browserEmulationStatus.browserProfilePath
                         })}
                       </p>

@@ -13,6 +13,11 @@ import {
   LEFT_SIDEBAR_DEFAULT_WIDTH,
   clampLeftSidebarWidth
 } from '@renderer/components/layout/right-panel-defs'
+import {
+  DEFAULT_BROWSER_USER_DATA_SOURCE,
+  normalizeBrowserUserDataSource,
+  type BrowserUserDataSource
+} from '../../../shared/browser-plugin'
 
 export interface ModelBinding {
   providerId: string
@@ -237,6 +242,7 @@ interface SettingsStore {
   teamToolsEnabled: boolean
   builtinBrowserEnabled: boolean
   browserUserDataReuseEnabled: boolean
+  browserUserDataSource: BrowserUserDataSource
   contextCompressionEnabled: boolean
   editorWorkspaceEnabled: boolean
   editorRemoteLanguageServiceEnabled: boolean
@@ -331,6 +337,7 @@ export const useSettingsStore = create<SettingsStore>()(
       teamToolsEnabled: false,
       builtinBrowserEnabled: true,
       browserUserDataReuseEnabled: true,
+      browserUserDataSource: DEFAULT_BROWSER_USER_DATA_SOURCE,
       contextCompressionEnabled: true,
       editorWorkspaceEnabled: false,
       editorRemoteLanguageServiceEnabled: false,
@@ -404,7 +411,7 @@ export const useSettingsStore = create<SettingsStore>()(
     }),
     {
       name: 'opencowork-settings',
-      version: 20,
+      version: 21,
       storage: createJSONStorage(() => ipcStorage),
       migrate: (persisted: unknown, version: number) => {
         const state = persisted as Record<string, unknown>
@@ -565,6 +572,7 @@ export const useSettingsStore = create<SettingsStore>()(
         if (state.browserUserDataReuseEnabled === undefined) {
           state.browserUserDataReuseEnabled = true
         }
+        state.browserUserDataSource = normalizeBrowserUserDataSource(state.browserUserDataSource)
         state.shellExecutionEndpoint = normalizeShellExecutionEndpoint(state.shellExecutionEndpoint)
         if (typeof state.customShellExecutable !== 'string') {
           state.customShellExecutable = ''
@@ -636,7 +644,8 @@ export const useSettingsStore = create<SettingsStore>()(
         lastProjectDirectory: state.lastProjectDirectory,
         recentWorkingTargets: state.recentWorkingTargets,
         builtinBrowserEnabled: state.builtinBrowserEnabled,
-        browserUserDataReuseEnabled: state.browserUserDataReuseEnabled
+        browserUserDataReuseEnabled: state.browserUserDataReuseEnabled,
+        browserUserDataSource: normalizeBrowserUserDataSource(state.browserUserDataSource)
         // NOTE: apiKey is intentionally excluded from localStorage persistence.
         // In production, it should be stored securely in the main process.
       })

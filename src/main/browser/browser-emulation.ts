@@ -1,26 +1,34 @@
 import { app, session, type Session } from 'electron'
-import { existsSync } from 'fs'
+import { existsSync, readFileSync, readdirSync } from 'fs'
 import { join } from 'path'
 import { homedir, platform } from 'os'
 import { readSettings } from '../ipc/settings-handlers'
 import {
   BROWSER_SETTINGS_STORAGE_KEY,
+  BROWSER_USER_DATA_SOURCE_SETTING_KEY,
   BROWSER_USER_DATA_REUSE_SETTING_KEY,
   BUILTIN_BROWSER_PARTITION,
-  isBrowserUserDataReuseEnabled
+  isBrowserUserDataReuseEnabled,
+  normalizeBrowserUserDataSource,
+  type BrowserUserDataSource,
+  type ConcreteBrowserUserDataSource
 } from '../../shared/browser-plugin'
 
 interface BrowserProfileCandidate {
+  browserId: ConcreteBrowserUserDataSource
   browserName: string
   dataRoot: string
   profilePath: string
+  profileDisplayName: string
 }
 
 export interface BrowserSessionStorageMode {
   reuseEnabled: boolean
+  browserUserDataSource: BrowserUserDataSource
   browserName: string | null
   browserDataRoot: string | null
   browserProfilePath: string | null
+  browserProfileDisplayName: string | null
   sessionDataPath: string
   usingDetectedBrowserProfile: boolean
 }
@@ -47,30 +55,103 @@ export function readBrowserUserDataReuseEnabled(): boolean {
   )
 }
 
-function getBrowserProfileCandidates(): BrowserProfileCandidate[] {
+export function readBrowserUserDataSource(): BrowserUserDataSource {
+  return normalizeBrowserUserDataSource(
+    readPersistedSettingsState()[BROWSER_USER_DATA_SOURCE_SETTING_KEY]
+  )
+}
+
+interface BrowserInstallLocation {
+  browserId: ConcreteBrowserUserDataSource
+  browserName: string
+  dataRoot: string
+}
+
+function getProfileDisplayName(profileDirName: string): string {
+  return profileDirName === 'Default' ? 'Default' : profileDirName
+}
+
+function readLastUsedProfileDir(dataRoot: string): string | null {
+  try {
+    const localState = JSON.parse(readFileSync(join(dataRoot, 'Local State'), 'utf8')) as {
+      profile?: { last_used?: unknown }
+    }
+    const lastUsed = localState.profile?.last_used
+    return typeof lastUsed === 'string' && lastUsed.trim() ? lastUsed : null
+  } catch {
+    return null
+  }
+}
+
+function listProfileDirs(dataRoot: string): string[] {
+  try {
+    return readdirSync(dataRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .filter((name) => {
+        if (name === 'Default') return true
+        if (/^Profile \d+$/u.test(name)) return true
+        return existsSync(join(dataRoot, name, 'Preferences'))
+      })
+      .sort((left, right) => {
+        if (left === 'Default') return -1
+        if (right === 'Default') return 1
+        return left.localeCompare(right, undefined, { numeric: true })
+      })
+  } catch {
+    return []
+  }
+}
+
+function resolveProfileDirName(dataRoot: string): string | null {
+  const lastUsed = readLastUsedProfileDir(dataRoot)
+  if (lastUsed && existsSync(join(dataRoot, lastUsed))) return lastUsed
+
+  if (existsSync(join(dataRoot, 'Default'))) return 'Default'
+
+  return listProfileDirs(dataRoot)[0] ?? null
+}
+
+function toProfileCandidate(location: BrowserInstallLocation): BrowserProfileCandidate | null {
+  if (!existsSync(location.dataRoot)) return null
+
+  const profileDirName = resolveProfileDirName(location.dataRoot)
+  if (!profileDirName) return null
+
+  const profilePath = join(location.dataRoot, profileDirName)
+  if (!existsSync(profilePath)) return null
+
+  return {
+    ...location,
+    profilePath,
+    profileDisplayName: getProfileDisplayName(profileDirName)
+  }
+}
+
+function getBrowserInstallLocations(): BrowserInstallLocation[] {
   const home = homedir()
 
   if (platform() === 'darwin') {
     return [
       {
+        browserId: 'chrome',
         browserName: 'Google Chrome',
-        dataRoot: join(home, 'Library/Application Support/Google/Chrome'),
-        profilePath: join(home, 'Library/Application Support/Google/Chrome/Default')
+        dataRoot: join(home, 'Library/Application Support/Google/Chrome')
       },
       {
+        browserId: 'edge',
         browserName: 'Microsoft Edge',
-        dataRoot: join(home, 'Library/Application Support/Microsoft Edge'),
-        profilePath: join(home, 'Library/Application Support/Microsoft Edge/Default')
+        dataRoot: join(home, 'Library/Application Support/Microsoft Edge')
       },
       {
+        browserId: 'brave',
         browserName: 'Brave',
-        dataRoot: join(home, 'Library/Application Support/BraveSoftware/Brave-Browser'),
-        profilePath: join(home, 'Library/Application Support/BraveSoftware/Brave-Browser/Default')
+        dataRoot: join(home, 'Library/Application Support/BraveSoftware/Brave-Browser')
       },
       {
+        browserId: 'chromium',
         browserName: 'Chromium',
-        dataRoot: join(home, 'Library/Application Support/Chromium'),
-        profilePath: join(home, 'Library/Application Support/Chromium/Default')
+        dataRoot: join(home, 'Library/Application Support/Chromium')
       }
     ]
   }
@@ -79,56 +160,64 @@ function getBrowserProfileCandidates(): BrowserProfileCandidate[] {
     const localAppData = process.env.LOCALAPPDATA || join(home, 'AppData/Local')
     return [
       {
+        browserId: 'chrome',
         browserName: 'Google Chrome',
-        dataRoot: join(localAppData, 'Google/Chrome/User Data'),
-        profilePath: join(localAppData, 'Google/Chrome/User Data/Default')
+        dataRoot: join(localAppData, 'Google/Chrome/User Data')
       },
       {
+        browserId: 'edge',
         browserName: 'Microsoft Edge',
-        dataRoot: join(localAppData, 'Microsoft/Edge/User Data'),
-        profilePath: join(localAppData, 'Microsoft/Edge/User Data/Default')
+        dataRoot: join(localAppData, 'Microsoft/Edge/User Data')
       },
       {
+        browserId: 'brave',
         browserName: 'Brave',
-        dataRoot: join(localAppData, 'BraveSoftware/Brave-Browser/User Data'),
-        profilePath: join(localAppData, 'BraveSoftware/Brave-Browser/User Data/Default')
+        dataRoot: join(localAppData, 'BraveSoftware/Brave-Browser/User Data')
       },
       {
+        browserId: 'chromium',
         browserName: 'Chromium',
-        dataRoot: join(localAppData, 'Chromium/User Data'),
-        profilePath: join(localAppData, 'Chromium/User Data/Default')
+        dataRoot: join(localAppData, 'Chromium/User Data')
       }
     ]
   }
 
   return [
     {
+      browserId: 'chrome',
       browserName: 'Google Chrome',
-      dataRoot: join(home, '.config/google-chrome'),
-      profilePath: join(home, '.config/google-chrome/Default')
+      dataRoot: join(home, '.config/google-chrome')
     },
     {
+      browserId: 'edge',
       browserName: 'Microsoft Edge',
-      dataRoot: join(home, '.config/microsoft-edge'),
-      profilePath: join(home, '.config/microsoft-edge/Default')
+      dataRoot: join(home, '.config/microsoft-edge')
     },
     {
+      browserId: 'brave',
       browserName: 'Brave',
-      dataRoot: join(home, '.config/BraveSoftware/Brave-Browser'),
-      profilePath: join(home, '.config/BraveSoftware/Brave-Browser/Default')
+      dataRoot: join(home, '.config/BraveSoftware/Brave-Browser')
     },
     {
+      browserId: 'chromium',
       browserName: 'Chromium',
-      dataRoot: join(home, '.config/chromium'),
-      profilePath: join(home, '.config/chromium/Default')
+      dataRoot: join(home, '.config/chromium')
     }
   ]
 }
 
-function resolveDetectedBrowserProfile(): BrowserProfileCandidate | null {
-  return (
-    getBrowserProfileCandidates().find((candidate) => existsSync(candidate.profilePath)) ?? null
-  )
+function getBrowserProfileCandidates(): BrowserProfileCandidate[] {
+  return getBrowserInstallLocations()
+    .map((location) => toProfileCandidate(location))
+    .filter((candidate): candidate is BrowserProfileCandidate => Boolean(candidate))
+}
+
+function resolveDetectedBrowserProfile(
+  browserUserDataSource: BrowserUserDataSource
+): BrowserProfileCandidate | null {
+  const candidates = getBrowserProfileCandidates()
+  if (browserUserDataSource === 'auto') return candidates[0] ?? null
+  return candidates.find((candidate) => candidate.browserId === browserUserDataSource) ?? null
 }
 
 export function resolveBrowserSessionStorageMode(
@@ -137,14 +226,17 @@ export function resolveBrowserSessionStorageMode(
   if (cachedStorageMode) return cachedStorageMode
 
   const reuseEnabled = readBrowserUserDataReuseEnabled()
-  const detectedProfile = reuseEnabled ? resolveDetectedBrowserProfile() : null
+  const browserUserDataSource = readBrowserUserDataSource()
+  const detectedProfile = reuseEnabled ? resolveDetectedBrowserProfile(browserUserDataSource) : null
   const sessionDataPath = detectedProfile?.profilePath ?? join(appUserDataPath, 'session-data')
 
   cachedStorageMode = {
     reuseEnabled,
+    browserUserDataSource,
     browserName: detectedProfile?.browserName ?? null,
     browserDataRoot: detectedProfile?.dataRoot ?? null,
     browserProfilePath: detectedProfile?.profilePath ?? null,
+    browserProfileDisplayName: detectedProfile?.profileDisplayName ?? null,
     sessionDataPath,
     usingDetectedBrowserProfile: Boolean(detectedProfile)
   }

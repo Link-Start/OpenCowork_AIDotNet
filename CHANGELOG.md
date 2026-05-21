@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.100] - 2026-05-21
+
+### Changed
+
+- Bumped the application version for the next release cycle.
+- Added browser user-data source settings and profile detection support for built-in browser session reuse.
+- Persisted browser user-data source selection through settings migration and storage normalization.
+
 ## [0.9.98] - 2026-05-21
 
 ### Added
