@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.103] - 2026-05-21
+
+### Fixed
+
+- Isolated built-in browser session storage to prevent contamination of the user's native browser profiles.
+- fix(cron): replaced string-concatenated output with chunk-based buffer decoding to avoid encoding truncation.
+- fix(weixin): added i18n error keys for QR code and login failure scenarios.
+- fix(todo): respected `teamToolsEnabled` setting in `hasActiveTeam` guard.
+
+### Added
+
+- feat(images): enhanced GIF fallback when no structured frames are available, with improved error branch handling.
+- feat(teams): added filtered task definition and disabled-state filtering for team tools.
+- feat(plugin): rewrote auto-reply flow with streaming text append, error tracing, full persistence, and replay support.
+- feat(chat): added session deduplication by ID (dedupeSessionsById) and image preview in InputArea.
+
 ## [0.9.102] - 2026-05-21
 
 ### Fixed
