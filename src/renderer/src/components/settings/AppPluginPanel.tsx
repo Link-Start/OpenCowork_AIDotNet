@@ -62,6 +62,7 @@ interface BrowserEmulationStatus {
   usingDetectedBrowserProfile: boolean
   userAgent: string
   acceptLanguages: string
+  browserSessionStoragePath: string | null
 }
 
 const TOOL_ARG_LABELS: Record<AppPluginToolName, string[]> = {
@@ -557,6 +558,13 @@ export function AppPluginPanel(): React.JSX.Element {
                     ) : (
                       <p>{t('plugin.browser.profileFallback')}</p>
                     )}
+                    {browserEmulationStatus?.browserSessionStoragePath ? (
+                      <p>
+                        {t('plugin.browser.isolatedStorage', {
+                          path: browserEmulationStatus.browserSessionStoragePath
+                        })}
+                      </p>
+                    ) : null}
                     <p>{t('plugin.browser.restartRequired')}</p>
                   </div>
                 </div>

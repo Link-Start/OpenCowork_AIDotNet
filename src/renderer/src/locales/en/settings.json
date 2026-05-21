@@ -419,8 +419,8 @@
       "clearingCookies": "Clearing...",
       "cookiesCleared": "Browser cookies cleared",
       "cookiesClearFailed": "Failed to clear browser cookies",
-      "userDataReuse": "Reuse local browser profile",
-      "userDataReuseDesc": "Default on. The built-in browser uses a Chrome-like identity and tries to reuse the selected local browser profile storage.",
+      "userDataReuse": "Simulate local browser profile",
+      "userDataReuseDesc": "Default on. The built-in browser uses the selected browser identity while keeping OpenCowork storage isolated to protect local browser data.",
       "userDataSource": "Browser data source",
       "userDataSourceDesc": "Choose which installed browser profile OpenCowork should try first.",
       "sources": {
@@ -430,8 +430,9 @@
         "brave": "Brave",
         "chromium": "Chromium"
       },
-      "activeProfile": "Active profile: {{browserName}} / {{profileName}} — {{path}}",
-      "profileFallback": "No profile was detected for the selected source, so OpenCowork is using its own browser profile.",
+      "activeProfile": "Detected source profile: {{browserName}} / {{profileName}} — {{path}}",
+      "profileFallback": "No profile was detected for the selected source, so OpenCowork is using its own browser identity.",
+      "isolatedStorage": "Isolated storage: {{path}}",
       "restartRequired": "Restart OpenCowork for this browser profile mode to fully take effect.",
       "blockedDomains": "Blocked domains",
       "blockedDomainsDesc": "Navigation to these domains and subdomains is denied.",

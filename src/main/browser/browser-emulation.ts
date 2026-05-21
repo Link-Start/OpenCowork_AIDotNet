@@ -229,7 +229,9 @@ export function resolveBrowserSessionStorageMode(
   const reuseEnabled = readBrowserUserDataReuseEnabled()
   const browserUserDataSource = readBrowserUserDataSource()
   const detectedProfile = reuseEnabled ? resolveDetectedBrowserProfile(browserUserDataSource) : null
-  const sessionDataPath = detectedProfile?.profilePath ?? join(appUserDataPath, 'session-data')
+  // Never point Electron's writable sessionData at a real Chrome/Edge profile:
+  // Chromium will create or update cookies, local storage, caches, and profile metadata there.
+  const sessionDataPath = join(appUserDataPath, 'session-data')
 
   cachedStorageMode = {
     reuseEnabled,

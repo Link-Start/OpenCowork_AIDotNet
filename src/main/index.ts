@@ -421,7 +421,7 @@ function configureChromiumCachePaths(): void {
     app.commandLine.appendSwitch('disk-cache-dir', diskCachePath)
     if (browserStorageMode.usingDetectedBrowserProfile) {
       console.log(
-        `[Browser] Reusing ${browserStorageMode.browserName} profile data: ${browserStorageMode.browserProfilePath}`
+        `[Browser] Using isolated browser storage while emulating ${browserStorageMode.browserName} profile: ${browserStorageMode.browserProfilePath}`
       )
     } else if (browserStorageMode.reuseEnabled) {
       console.log('[Browser] Browser profile reuse enabled, but no supported profile was found')

@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.102] - 2026-05-21
+
+### Fixed
+
+- Protected real Chrome/Edge/Brave/Chromium profiles by keeping Electron's writable browser session data inside OpenCowork's isolated storage.
+- Clarified browser settings copy so selected browser profiles are used for identity emulation, not direct writable storage reuse.
+
 ## [0.9.101] - 2026-05-21
 
 ### Changed

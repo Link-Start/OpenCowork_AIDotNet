@@ -419,8 +419,8 @@
       "clearingCookies": "清理中...",
       "cookiesCleared": "浏览器 Cookie 已清理",
       "cookiesClearFailed": "清理浏览器 Cookie 失败",
-      "userDataReuse": "复用本机浏览器 Profile",
-      "userDataReuseDesc": "默认开启。内置浏览器会使用接近 Chrome 的身份，并尽量复用所选本机浏览器 Profile 的存储。",
+      "userDataReuse": "模拟本机浏览器 Profile",
+      "userDataReuseDesc": "默认开启。内置浏览器会使用所选浏览器的身份，同时将 OpenCowork 存储保持在隔离目录，避免写入本机浏览器数据。",
       "userDataSource": "浏览器数据来源",
       "userDataSourceDesc": "选择 OpenCowork 优先尝试复用哪一个已安装浏览器的 Profile。",
       "sources": {
@@ -430,8 +430,9 @@
         "brave": "Brave",
         "chromium": "Chromium"
       },
-      "activeProfile": "当前 Profile：{{browserName}} / {{profileName}} — {{path}}",
-      "profileFallback": "未检测到所选来源的 Profile，当前使用 OpenCowork 自己的浏览器 Profile。",
+      "activeProfile": "检测到的来源 Profile：{{browserName}} / {{profileName}} — {{path}}",
+      "profileFallback": "未检测到所选来源的 Profile，当前使用 OpenCowork 自己的浏览器身份。",
+      "isolatedStorage": "隔离存储目录：{{path}}",
       "restartRequired": "重启 OpenCowork 后，此浏览器 Profile 模式才会完全生效。",
       "blockedDomains": "禁止访问域名",
       "blockedDomainsDesc": "命中的域名及其子域名会被拒绝导航。",
