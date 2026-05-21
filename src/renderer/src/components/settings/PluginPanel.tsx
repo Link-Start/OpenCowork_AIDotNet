@@ -271,7 +271,9 @@ function ChannelConfigPanelContent({
       }
 
       if ((!startResult?.qrDataUrl && !startResult?.qrUrl) || !startResult.sessionKey) {
-        throw new Error(startResult?.message || 'Failed to get QR code')
+        throw new Error(
+          startResult?.message || t('channel.weixin.qrCodeFailed', 'Failed to get QR code')
+        )
       }
 
       setWeixinQrUrl(startResult.qrDataUrl || startResult.qrUrl || '')
@@ -299,7 +301,9 @@ function ChannelConfigPanelContent({
       setWeixinLoginMessage(waitResult.message)
 
       if (!waitResult.connected || !waitResult.token) {
-        throw new Error(waitResult.message || 'WeChat binding failed')
+        throw new Error(
+          waitResult.message || t('channel.weixin.loginFailed', 'WeChat binding failed')
+        )
       }
 
       const nextConfig = {
@@ -422,7 +426,7 @@ function ChannelConfigPanelContent({
             className="h-10 text-sm"
             value={localName}
             onChange={(e) => handleNameChange(e.target.value)}
-            placeholder={descriptor?.displayName ?? 'Plugin'}
+            placeholder={descriptor?.displayName ?? t('channel.plugin', 'Plugin')}
           />
         </section>
 
@@ -909,13 +913,13 @@ function ChannelConfigPanelContent({
                     <div className="rounded-md border bg-white p-3 flex justify-center">
                       <img
                         src={weixinQrUrl}
-                        alt="Weixin QR"
+                        alt={t('channel.weixin.qrAlt', 'Weixin QR code')}
                         className="max-h-[420px] w-auto object-contain"
                       />
                     </div>
                     {weixinSessionKey && (
                       <p className="text-[10px] text-muted-foreground font-mono break-all">
-                        session: {weixinSessionKey}
+                        {t('channel.weixin.sessionLabel', 'Session')}: {weixinSessionKey}
                       </p>
                     )}
                   </div>
@@ -942,7 +946,7 @@ function ChannelConfigPanelContent({
               className="h-9 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive"
               onClick={() => {
                 removeChannel(plugin.id)
-                toast.success(t('channel.removed', 'Plugin removed'))
+                toast.success(t('channel.removed', 'Channel removed'))
               }}
             >
               {t('channel.remove', 'Remove')}
@@ -989,12 +993,17 @@ function ChannelConfigPanelContent({
 
 // ─── Category grouping for built-in plugins ───
 
-const PLUGIN_CATEGORIES: { label: string; types: string[] }[] = [
+const PLUGIN_CATEGORIES: { labelKey: string; defaultLabel: string; types: string[] }[] = [
   {
-    label: 'China',
+    labelKey: 'channel.categoryChina',
+    defaultLabel: 'China',
     types: ['feishu-bot', 'dingtalk-bot', 'wecom-bot', 'qq-bot', 'weixin-official']
   },
-  { label: 'International', types: ['telegram-bot', 'discord-bot', 'whatsapp-bot'] }
+  {
+    labelKey: 'channel.categoryInternational',
+    defaultLabel: 'International',
+    types: ['telegram-bot', 'discord-bot', 'whatsapp-bot']
+  }
 ]
 
 // ─── Main Plugin Panel ───
@@ -1097,9 +1106,9 @@ export function ChannelPanel({ projectId }: ChannelPanelProps = {}): React.JSX.E
               )
               if (categoryPlugins.length === 0) return null
               return (
-                <section key={category.label} className="mb-4 last:mb-0">
+                <section key={category.labelKey} className="mb-4 last:mb-0">
                   <p className="mb-2 px-2 text-[10px] font-medium uppercase tracking-[0.18em] text-muted-foreground/50">
-                    {category.label}
+                    {t(category.labelKey, category.defaultLabel)}
                   </p>
                   <div className="space-y-1.5">
                     {categoryPlugins.map((p) => {

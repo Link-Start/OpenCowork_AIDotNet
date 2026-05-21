@@ -731,6 +731,22 @@ const FEISHU_TOOLS: ToolHandler[] = [
 ]
 
 const WEIXIN_TOOLS: ToolHandler[] = [weixinSendImage, weixinSendFile]
+const COMMON_PLUGIN_TOOL_NAMES = [
+  pluginSendMessage,
+  pluginReplyMessage,
+  pluginGetGroupMessages,
+  pluginListGroups,
+  pluginSummarizeGroup,
+  pluginGetCurrentChatMessages
+].map((tool) => tool.definition.name)
+const FEISHU_PLUGIN_TOOL_NAMES = [
+  ...COMMON_PLUGIN_TOOL_NAMES,
+  ...FEISHU_TOOLS.map((tool) => tool.definition.name)
+]
+const WEIXIN_PLUGIN_TOOL_NAMES = [
+  ...COMMON_PLUGIN_TOOL_NAMES,
+  ...WEIXIN_TOOLS.map((tool) => tool.definition.name)
+]
 
 const ALL_PLUGIN_TOOLS: ToolHandler[] = [
   pluginSendMessage,
@@ -747,6 +763,13 @@ export const PLUGIN_TOOL_DEFINITIONS = ALL_PLUGIN_TOOLS.map((tool) => ({
   name: tool.definition.name,
   description: tool.definition.description
 }))
+
+export function getDefaultPluginToolNamesForType(pluginType?: string): string[] {
+  const type = (pluginType ?? '').toLowerCase()
+  if (type === 'weixin-official') return [...WEIXIN_PLUGIN_TOOL_NAMES]
+  if (type === 'feishu-bot' || type === 'feishu') return [...FEISHU_PLUGIN_TOOL_NAMES]
+  return [...COMMON_PLUGIN_TOOL_NAMES]
+}
 
 let _registered = false
 

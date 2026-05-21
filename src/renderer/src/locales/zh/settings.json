@@ -773,7 +773,6 @@
     },
     "promptCache": "Prompt 缓存（Responses）",
     "systemPromptCache": "System 缓存（Anthropic）",
-
     "capabilities": "能力",
     "supportsVision": "支持视觉（图片输入）",
     "supportsFunctionCall": "支持函数调用",
@@ -820,7 +819,7 @@
     "oauthTabManual": "手动导入",
     "copyAccountJson": "复制账户 JSON",
     "copyAccountJsonSuccess": "已复制到剪贴板",
-    "copyAccountJsonNoToken": "未登录，无法复制",
+    "copyAccountJsonNoToken": "请先完成登录",
     "copyAccountJsonFailed": "复制失败",
     "openLink": "打开链接",
     "oauthVerificationUrl": "验证地址",
@@ -856,16 +855,6 @@
     "copilotChatDisabled": "未启用",
     "premiumRequestMultiplier": "Premium 倍率",
     "availablePlans": "可用计划",
-    "oauthTabConnect": "OAuth 授权",
-    "oauthTabManual": "手动导入",
-    "fetchQuota": "刷新配额",
-    "fetchingQuota": "刷新中...",
-    "quotaFetched": "配额已更新",
-    "quotaFetchFailed": "获取配额失败",
-    "copyAccountJson": "复制账户 JSON",
-    "copyAccountJsonSuccess": "已复制到剪贴板",
-    "copyAccountJsonNoToken": "请先完成登录",
-    "copyAccountJsonFailed": "复制失败",
     "channelLogin": "渠道商登录",
     "channelConnected": "已连接",
     "channelNotConnected": "未连接",
@@ -901,7 +890,7 @@
     "channelRequired": "请先完成渠道商验证"
   },
   "channel": {
-    "title": "聊天频道",
+    "title": "频道",
     "subtitle": "配置和管理聊天频道",
     "search": "搜索频道...",
     "addChannel": "添加频道",
@@ -910,11 +899,11 @@
     "addPluginDesc": "选择要添加的频道提供商。",
     "added": "频道已添加",
     "removed": "频道已移除",
-    "botName": "机器人名称",
+    "botName": "频道名称",
     "systemPrompt": "系统提示词",
     "model": "回复模型",
     "modelDefault": "使用全局默认",
-    "modelHint": "频道自动回复所用模型。保留默认将使用当前全局模型。",
+    "modelHint": "频道自动回复所使用的模型。保留默认值将使用当前全局模型。",
     "features": "功能",
     "autoReply": "自动回复",
     "autoReplyDesc": "收到消息后自动调用 Agent 回复",
@@ -940,7 +929,7 @@
     "remove": "移除",
     "noChannels": "未配置频道",
     "noPlugins": "未配置频道",
-    "selectToConfig": "选择一个频道开始配置",
+    "selectToConfig": "选择一个频道进行配置",
     "security": "安全与权限",
     "allowReadHome": "读取主目录",
     "allowReadHomeDesc": "允许读取主目录 (~) 下的文件",
@@ -950,40 +939,38 @@
     "allowShell": "Shell 执行",
     "allowShellDesc": "允许执行终端命令（高风险）",
     "allowWriteOutside": "写入工作目录外",
-    "allowWriteOutsideDesc": "允许在频道目录之外写入文件",
+    "allowWriteOutsideDesc": "允许在频道目录之外写入文件。",
     "allowSubAgents": "子代理工具",
     "allowSubAgentsDesc": "允许使用 Task 等子代理工具",
     "custom": "自定义",
     "wsUrl": "WS 中继地址",
     "feishu": {
-      "appId": "飞书 App ID",
-      "appSecret": "飞书 App Secret"
+      "appId": "App ID",
+      "appSecret": "App Secret"
     },
     "dingtalk": {
-      "appKey": "钉钉 App Key",
-      "appSecret": "钉钉 App Secret",
-      "cardTemplateId": "钉钉卡片模板 ID"
+      "appKey": "App Key",
+      "appSecret": "App Secret",
+      "cardTemplateId": "卡片模板 ID"
     },
     "wecom": {
-      "corpId": "企业微信 Corp ID",
-      "secret": "企业微信 Secret",
-      "agentId": "企业微信 Agent ID"
+      "corpId": "企业 ID",
+      "secret": "Secret",
+      "agentId": "Agent ID"
     },
     "qq": {
-      "appId": "QQ App ID",
-      "clientSecret": "QQ Client Secret",
-      "useSandbox": "QQ 沙箱开关",
-      "markdownSupport": "QQ Markdown 开关"
+      "appId": "App ID",
+      "clientSecret": "Client Secret"
     },
     "telegram": {
-      "botToken": "Telegram Bot Token"
+      "botToken": "Bot Token"
     },
     "discord": {
-      "botToken": "Discord Bot Token"
+      "botToken": "Bot Token"
     },
     "whatsapp": {
-      "phoneNumberId": "WhatsApp Phone Number ID",
-      "accessToken": "WhatsApp Access Token"
+      "phoneNumberId": "Phone Number ID",
+      "accessToken": "Access Token"
     },
     "weixin": {
       "baseUrl": "微信网关地址",
@@ -997,13 +984,16 @@
       "bindingDesc": "通过扫码获取 token，并启用长轮询收发消息。",
       "bind": "绑定微信",
       "rebind": "重新绑定",
-      "refreshQr": "刷新二维码",
       "bindingInProgress": "绑定中...",
       "baseUrlMissing": "请先填写微信网关地址",
       "loginStarting": "正在生成二维码...",
       "scanHint": "请使用微信扫码确认",
       "loginSuccess": "微信绑定成功",
-      "loginFailed": "微信绑定失败"
+      "loginFailed": "微信绑定失败",
+      "refreshQr": "刷新二维码",
+      "qrCodeFailed": "获取二维码失败",
+      "qrAlt": "微信二维码",
+      "sessionLabel": "会话"
     },
     "toolsDesc": {
       "PluginSendMessage": "通过频道发送消息",
@@ -1025,53 +1015,25 @@
       "FeishuBitableUpdateRecords": "更新数据表记录",
       "FeishuBitableDeleteRecords": "删除数据表记录"
     },
-    "feishu": {
-      "appId": "App ID",
-      "appSecret": "App Secret"
-    },
-    "dingtalk": {
-      "appKey": "App Key",
-      "appSecret": "App Secret",
-      "cardTemplateId": "卡片模板 ID"
-    },
-    "wecom": {
-      "corpId": "企业 ID",
-      "secret": "Secret",
-      "agentId": "Agent ID"
-    },
-    "telegram": {
-      "botToken": "Bot Token"
-    },
-    "discord": {
-      "botToken": "Bot Token"
-    },
-    "whatsapp": {
-      "phoneNumberId": "Phone Number ID",
-      "accessToken": "Access Token"
-    },
-    "qq": {
-      "appId": "App ID",
-      "clientSecret": "Client Secret"
-    },
-    "weixin": {
-      "baseUrl": "微信网关地址",
-      "routeTag": "SKRouteTag",
-      "token": "微信 Token",
-      "accountId": "微信账号 ID",
-      "userId": "微信用户 ID",
-      "binding": "微信绑定",
-      "bound": "已绑定官方微信账号",
-      "unbound": "未绑定官方微信账号",
-      "bindingDesc": "通过扫码获取 token，并启用长轮询收发消息。",
-      "bind": "绑定微信",
-      "rebind": "重新绑定",
-      "bindingInProgress": "绑定中...",
-      "baseUrlMissing": "请先填写微信网关地址",
-      "loginStarting": "正在生成二维码...",
-      "scanHint": "请使用微信扫码确认",
-      "loginSuccess": "微信绑定成功",
-      "loginFailed": "微信绑定失败"
-    }
+    "platforms": "平台",
+    "categoryChina": "中国",
+    "categoryInternational": "国际",
+    "plugin": "插件",
+    "botNameDesc": "用于在项目中识别这个聊天频道。",
+    "platform": "平台",
+    "replyModelShort": "模型",
+    "autoSaveHint": "修改后自动保存",
+    "autoSaveFooter": "频道配置会自动保存，并在项目内立即生效。",
+    "advanced": "高级设置",
+    "advancedDesc": "展开可配置回复策略、工具能力和权限边界。",
+    "advancedHint": "可折叠",
+    "featuresDesc": "自动回复、流式回复和自动启动策略。",
+    "toolsPanelDesc": "控制该频道可用的专属工具。",
+    "securityDesc": "限制频道的读写范围、命令执行和子代理能力。",
+    "bound": "已绑定",
+    "boundCurrentProject": "已绑定到当前项目",
+    "unboundProject": "未绑定项目",
+    "noProjectChannels": "当前项目没有可配置的频道"
   },
   "mcp": {
     "title": "MCP 服务器",

@@ -28,13 +28,22 @@ import { useAgentStore } from '@renderer/stores/agent-store'
 import { useSshStore } from '@renderer/stores/ssh-store'
 import { ipcClient } from '@renderer/lib/ipc/ipc-client'
 import { IPC } from '@renderer/lib/ipc/channels'
-import { registerPluginTools, isPluginToolsRegistered } from '@renderer/lib/channel/plugin-tools'
+import {
+  registerPluginTools,
+  isPluginToolsRegistered,
+  getDefaultPluginToolNamesForType
+} from '@renderer/lib/channel/plugin-tools'
 import { DEFAULT_PLUGIN_PERMISSIONS } from '@renderer/lib/channel/types'
 import { loadLayeredMemorySnapshot } from '@renderer/lib/agent/memory-files'
-import type { UnifiedMessage, ProviderConfig, ContentBlock } from '@renderer/lib/api/types'
-import type { Session } from '@renderer/stores/chat-store'
+import type {
+  UnifiedMessage,
+  ProviderConfig,
+  ContentBlock,
+  ToolUseBlock
+} from '@renderer/lib/api/types'
 import { hasPendingSessionMessagesForSession } from '@renderer/hooks/use-chat-actions'
 import { recordUsageEvent } from '@renderer/lib/usage-analytics'
+import { emitSessionRuntimeSync } from '@renderer/lib/session-runtime-sync'
 import {
   buildSystemPromptContextCacheKey,
   haveSameToolDefinitions
@@ -44,6 +53,26 @@ import {
   summarizeToolInputForHistory,
   summarizeToolInputForLiveCard
 } from '@renderer/lib/tools/tool-input-sanitizer'
+import { filterTeamToolDefinitions } from '@renderer/lib/agent/teams/register'
+
+interface PluginSessionSummaryRow {
+  id: string
+  title: string
+  icon: string | null
+  mode: string
+  created_at: number
+  updated_at: number
+  project_id?: string | null
+  working_folder: string | null
+  ssh_connection_id?: string | null
+  plan_id?: string | null
+  pinned: number
+  message_count?: number
+  plugin_id?: string | null
+  external_chat_id?: string | null
+  provider_id?: string | null
+  model_id?: string | null
+}
 
 interface PluginAutoReplyTask {
   sessionId: string
@@ -66,7 +95,6 @@ interface PluginAutoReplyTask {
 }
 
 const PLUGIN_STREAM_DELTA_FLUSH_MS = 66
-const PLUGIN_PROCESSING_ACK_MESSAGE = 'Message received, processing, please wait.'
 const pluginTaskChains = new Map<string, Promise<void>>()
 const queuedPluginTasksByScope = new Map<string, number>()
 const queuedPluginTasksBySession = new Map<string, number>()
@@ -103,6 +131,162 @@ function shouldReplaceSessionTitle(
     /^oc_/i.test(current) ||
     /^Plugin\s+/i.test(current)
   )
+}
+
+function buildPluginSessionSummaryRow(args: {
+  id: string
+  title: string
+  mode?: string
+  icon?: string | null
+  createdAt?: number
+  updatedAt?: number
+  projectId?: string | null
+  workingFolder?: string | null
+  sshConnectionId?: string | null
+  planId?: string | null
+  pinned?: boolean | number
+  messageCount?: number
+  pluginId: string
+  chatId: string
+  externalChatId?: string | null
+  providerId?: string | null
+  modelId?: string | null
+}): PluginSessionSummaryRow {
+  const now = Date.now()
+  return {
+    id: args.id,
+    title: args.title,
+    icon: args.icon ?? null,
+    mode: args.mode || 'cowork',
+    created_at: args.createdAt ?? now,
+    updated_at: args.updatedAt ?? now,
+    project_id: args.projectId ?? null,
+    working_folder: args.workingFolder || null,
+    ssh_connection_id: args.sshConnectionId ?? null,
+    plan_id: args.planId ?? null,
+    pinned: typeof args.pinned === 'number' ? args.pinned : args.pinned ? 1 : 0,
+    message_count: args.messageCount ?? 0,
+    plugin_id: args.pluginId,
+    external_chat_id:
+      args.externalChatId ?? buildPluginMessageSessionKey(args.pluginId, args.chatId),
+    provider_id: args.providerId ?? null,
+    model_id: args.modelId ?? null
+  }
+}
+
+function stripThinkTagMarkers(text: string): string {
+  return text.replace(/<\s*\/?\s*think\s*>/gi, '')
+}
+
+function beginPluginRuntimeTurn(
+  sessionId: string,
+  userMsg: UnifiedMessage,
+  assistantMsg: UnifiedMessage,
+  assistantMsgId: string
+): void {
+  useChatStore.getState().beginUserTurn(sessionId, userMsg, assistantMsg, assistantMsgId)
+  emitSessionRuntimeSync({ kind: 'add_message', sessionId, message: userMsg })
+  emitSessionRuntimeSync({ kind: 'add_message', sessionId, message: assistantMsg })
+  emitSessionRuntimeSync({ kind: 'set_streaming_message', sessionId, messageId: assistantMsgId })
+}
+
+function addPluginRuntimeMessage(sessionId: string, message: UnifiedMessage): void {
+  useChatStore.getState().addMessage(sessionId, message)
+  emitSessionRuntimeSync({ kind: 'add_message', sessionId, message })
+}
+
+function setPluginRuntimeStreamingMessage(sessionId: string, messageId: string | null): void {
+  useChatStore.getState().setStreamingMessageId(sessionId, messageId)
+  emitSessionRuntimeSync({ kind: 'set_streaming_message', sessionId, messageId })
+}
+
+function updatePluginRuntimeMessage(
+  sessionId: string,
+  messageId: string,
+  patch: Partial<UnifiedMessage>
+): void {
+  useChatStore.getState().updateMessage(sessionId, messageId, patch)
+  emitSessionRuntimeSync({ kind: 'update_message', sessionId, messageId, patch })
+}
+
+function appendPluginRuntimeTextDelta(sessionId: string, messageId: string, text: string): void {
+  if (!text) return
+  useChatStore.getState().appendTextDelta(sessionId, messageId, text)
+  emitSessionRuntimeSync({ kind: 'append_text_delta', sessionId, messageId, text })
+}
+
+function appendPluginRuntimeThinkingDelta(
+  sessionId: string,
+  messageId: string,
+  thinking: string
+): void {
+  const cleanedThinking = stripThinkTagMarkers(thinking)
+  if (!cleanedThinking) return
+  useChatStore.getState().appendThinkingDelta(sessionId, messageId, cleanedThinking)
+  emitSessionRuntimeSync({
+    kind: 'append_thinking_delta',
+    sessionId,
+    messageId,
+    thinking: cleanedThinking
+  })
+}
+
+function setPluginRuntimeThinkingEncryptedContent(
+  sessionId: string,
+  messageId: string,
+  encryptedContent: string,
+  provider: 'anthropic' | 'openai-responses' | 'google'
+): void {
+  if (!encryptedContent) return
+  useChatStore
+    .getState()
+    .setThinkingEncryptedContent(sessionId, messageId, encryptedContent, provider)
+  emitSessionRuntimeSync({
+    kind: 'set_thinking_encrypted',
+    sessionId,
+    messageId,
+    encryptedContent,
+    provider
+  })
+}
+
+function completePluginRuntimeThinking(sessionId: string, messageId: string): void {
+  useChatStore.getState().completeThinking(sessionId, messageId)
+  emitSessionRuntimeSync({ kind: 'complete_thinking', sessionId, messageId })
+}
+
+function appendPluginRuntimeToolUse(
+  sessionId: string,
+  messageId: string,
+  toolUse: ToolUseBlock
+): void {
+  const normalizedToolUse: ToolUseBlock = {
+    ...toolUse,
+    input: summarizeToolInputForHistory(toolUse.name, toolUse.input)
+  }
+  useChatStore.getState().appendToolUse(sessionId, messageId, normalizedToolUse)
+  emitSessionRuntimeSync({
+    kind: 'append_tool_use',
+    sessionId,
+    messageId,
+    toolUse: normalizedToolUse
+  })
+}
+
+function updatePluginRuntimeToolUseInput(
+  sessionId: string,
+  messageId: string,
+  toolUseId: string,
+  input: Record<string, unknown>
+): void {
+  useChatStore.getState().updateToolUseInput(sessionId, messageId, toolUseId, input)
+  emitSessionRuntimeSync({
+    kind: 'update_tool_use_input',
+    sessionId,
+    messageId,
+    toolUseId,
+    input
+  })
 }
 
 async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
@@ -150,17 +334,6 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
 
   const sendChannelNotice = async (message: string): Promise<void> => {
     await sendPluginMessage(message)
-  }
-
-  let immediateAckSent = false
-  const sendImmediateAck = async (): Promise<void> => {
-    if (immediateAckSent) return
-    immediateAckSent = true
-    await sendChannelNotice(PLUGIN_PROCESSING_ACK_MESSAGE)
-  }
-
-  if (!shouldUseStreamingReply) {
-    await sendImmediateAck()
   }
 
   // ── Provider config (with per-channel model override) ──
@@ -272,16 +445,12 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
         pluginId,
         chatId,
         streamId,
-        initialContent: PLUGIN_PROCESSING_ACK_MESSAGE,
+        initialContent: '',
         messageId: task.messageId
       })) as { ok: boolean }
       streamingActive = !!res?.ok
-      if (!streamingActive) {
-        await sendImmediateAck()
-      }
     } catch (err) {
       console.warn('[PluginAutoReply] Failed to start streaming card:', err)
-      await sendImmediateAck()
     }
   }
 
@@ -343,48 +512,67 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
   }
 
   let session = useChatStore.getState().sessions.find((s) => s.id === sessionId)
+  if (session) {
+    useChatStore.getState().upsertSessionFromSync(
+      buildPluginSessionSummaryRow({
+        id: sessionId,
+        title: shouldReplaceSessionTitle(session.title, resolvedTitle)
+          ? resolvedTitle
+          : session.title || resolvedTitle,
+        icon: session.icon ?? null,
+        mode: session.mode,
+        createdAt: session.createdAt,
+        updatedAt: session.updatedAt,
+        projectId: channelProjectId ?? session.projectId ?? null,
+        workingFolder: channelWorkDir || session.workingFolder || null,
+        sshConnectionId: channelSshConnectionId ?? session.sshConnectionId ?? null,
+        planId: session.planId ?? null,
+        pinned: session.pinned,
+        messageCount: session.messageCount,
+        pluginId: session.pluginId ?? pluginId,
+        chatId: task.chatId,
+        externalChatId:
+          session.externalChatId ?? buildPluginMessageSessionKey(pluginId, task.chatId),
+        providerId: session.providerId ?? channelMeta?.providerId ?? null,
+        modelId: session.modelId ?? channelMeta?.model ?? null
+      }),
+      { preserveLoadedMessages: true }
+    )
+    session = useChatStore.getState().sessions.find((s) => s.id === sessionId)
+  }
   if (!session) {
     try {
       const row = (await ipcClient.invoke('db:sessions:get', sessionId)) as {
-        session?: {
-          title?: string
-          mode?: string
-          created_at?: number
-          updated_at?: number
-          project_id?: string | null
-          working_folder?: string | null
-          ssh_connection_id?: string | null
-          provider_id?: string | null
-          model_id?: string | null
-        }
+        session?: Partial<PluginSessionSummaryRow>
       } | null
       const dbSession = row?.session
       if (dbSession) {
-        const newSession: Session = {
-          id: sessionId,
+        const sessionRow = buildPluginSessionSummaryRow({
+          id: dbSession.id || sessionId,
           title: shouldReplaceSessionTitle(dbSession.title, resolvedTitle)
             ? resolvedTitle
             : dbSession.title || resolvedTitle,
-          mode: (dbSession.mode as 'chat' | 'clarify' | 'cowork' | 'code' | 'acp') || 'cowork',
-          messages: [],
-          messageCount: 0,
-          messagesLoaded: true,
-          loadedRangeStart: 0,
-          loadedRangeEnd: 0,
+          icon: dbSession.icon ?? null,
+          mode: dbSession.mode || 'cowork',
           createdAt: dbSession.created_at ?? Date.now(),
           updatedAt: dbSession.updated_at ?? Date.now(),
-          projectId: dbSession.project_id ?? channelProjectId,
-          workingFolder: dbSession.working_folder || channelWorkDir,
-          sshConnectionId: dbSession.ssh_connection_id ?? channelSshConnectionId,
-          pluginId,
-          externalChatId: buildPluginMessageSessionKey(pluginId, task.chatId),
-          providerId: dbSession.provider_id || channelMeta?.providerId || undefined,
-          modelId: dbSession.model_id || channelMeta?.model || undefined
-        }
-        useChatStore.setState((state) => {
-          state.sessions.push(newSession)
+          projectId: dbSession.project_id ?? channelProjectId ?? null,
+          workingFolder: dbSession.working_folder || channelWorkDir || null,
+          sshConnectionId: dbSession.ssh_connection_id ?? channelSshConnectionId ?? null,
+          planId: dbSession.plan_id ?? null,
+          pinned: dbSession.pinned ?? 0,
+          messageCount: dbSession.message_count ?? 0,
+          pluginId: dbSession.plugin_id ?? pluginId,
+          chatId: task.chatId,
+          externalChatId:
+            dbSession.external_chat_id ?? buildPluginMessageSessionKey(pluginId, task.chatId),
+          providerId: dbSession.provider_id || channelMeta?.providerId || null,
+          modelId: dbSession.model_id || channelMeta?.model || null
         })
-        session = newSession
+        useChatStore
+          .getState()
+          .upsertSessionFromSync(sessionRow, { preserveLoadedMessages: true })
+        session = useChatStore.getState().sessions.find((s) => s.id === sessionId)
       }
     } catch (err) {
       console.warn('[PluginAutoReply] DB query failed:', err)
@@ -392,29 +580,23 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
   }
 
   if (!session) {
-    const newSession: Session = {
+    const now = Date.now()
+    const sessionRow = buildPluginSessionSummaryRow({
       id: sessionId,
       title: resolvedTitle,
-      mode: 'cowork' as const,
-      messages: [],
-      messageCount: 0,
-      messagesLoaded: true,
-      loadedRangeStart: 0,
-      loadedRangeEnd: 0,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      projectId: channelProjectId,
-      workingFolder: channelWorkDir,
-      sshConnectionId: channelSshConnectionId,
+      mode: 'cowork',
+      createdAt: now,
+      updatedAt: now,
+      projectId: channelProjectId ?? null,
+      workingFolder: channelWorkDir || null,
+      sshConnectionId: channelSshConnectionId ?? null,
       pluginId,
-      externalChatId: buildPluginMessageSessionKey(pluginId, task.chatId),
-      providerId: channelMeta?.providerId || undefined,
-      modelId: channelMeta?.model || undefined
-    }
-    useChatStore.setState((state) => {
-      state.sessions.push(newSession)
+      chatId: task.chatId,
+      providerId: channelMeta?.providerId || null,
+      modelId: channelMeta?.model || null
     })
-    session = newSession
+    useChatStore.getState().upsertSessionFromSync(sessionRow, { preserveLoadedMessages: true })
+    session = useChatStore.getState().sessions.find((s) => s.id === sessionId)
   }
 
   if (!session) return
@@ -463,14 +645,22 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
   await ensureRequestToolCatalogFresh()
 
   // ── Build tools (same as main agent's cowork branch) ──
-  const allToolDefs = toolRegistry.getDefinitions()
   const settings = useSettingsStore.getState()
+  const allToolDefs = filterTeamToolDefinitions(
+    toolRegistry.getDefinitions(),
+    settings.teamToolsEnabled
+  )
   let userPrompt = settings.systemPrompt || ''
 
   const channelDescriptor = channelMeta
     ? useChannelStore.getState().getDescriptor(channelMeta.type)
     : undefined
-  const channelToolNames = channelDescriptor?.tools ?? []
+  const channelToolNames = Array.from(
+    new Set([
+      ...(channelDescriptor?.tools ?? []),
+      ...getDefaultPluginToolNamesForType(channelMeta?.type ?? pluginType)
+    ])
+  )
   const enabledTools = channelToolNames.filter((name) => channelMeta?.tools?.[name] !== false)
 
   const channelCtx = [
@@ -579,10 +769,6 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
     createdAt: Date.now()
   }
 
-  // Add user message to store + DB
-  useChatStore.getState().addMessage(sessionId, userMsg)
-
-  // Create assistant placeholder
   const assistantMsgId = nanoid()
   const assistantMsg: UnifiedMessage = {
     id: assistantMsgId,
@@ -590,8 +776,9 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
     content: '',
     createdAt: Date.now()
   }
-  useChatStore.getState().addMessage(sessionId, assistantMsg)
-  useChatStore.getState().setStreamingMessageId(sessionId, assistantMsgId)
+  useAgentStore.getState().setRunning(true)
+  useAgentStore.getState().setSessionStatus(sessionId, 'running')
+  beginPluginRuntimeTurn(sessionId, userMsg, assistantMsg, assistantMsgId)
 
   // ── Build agent loop config ──
   const ac = new AbortController()
@@ -608,65 +795,37 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
   void permissions
   void homedir
 
-  // ── Run Agent Loop ──
-  const messages = await useChatStore.getState().getSessionMessagesForRequest(sessionId, {
-    includeTrailingAssistantPlaceholder: false
-  })
-
-  // Filter out empty assistant messages (can occur if a previous run was interrupted
-  // or duplicate triggers left orphaned placeholders) — API rejects empty assistant turns
-  const historyMessages = messages.filter((m) => {
-    if (m.role !== 'assistant') return true
-    if (typeof m.content === 'string') return m.content.trim().length > 0
-    if (Array.isArray(m.content)) return m.content.length > 0
-    return false
-  })
-
-  const sidecarRequest = buildSidecarAgentRunRequest({
-    messages: historyMessages,
-    provider: agentProviderConfig,
-    tools: effectiveToolDefs,
-    sessionId,
-    workingFolder: session.workingFolder,
-    maxIterations: 15,
-    forceApproval: false,
-    pluginId,
-    pluginChatId: chatId,
-    pluginChatType: task.chatType,
-    pluginSenderId: task.senderId,
-    pluginSenderName: task.senderName,
-    sshConnectionId: session.sshConnectionId
-  })
-  if (!sidecarRequest) {
-    throw new Error('Failed to build sidecar agent request for plugin auto-reply')
-  }
-  const loop = runAgentViaSidecar(sidecarRequest, { signal: ac.signal })
-
   let fullText = ''
   let lastError: string | null = null
   let pendingText = ''
   let pendingPluginDelta = ''
   let pluginStreamUpdateInFlight: Promise<unknown> | null = null
   let pendingPluginStreamFlush = false
+  let deliveredChannelTextLength = 0
   const pendingToolInputs = new Map<string, Record<string, unknown>>()
   const liveToolNames = new Map<string, string>()
+  const visibleToolUseIds = new Set<string>()
   let streamFlushTimer: ReturnType<typeof setTimeout> | null = null
+  let hasThinkingDelta = false
+  let thinkingDone = true
   const toolInputThrottle = new Map<
     string,
     { lastFlush: number; pending?: Record<string, unknown>; timer?: ReturnType<typeof setTimeout> }
   >()
   const unthrottledLiveToolInputs = new Set(['TaskCreate', 'TaskUpdate'])
 
-  const flushPluginStreamUpdate = (): void => {
+  const flushPluginStreamUpdate = async (): Promise<void> => {
     if (!streamingActive) return
     if (pluginStreamUpdateInFlight) {
       pendingPluginStreamFlush = true
-      return
+      await pluginStreamUpdateInFlight
     }
+
     if (!pendingPluginDelta) return
 
     const delta = pendingPluginDelta
     pendingPluginDelta = ''
+    let appendSucceeded = false
     pluginStreamUpdateInFlight = ipcClient
       .invoke(IPC.PLUGIN_STREAM_APPEND, {
         pluginId,
@@ -679,46 +838,46 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
         if (!result?.ok) {
           throw new Error(`Plugin stream append rejected for ${pluginId}:${chatId}:${streamId}`)
         }
+        appendSucceeded = true
       })
       .catch(() => {
         pendingPluginDelta = `${delta}${pendingPluginDelta}`
       })
       .finally(() => {
         pluginStreamUpdateInFlight = null
-        if (pendingPluginStreamFlush || pendingPluginDelta) {
-          pendingPluginStreamFlush = false
-          queueMicrotask(() => {
-            flushPluginStreamUpdate()
-          })
-        }
       })
+
+    await pluginStreamUpdateInFlight
+    const shouldFlushAgain = appendSucceeded && pendingPluginStreamFlush && pendingPluginDelta
+    pendingPluginStreamFlush = false
+    if (shouldFlushAgain) {
+      await flushPluginStreamUpdate()
+    }
   }
 
-  const flushStreamingState = (): void => {
+  const flushStreamingState = (): Promise<void> => {
     if (streamFlushTimer) {
       clearTimeout(streamFlushTimer)
       streamFlushTimer = null
     }
     if (pendingText) {
-      useChatStore.getState().appendTextDelta(sessionId, assistantMsgId, pendingText)
+      appendPluginRuntimeTextDelta(sessionId, assistantMsgId, pendingText)
       pendingText = ''
     }
     if (pendingToolInputs.size > 0) {
       for (const [toolCallId, partialInput] of pendingToolInputs) {
-        useChatStore
-          .getState()
-          .updateToolUseInput(sessionId, assistantMsgId, toolCallId, partialInput)
+        updatePluginRuntimeToolUseInput(sessionId, assistantMsgId, toolCallId, partialInput)
       }
       pendingToolInputs.clear()
     }
-    flushPluginStreamUpdate()
+    return flushPluginStreamUpdate()
   }
 
   const scheduleStreamingFlush = (): void => {
     if (streamFlushTimer) return
     streamFlushTimer = setTimeout(() => {
       streamFlushTimer = null
-      flushStreamingState()
+      void flushStreamingState()
     }, PLUGIN_STREAM_DELTA_FLUSH_MS)
   }
 
@@ -728,7 +887,7 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
     entry.lastFlush = Date.now()
     const pending = entry.pending
     entry.pending = undefined
-    useAgentStore.getState().updateToolCall(toolCallId, { input: pending })
+    useAgentStore.getState().updateToolCall(toolCallId, { input: pending }, sessionId)
   }
 
   const scheduleToolInputUpdate = (
@@ -767,178 +926,367 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
     }
   }
 
-  for await (const event of loop) {
-    if (ac.signal.aborted) break
+  const flushChannelTextBeforeTool = async (reason: string): Promise<void> => {
+    await flushStreamingState()
 
-    switch (event.type) {
-      case 'thinking_encrypted':
-        if (event.thinkingEncryptedContent && event.thinkingEncryptedProvider) {
-          useChatStore
-            .getState()
-            .setThinkingEncryptedContent(
+    const nextDeliveredLength = fullText.length
+    const pendingChannelText = fullText.slice(deliveredChannelTextLength).trim()
+    if (!pendingChannelText) {
+      deliveredChannelTextLength = nextDeliveredLength
+      return
+    }
+
+    if (streamingActive) {
+      deliveredChannelTextLength = nextDeliveredLength
+      console.log(
+        `[PluginAutoReply] Flushed streaming card text before ${reason} for ${pluginId}:${chatId}`
+      )
+      return
+    }
+
+    const sent = await sendPluginMessage(pendingChannelText)
+    if (sent) {
+      deliveredChannelTextLength = nextDeliveredLength
+      console.log(
+        `[PluginAutoReply] Sent partial text before ${reason} for ${pluginId}:${chatId}`
+      )
+    }
+  }
+
+  try {
+    // ── Run Agent Loop ──
+    const messages = await useChatStore.getState().getSessionMessagesForRequest(sessionId, {
+      includeTrailingAssistantPlaceholder: false
+    })
+
+    // Filter out empty assistant messages (can occur if a previous run was interrupted
+    // or duplicate triggers left orphaned placeholders) — API rejects empty assistant turns
+    const historyMessages = messages.filter((m) => {
+      if (m.role !== 'assistant') return true
+      if (typeof m.content === 'string') return m.content.trim().length > 0
+      if (Array.isArray(m.content)) return m.content.length > 0
+      return false
+    })
+
+    const sidecarRequest = buildSidecarAgentRunRequest({
+      messages: historyMessages,
+      provider: agentProviderConfig,
+      tools: effectiveToolDefs,
+      sessionId,
+      workingFolder: session.workingFolder,
+      maxIterations: 15,
+      forceApproval: false,
+      pluginId,
+      pluginChatId: chatId,
+      pluginChatType: task.chatType,
+      pluginSenderId: task.senderId,
+      pluginSenderName: task.senderName,
+      sshConnectionId: session.sshConnectionId
+    })
+    if (!sidecarRequest) {
+      throw new Error('Failed to build sidecar agent request for plugin auto-reply')
+    }
+    const loop = runAgentViaSidecar(sidecarRequest, { signal: ac.signal })
+
+    for await (const event of loop) {
+      if (ac.signal.aborted) break
+
+      switch (event.type) {
+        case 'thinking_delta':
+          hasThinkingDelta = true
+          thinkingDone = false
+          appendPluginRuntimeThinkingDelta(sessionId, assistantMsgId, event.thinking)
+          break
+
+        case 'thinking_encrypted':
+          if (event.thinkingEncryptedContent && event.thinkingEncryptedProvider) {
+            setPluginRuntimeThinkingEncryptedContent(
               sessionId,
               assistantMsgId,
               event.thinkingEncryptedContent,
               event.thinkingEncryptedProvider
             )
-        }
-        break
+          }
+          break
 
-      case 'text_delta':
-        fullText += event.text
-        pendingText += event.text
-        pendingPluginDelta += event.text
-        scheduleStreamingFlush()
-        break
-
-      case 'tool_use_streaming_start':
-        liveToolNames.set(event.toolCallId, event.toolName)
-        flushStreamingState()
-        // Show tool card immediately while args are still streaming
-        useChatStore.getState().appendToolUse(sessionId, assistantMsgId, {
-          type: 'tool_use',
-          id: event.toolCallId,
-          name: event.toolName,
-          input: {}
-        })
-        useAgentStore.getState().addToolCall({
-          id: event.toolCallId,
-          name: event.toolName,
-          input: {},
-          status: 'streaming',
-          requiresApproval: false
-        })
-        break
-
-      case 'tool_use_args_delta': {
-        const toolName = liveToolNames.get(event.toolCallId) ?? ''
-        if (toolName === 'Edit') {
+        case 'text_delta': {
+          let visibleText = event.text
+          if (hasThinkingDelta && !thinkingDone) {
+            const closeThinkTagMatch = visibleText.match(/<\s*\/\s*think\s*>/i)
+            if (closeThinkTagMatch?.index !== undefined) {
+              const beforeClose = visibleText.slice(0, closeThinkTagMatch.index)
+              const afterClose = visibleText.slice(
+                closeThinkTagMatch.index + closeThinkTagMatch[0].length
+              )
+              if (beforeClose) {
+                appendPluginRuntimeThinkingDelta(sessionId, assistantMsgId, beforeClose)
+              }
+              thinkingDone = true
+              completePluginRuntimeThinking(sessionId, assistantMsgId)
+              visibleText = afterClose
+            } else {
+              thinkingDone = true
+              completePluginRuntimeThinking(sessionId, assistantMsgId)
+            }
+          }
+          if (!visibleText) break
+          fullText += visibleText
+          pendingText += visibleText
+          pendingPluginDelta += visibleText
+          scheduleStreamingFlush()
           break
         }
-        const liveCardInput = summarizeToolInputForLiveCard(toolName, event.partialInput)
-        pendingToolInputs.set(event.toolCallId, liveCardInput)
-        if (unthrottledLiveToolInputs.has(toolName)) {
-          flushStreamingState()
-        } else {
-          scheduleStreamingFlush()
-        }
-        scheduleToolInputUpdate(event.toolCallId, liveCardInput, toolName)
-        break
-      }
 
-      case 'tool_use_generated': {
-        flushStreamingState()
-        liveToolNames.set(event.toolUseBlock.id, event.toolUseBlock.name)
-        console.log(`[PluginAutoReply] Tool call: ${event.toolUseBlock.name}`)
-        const liveCardInput = summarizeToolInputForLiveCard(
-          event.toolUseBlock.name,
-          event.toolUseBlock.input
-        )
-        useChatStore
-          .getState()
-          .updateToolUseInput(sessionId, assistantMsgId, event.toolUseBlock.id, liveCardInput)
-        flushToolInput(event.toolUseBlock.id)
-        useAgentStore.getState().updateToolCall(event.toolUseBlock.id, {
-          input: liveCardInput
-        })
-        break
-      }
-
-      case 'tool_call_start':
-        useAgentStore.getState().addToolCall({
-          ...event.toolCall,
-          input: summarizeToolInputForLiveCard(event.toolCall.name, event.toolCall.input)
-        })
-        break
-
-      case 'tool_call_result': {
-        const settledInput =
-          event.toolCall.status === 'completed' || event.toolCall.status === 'error'
-            ? summarizeToolInputForHistory(event.toolCall.name, event.toolCall.input)
-            : undefined
-        if (settledInput) {
-          useChatStore
-            .getState()
-            .updateToolUseInput(sessionId, assistantMsgId, event.toolCall.id, settledInput)
-        }
-        useAgentStore.getState().updateToolCall(event.toolCall.id, {
-          ...(settledInput ? { input: settledInput } : {}),
-          status: event.toolCall.status,
-          output: event.toolCall.output,
-          error: event.toolCall.error,
-          completedAt: event.toolCall.completedAt
-        })
-        if (event.toolCall.status === 'completed' || event.toolCall.status === 'error') {
-          liveToolNames.delete(event.toolCall.id)
-        }
-        break
-      }
-
-      case 'message_end':
-        if (event.usage) {
-          useChatStore.getState().updateMessage(sessionId, assistantMsgId, {
-            usage: {
-              ...event.usage,
-              contextTokens: event.usage.contextTokens ?? event.usage.inputTokens
-            },
-            ...(event.providerResponseId ? { providerResponseId: event.providerResponseId } : {})
-          })
-          void recordUsageEvent({
-            sessionId,
-            messageId: assistantMsgId,
-            sourceKind: 'plugin',
-            providerId: agentProviderConfig.providerId,
-            modelId: agentProviderConfig.model,
-            usage: {
-              ...event.usage,
-              contextTokens: event.usage.contextTokens ?? event.usage.inputTokens
-            },
-            timing: event.timing,
-            providerResponseId: event.providerResponseId,
-            createdAt: Date.now(),
-            meta: {
-              pluginId,
-              chatId,
-              chatType: task.chatType,
-              senderId: task.senderId
-            }
-          })
-        }
-        break
-
-      case 'iteration_end':
-        // Append tool_result user message so next iteration has proper context
-        if (event.toolResults && event.toolResults.length > 0) {
-          const toolResultMsg: UnifiedMessage = {
-            id: nanoid(),
-            role: 'user',
-            content: event.toolResults.map((tr) => ({
-              type: 'tool_result' as const,
-              toolUseId: tr.toolUseId,
-              content: tr.content,
-              isError: tr.isError
-            })),
-            createdAt: Date.now()
+        case 'tool_use_streaming_start':
+          liveToolNames.set(event.toolCallId, event.toolName)
+          await flushStreamingState()
+          if (hasThinkingDelta && !thinkingDone) {
+            thinkingDone = true
+            completePluginRuntimeThinking(sessionId, assistantMsgId)
           }
-          useChatStore.getState().addMessage(sessionId, toolResultMsg)
-        }
-        if (hasQueuedPluginTasks(sessionId) || hasPendingSessionMessagesForSession(sessionId)) {
-          console.log(
-            `[PluginAutoReply] Queued message detected at iteration_end, allowing current run to finish before processing queued input for session ${sessionId}`
+          visibleToolUseIds.add(event.toolCallId)
+          appendPluginRuntimeToolUse(sessionId, assistantMsgId, {
+            type: 'tool_use',
+            id: event.toolCallId,
+            name: event.toolName,
+            input: {},
+            ...(event.toolCallExtraContent ? { extraContent: event.toolCallExtraContent } : {})
+          })
+          useAgentStore.getState().addToolCall(
+            {
+              id: event.toolCallId,
+              name: event.toolName,
+              input: {},
+              status: 'streaming',
+              requiresApproval: false,
+              ...(event.toolCallExtraContent ? { extraContent: event.toolCallExtraContent } : {})
+            },
+            sessionId
           )
-        }
-        break
+          break
 
-      case 'error':
-        lastError = event.error instanceof Error ? event.error.message : String(event.error)
-        console.error('[PluginAutoReply] Agent error:', event.error)
-        break
+        case 'tool_use_args_delta': {
+          const toolName = liveToolNames.get(event.toolCallId) ?? ''
+          if (toolName === 'Edit') {
+            break
+          }
+          const liveCardInput = summarizeToolInputForLiveCard(toolName, event.partialInput)
+          pendingToolInputs.set(event.toolCallId, liveCardInput)
+          if (unthrottledLiveToolInputs.has(toolName)) {
+            void flushStreamingState()
+          } else {
+            scheduleStreamingFlush()
+          }
+          scheduleToolInputUpdate(event.toolCallId, liveCardInput, toolName)
+          break
+        }
+
+        case 'tool_use_generated': {
+          await flushChannelTextBeforeTool(event.toolUseBlock.name)
+          liveToolNames.set(event.toolUseBlock.id, event.toolUseBlock.name)
+          console.log(`[PluginAutoReply] Tool call: ${event.toolUseBlock.name}`)
+          const liveCardInput = summarizeToolInputForLiveCard(
+            event.toolUseBlock.name,
+            event.toolUseBlock.input
+          )
+          if (!visibleToolUseIds.has(event.toolUseBlock.id)) {
+            if (hasThinkingDelta && !thinkingDone) {
+              thinkingDone = true
+              completePluginRuntimeThinking(sessionId, assistantMsgId)
+            }
+            visibleToolUseIds.add(event.toolUseBlock.id)
+            appendPluginRuntimeToolUse(sessionId, assistantMsgId, {
+              type: 'tool_use',
+              id: event.toolUseBlock.id,
+              name: event.toolUseBlock.name,
+              input: liveCardInput,
+              ...(event.toolUseBlock.extraContent
+                ? { extraContent: event.toolUseBlock.extraContent }
+                : {})
+            })
+            useAgentStore.getState().addToolCall(
+              {
+                id: event.toolUseBlock.id,
+                name: event.toolUseBlock.name,
+                input: liveCardInput,
+                status: 'running',
+                requiresApproval: false,
+                ...(event.toolUseBlock.extraContent
+                  ? { extraContent: event.toolUseBlock.extraContent }
+                  : {}),
+                startedAt: Date.now()
+              },
+              sessionId
+            )
+          } else {
+            updatePluginRuntimeToolUseInput(
+              sessionId,
+              assistantMsgId,
+              event.toolUseBlock.id,
+              liveCardInput
+            )
+          }
+          flushToolInput(event.toolUseBlock.id)
+          useAgentStore.getState().updateToolCall(
+            event.toolUseBlock.id,
+            {
+              input: liveCardInput,
+              ...(event.toolUseBlock.extraContent
+                ? { extraContent: event.toolUseBlock.extraContent }
+                : {})
+            },
+            sessionId
+          )
+          break
+        }
+
+        case 'tool_call_start':
+          await flushChannelTextBeforeTool(event.toolCall.name)
+          useAgentStore.getState().addToolCall(
+            {
+              ...event.toolCall,
+              input: summarizeToolInputForLiveCard(event.toolCall.name, event.toolCall.input)
+            },
+            sessionId
+          )
+          break
+
+        case 'tool_call_result': {
+          const settledInput =
+            event.toolCall.status === 'completed' || event.toolCall.status === 'error'
+              ? summarizeToolInputForHistory(event.toolCall.name, event.toolCall.input)
+              : undefined
+          if (settledInput) {
+            updatePluginRuntimeToolUseInput(
+              sessionId,
+              assistantMsgId,
+              event.toolCall.id,
+              settledInput
+            )
+          }
+          useAgentStore.getState().updateToolCall(
+            event.toolCall.id,
+            {
+              ...(settledInput ? { input: settledInput } : {}),
+              status: event.toolCall.status,
+              output: event.toolCall.output,
+              error: event.toolCall.error,
+              completedAt: event.toolCall.completedAt
+            },
+            sessionId
+          )
+          if (event.toolCall.status === 'completed' || event.toolCall.status === 'error') {
+            liveToolNames.delete(event.toolCall.id)
+          }
+          break
+        }
+
+        case 'message_end':
+          await flushStreamingState()
+          if (hasThinkingDelta && !thinkingDone) {
+            thinkingDone = true
+            completePluginRuntimeThinking(sessionId, assistantMsgId)
+          }
+          if (event.usage || event.providerResponseId) {
+            const usage = event.usage
+              ? {
+                  ...event.usage,
+                  contextTokens: event.usage.contextTokens ?? event.usage.inputTokens
+                }
+              : undefined
+            updatePluginRuntimeMessage(sessionId, assistantMsgId, {
+              ...(usage ? { usage } : {}),
+              ...(event.providerResponseId ? { providerResponseId: event.providerResponseId } : {})
+            })
+            if (!usage) break
+            void recordUsageEvent({
+              sessionId,
+              messageId: assistantMsgId,
+              sourceKind: 'plugin',
+              providerId: agentProviderConfig.providerId,
+              modelId: agentProviderConfig.model,
+              usage,
+              timing: event.timing,
+              providerResponseId: event.providerResponseId,
+              createdAt: Date.now(),
+              meta: {
+                pluginId,
+                chatId,
+                chatType: task.chatType,
+                senderId: task.senderId
+              }
+            })
+          }
+          break
+
+        case 'iteration_end':
+          await flushStreamingState()
+          hasThinkingDelta = false
+          thinkingDone = true
+          if (event.toolResults && event.toolResults.length > 0) {
+            const toolResultMsg: UnifiedMessage = {
+              id: nanoid(),
+              role: 'user',
+              content: event.toolResults.map((tr) => ({
+                type: 'tool_result' as const,
+                toolUseId: tr.toolUseId,
+                content: tr.content,
+                isError: tr.isError
+              })),
+              createdAt: Date.now()
+            }
+            addPluginRuntimeMessage(sessionId, toolResultMsg)
+          }
+          if (hasQueuedPluginTasks(sessionId) || hasPendingSessionMessagesForSession(sessionId)) {
+            console.log(
+              `[PluginAutoReply] Queued message detected at iteration_end, allowing current run to finish before processing queued input for session ${sessionId}`
+            )
+          }
+          break
+
+        case 'error':
+          lastError = event.error instanceof Error ? event.error.message : String(event.error)
+          console.error('[PluginAutoReply] Agent error:', event.error)
+          appendPluginRuntimeTextDelta(sessionId, assistantMsgId, `\n\n> **Error:** ${lastError}`)
+          break
+
+        default:
+          break
+      }
     }
+  } catch (err) {
+    lastError = err instanceof Error ? err.message : String(err)
+    console.error('[PluginAutoReply] Agent loop exception:', err)
+    appendPluginRuntimeTextDelta(sessionId, assistantMsgId, `\n\n> **Error:** ${lastError}`)
   }
 
   // ── Finalize ──
-  flushStreamingState()
-  useChatStore.getState().setStreamingMessageId(sessionId, null)
+  await flushStreamingState()
+  for (const [toolCallId, entry] of toolInputThrottle) {
+    if (entry.timer) {
+      clearTimeout(entry.timer)
+      entry.timer = undefined
+    }
+    flushToolInput(toolCallId)
+  }
+  toolInputThrottle.clear()
+  if (hasThinkingDelta && !thinkingDone) {
+    thinkingDone = true
+    completePluginRuntimeThinking(sessionId, assistantMsgId)
+  }
+
+  const fallbackMessage = lastError
+    ? `Model run failed: ${lastError}`
+    : 'Model did not return a text reply, please check your current model configuration'
+  if (!fullText.trim()) {
+    appendPluginRuntimeTextDelta(sessionId, assistantMsgId, fallbackMessage)
+  }
+  setPluginRuntimeStreamingMessage(sessionId, null)
+  useAgentStore.getState().setSessionStatus(sessionId, 'completed')
+  const hasOtherRunning = Object.values(useAgentStore.getState().runningSessions).some(
+    (status) => status === 'running' || status === 'retrying'
+  )
+  useAgentStore.getState().setRunning(hasOtherRunning)
 
   // Persist the final message state to DB.
   // Do NOT overwrite content with fullText — the message content already contains
@@ -948,14 +1296,13 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
   const finalSession = useChatStore.getState().sessions.find((s) => s.id === sessionId)
   const finalMsg = finalSession?.messages.find((m) => m.id === assistantMsgId)
   if (finalMsg) {
-    useChatStore.getState().updateMessage(sessionId, assistantMsgId, { content: finalMsg.content })
+    updatePluginRuntimeMessage(sessionId, assistantMsgId, { content: finalMsg.content })
   }
 
-  const fallbackMessage = lastError
-    ? `Model run failed: ${lastError}`
-    : 'Model did not return a text reply, please check your current model configuration'
-
   const finalText = fullText.trim() ? fullText : fallbackMessage
+  const remainingFinalChannelText = fullText.trim()
+    ? fullText.slice(deliveredChannelTextLength).trim()
+    : fallbackMessage
   let streamFinished = false
 
   // Finish CardKit card
@@ -985,12 +1332,8 @@ async function _runPluginAgent(task: PluginAutoReplyTask): Promise<void> {
     }
   }
 
-  if (!streamingActive && !fullText.trim()) {
-    await sendChannelNotice(fallbackMessage)
-  }
-
-  if (!streamingActive && fullText.trim()) {
-    const sent = await sendPluginMessage(fullText)
+  if (!streamingActive && remainingFinalChannelText) {
+    const sent = await sendPluginMessage(remainingFinalChannelText)
     if (sent) {
       console.log(
         `[PluginAutoReply] Sent non-streaming ${shouldReplyToIncomingMessage ? 'reply' : 'message'} for ${pluginId}:${chatId}`
