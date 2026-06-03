@@ -303,6 +303,133 @@ export function mergeCompressedMessagesIntoConversation(
   ]
 }
 
+/**
+ * Insert the compression artifacts into the existing transcript without dropping
+ * the older messages. The agent loop continues to send the compressed history to
+ * the LLM, but the UI keeps the full transcript visible — the boundary + summary
+ * pair just acts as an inline divider that says "from this point on the model only
+ * sees the summary".
+ *
+ * Layout produced:
+ *   [...all old messages, boundary, summary, ...preserved-recent (already in current)]
+ *
+ * Anything currentMessages contains AFTER the preserved-recent head (e.g. the
+ * compression status placeholder appended at compression_start) is kept in place,
+ * so the placeholder ends up trailing the preserved tail and serves as a visual
+ * marker for the most recent compression event.
+ */
+export function mergeCompressedMessagesKeepHistory(
+  currentMessages: UnifiedMessage[],
+  compressedMessages?: UnifiedMessage[] | null
+): UnifiedMessage[] | null {
+  if (!compressedMessages || compressedMessages.length === 0) {
+    return null
+  }
+
+  const boundaryMessage = compressedMessages.find((message) => isCompactBoundaryMessage(message))
+  // Prefer the meta-tagged summary so a legacy `[Context Memory Compressed Summary]`
+  // user message that happened to live inside the preserved tail can't shadow the
+  // freshly-emitted summary at the head.
+  const summaryMessage =
+    compressedMessages.find((message) => isCompactSummaryMessage(message)) ??
+    compressedMessages.find((message) => isCompactSummaryLikeMessage(message))
+  if (!boundaryMessage || !summaryMessage) {
+    return null
+  }
+
+  const currentIds = new Set(currentMessages.map((message) => message.id))
+
+  // Skip the merge entirely if the boundary is already wired into the transcript
+  // (e.g. resume of a previously-compressed conversation). Return a shallow copy
+  // so the caller can safely mutate the result without poking at frozen state.
+  if (currentIds.has(boundaryMessage.id) && currentIds.has(summaryMessage.id)) {
+    return [...currentMessages]
+  }
+
+  const preservedHeadId = boundaryMessage.meta?.compactBoundary?.preservedSegment?.headId ?? null
+
+  // Locate the preserved tail's head inside the current transcript. When the
+  // boundary's preservedSegment is missing or stale, fall back to the first
+  // message after the boundary/summary pair in the compressed payload that the
+  // current transcript still knows about. As a last resort (no preserved tail at
+  // all — e.g. manual /compress that summarized everything), append at the very
+  // end so the boundary still renders, rather than dropping the merge.
+  let insertIndex = -1
+  if (preservedHeadId && currentIds.has(preservedHeadId)) {
+    insertIndex = currentMessages.findIndex((message) => message.id === preservedHeadId)
+  }
+  if (insertIndex < 0) {
+    const summaryIndex = compressedMessages.indexOf(summaryMessage)
+    for (let index = summaryIndex + 1; index < compressedMessages.length; index += 1) {
+      const candidateId = compressedMessages[index]?.id
+      if (candidateId && currentIds.has(candidateId)) {
+        insertIndex = currentMessages.findIndex((message) => message.id === candidateId)
+        if (insertIndex >= 0) break
+      }
+    }
+  }
+  if (insertIndex < 0) {
+    insertIndex = currentMessages.length
+  }
+
+  return [
+    ...currentMessages.slice(0, insertIndex),
+    boundaryMessage,
+    summaryMessage,
+    ...currentMessages.slice(insertIndex)
+  ]
+}
+
+/**
+ * After loop_end, splice the agent loop's post-compression message array into
+ * the renderer's kept-history transcript without dropping the older messages.
+ *
+ * The agent loop only carries the post-compression view ([boundary, summary,
+ * ...preserved, ...newTurns]). The renderer transcript carries the full history
+ * with the boundary inserted in the middle ([...oldHistory, boundary, summary,
+ * ...preserved, ...newTurns, ...trailingMarkers]). To keep the older messages
+ * we splice agentMessages[boundaryIdx..] over currentMessages[boundaryIdx..]
+ * while preserving any trailing items the agent never had (e.g. the persistent
+ * compression status marker).
+ */
+export function mergeLoopEndMessagesKeepHistory(
+  currentMessages: UnifiedMessage[],
+  agentMessages: UnifiedMessage[]
+): UnifiedMessage[] | null {
+  const boundaryInAgent = agentMessages.find(isCompactBoundaryMessage)
+  if (!boundaryInAgent) return null
+
+  const boundaryIdxAgent = agentMessages.indexOf(boundaryInAgent)
+  const boundaryIdxCurrent = currentMessages.findIndex(
+    (message) => message.id === boundaryInAgent.id
+  )
+  if (boundaryIdxCurrent < 0 || boundaryIdxAgent < 0) return null
+
+  const agentMessageIds = new Set(agentMessages.map((message) => message.id))
+  // Trailing renderer-only markers (e.g. the compression status placeholder) sit
+  // after the last message the agent still knows about. Walk back from the end
+  // of currentMessages looking for the most recent overlap with agentMessages.
+  // Bound is `> boundaryIdxCurrent` (not `>=`) — a boundary-only overlap means
+  // the renderer view past the boundary diverged completely, so treat it as no
+  // tail overlap rather than slicing in the renderer's existing summary/preserved
+  // tail and duplicating it.
+  let agentLastIdxInCurrent = -1
+  for (let i = currentMessages.length - 1; i > boundaryIdxCurrent; i -= 1) {
+    if (agentMessageIds.has(currentMessages[i].id)) {
+      agentLastIdxInCurrent = i
+      break
+    }
+  }
+  const trailingItems =
+    agentLastIdxInCurrent >= 0 ? currentMessages.slice(agentLastIdxInCurrent + 1) : []
+
+  return [
+    ...currentMessages.slice(0, boundaryIdxCurrent),
+    ...agentMessages.slice(boundaryIdxAgent),
+    ...trailingItems
+  ]
+}
+
 export function createCompactBoundaryMessage(args: {
   trigger: CompactBoundaryMeta['trigger']
   preTokens: number

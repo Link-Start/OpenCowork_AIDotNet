@@ -91,7 +91,8 @@ import { ApiStreamError } from '@renderer/lib/ipc/api-stream'
 import { recordUsageEvent } from '@renderer/lib/usage-analytics'
 import {
   compressMessages,
-  mergeCompressedMessagesIntoConversation,
+  mergeCompressedMessagesKeepHistory,
+  mergeLoopEndMessagesKeepHistory,
   resolveCompressionContextLength,
   resolveCompressionReservedOutputBudget,
   resolveCompressionThreshold
@@ -196,6 +197,8 @@ const sessionAbortControllers = new Map<string, AbortController>()
 const sessionSidecarRunIds = new Map<string, string>()
 const continuingToolExecutionSessions = new Set<string>()
 const pendingGoalContinuationSessions = new Set<string>()
+/** Per-session id of the synthetic system message rendered while compression is in flight. */
+const sessionCompressionPlaceholderIds = new Map<string, string>()
 installSessionControlSyncListener((event) => {
   applySessionControlSyncEvent(event)
 })
@@ -210,6 +213,7 @@ useChatStore.subscribe((state) => {
         pendingSessionMessages.delete(id)
         pendingSessionMessageViews.delete(id)
         pausedPendingSessionDispatch.delete(id)
+        sessionCompressionPlaceholderIds.delete(id)
       }
     }
   }
@@ -4806,7 +4810,26 @@ export function useChatActions(): {
                     event.messages.length > 0 &&
                     (event.reason === 'completed' || event.reason === 'max_iterations')
                   ) {
-                    chatStore.replaceSessionMessages(sessionId!, event.messages)
+                    const currentMessages =
+                      useChatStore.getState().sessions.find((item) => item.id === sessionId)
+                        ?.messages ?? []
+                    // The agent loop only emits messages on loop_end when compression
+                    // ran during this run. The agent carries the reduced view
+                    // ([boundary, summary, ...preserved, ...newTurns]) but the
+                    // renderer holds the full transcript with old messages intact —
+                    // splice the agent's tail over the renderer's tail instead of
+                    // overwriting the prefix.
+                    const merged = mergeLoopEndMessagesKeepHistory(currentMessages, event.messages)
+                    if (merged) {
+                      chatStore.replaceSessionMessages(sessionId!, merged)
+                    } else if (currentMessages.length === 0) {
+                      // Fresh session that never displayed the older history (e.g.
+                      // resumed after a crash) — adopt the agent's reduced view.
+                      chatStore.replaceSessionMessages(sessionId!, event.messages)
+                    }
+                    // Otherwise: merge couldn't anchor (boundary id missing from the
+                    // renderer view). Skip the replace rather than wipe the older
+                    // messages from the UI and DB.
                   }
                   break
                 }
@@ -4893,25 +4916,111 @@ export function useChatActions(): {
                   break
                 }
 
-                case 'context_compression_start':
+                case 'context_compression_start': {
+                  // Reuse the existing placeholder if one is already in flight (e.g.
+                  // the previous attempt failed without a context_compressed event,
+                  // or the agent retried compression on the next iteration). This
+                  // avoids accumulating empty system rows in the transcript when
+                  // compression keeps failing.
+                  const existingPlaceholderId = sessionCompressionPlaceholderIds.get(sessionId!)
+                  const startedAt = Date.now()
+                  if (existingPlaceholderId) {
+                    chatStore.updateMessage(sessionId!, existingPlaceholderId, {
+                      meta: {
+                        compressionStatus: {
+                          state: 'compressing',
+                          startedAt
+                        }
+                      }
+                    })
+                    break
+                  }
+                  const placeholderId = nanoid()
+                  chatStore.addMessage(sessionId!, {
+                    id: placeholderId,
+                    role: 'system',
+                    content: '',
+                    createdAt: startedAt,
+                    meta: {
+                      compressionStatus: {
+                        state: 'compressing',
+                        startedAt
+                      }
+                    }
+                  })
+                  sessionCompressionPlaceholderIds.set(sessionId!, placeholderId)
                   break
+                }
 
                 case 'context_compressed':
                   {
                     const compressedMessages = event.messages
+                    const placeholderId = sessionCompressionPlaceholderIds.get(sessionId!)
+                    sessionCompressionPlaceholderIds.delete(sessionId!)
+
                     const currentMessages =
                       useChatStore.getState().sessions.find((item) => item.id === sessionId)
                         ?.messages ?? []
-                    const mergedMessages = compressedMessages
-                      ? mergeCompressedMessagesIntoConversation(currentMessages, compressedMessages)
-                      : null
-                    const nextVisibleMessages = mergedMessages ?? compressedMessages ?? null
-                    const shouldPersistMergedMessages =
-                      !!nextVisibleMessages &&
-                      !hasSameMessageIdSequence(currentMessages, nextVisibleMessages)
 
-                    if (shouldPersistMergedMessages) {
-                      chatStore.replaceSessionMessages(sessionId!, nextVisibleMessages)
+                    // Keep the full prior transcript visible; insert boundary + summary at
+                    // the preserved-segment head rather than dropping the older messages.
+                    const merged = compressedMessages
+                      ? mergeCompressedMessagesKeepHistory(currentMessages, compressedMessages)
+                      : null
+                    if (!merged) {
+                      // Nothing to merge — at least clear the placeholder so the loader
+                      // doesn't linger forever.
+                      if (placeholderId) {
+                        chatStore.updateMessage(sessionId!, placeholderId, { meta: undefined })
+                      }
+                      break
+                    }
+                    // The merge always returns a freshly-constructed array, but Zustand's
+                    // immer middleware auto-freezes state. Take a copy before in-place
+                    // mutation to keep this defensive against future merge changes.
+                    const nextMessages = [...merged]
+
+                    // Promote the placeholder to the persistent "compressed" marker in-place.
+                    if (placeholderId) {
+                      const placeholderIndex = nextMessages.findIndex(
+                        (item) => item.id === placeholderId
+                      )
+                      if (placeholderIndex >= 0) {
+                        const placeholder = nextMessages[placeholderIndex]
+                        const startedAt =
+                          placeholder.meta?.compressionStatus?.startedAt ?? placeholder.createdAt
+                        const boundaryMeta = compressedMessages?.find(
+                          (item) => item.role === 'system' && item.meta?.compactBoundary
+                        )?.meta?.compactBoundary
+                        nextMessages[placeholderIndex] = {
+                          ...placeholder,
+                          meta: {
+                            ...placeholder.meta,
+                            compressionStatus: {
+                              state: 'compressed',
+                              startedAt,
+                              completedAt: Date.now(),
+                              ...(typeof event.keptMessageCount === 'number' &&
+                              event.keptMessageCount > 0
+                                ? { keptMessageCount: event.keptMessageCount }
+                                : boundaryMeta?.messagesSummarized
+                                  ? { keptMessageCount: boundaryMeta.messagesSummarized }
+                                  : {}),
+                              ...(typeof boundaryMeta?.preTokens === 'number' &&
+                              boundaryMeta.preTokens > 0
+                                ? { preTokens: boundaryMeta.preTokens }
+                                : {}),
+                              ...(typeof event.newCount === 'number' && event.newCount > 0
+                                ? { newCount: event.newCount }
+                                : {})
+                            }
+                          }
+                        }
+                      }
+                    }
+
+                    if (!hasSameMessageIdSequence(currentMessages, nextMessages)) {
+                      chatStore.replaceSessionMessages(sessionId!, nextMessages)
                     }
                   }
                   break
@@ -5017,6 +5126,16 @@ export function useChatActions(): {
             setStreamingMessageIdWithSync(sessionId, null)
             sessionAbortControllers.delete(sessionId)
             sessionSidecarRunIds.delete(sessionId)
+            // If the run ended (completed / error / aborted) while a compression
+            // status placeholder is still mid-flight, clear its loader meta so the
+            // UI doesn't keep showing "compressing…" forever.
+            {
+              const lingeringPlaceholderId = sessionCompressionPlaceholderIds.get(sessionId)
+              if (lingeringPlaceholderId) {
+                chatStore.updateMessage(sessionId, lingeringPlaceholderId, { meta: undefined })
+                sessionCompressionPlaceholderIds.delete(sessionId)
+              }
+            }
             // Derive global isRunning from remaining running sessions
             const hasOtherRunning = Object.values(useAgentStore.getState().runningSessions).some(
               (s) => s === 'running' || s === 'retrying'
@@ -5442,6 +5561,24 @@ export function useChatActions(): {
       }
     }
 
+    // Surface a "compressing…" status card to match the agent-loop UX. The card
+    // gets promoted to a "compressed" marker (or cleared) once the request
+    // settles.
+    const placeholderId = nanoid()
+    const placeholderStartedAt = Date.now()
+    chatStore.addMessage(sessionId, {
+      id: placeholderId,
+      role: 'system',
+      content: '',
+      createdAt: placeholderStartedAt,
+      meta: {
+        compressionStatus: {
+          state: 'compressing',
+          startedAt: placeholderStartedAt
+        }
+      }
+    })
+
     try {
       const preTokens = estimateManualCompressionInputTokens(messages, config)
       const { messages: compressed, result } = await runSidecarContextCompression({
@@ -5451,14 +5588,53 @@ export function useChatActions(): {
         preTokens
       })
       if (!result.compressed) {
+        // Nothing changed — drop the placeholder's status meta so it renders as
+        // an inert system row (which MessageItem skips entirely).
+        chatStore.updateMessage(sessionId, placeholderId, { meta: undefined })
         toast.warning('No compression needed', {
           description: 'No compressible context found'
         })
         return 'skipped'
       }
-      chatStore.replaceSessionMessages(sessionId, compressed)
+      // Match the agent-loop behavior: keep all prior messages visible and
+      // insert the boundary + summary at the preserved-segment head rather
+      // than dropping the older history.
+      const currentMessages =
+        useChatStore.getState().sessions.find((item) => item.id === sessionId)?.messages ?? []
+      const merged = mergeCompressedMessagesKeepHistory(currentMessages, compressed)
+      const nextMessages = merged ? [...merged] : [...compressed]
+      const placeholderIndex = nextMessages.findIndex((item) => item.id === placeholderId)
+      if (placeholderIndex >= 0) {
+        const placeholder = nextMessages[placeholderIndex]
+        const boundaryMeta = compressed.find(
+          (item) => item.role === 'system' && item.meta?.compactBoundary
+        )?.meta?.compactBoundary
+        nextMessages[placeholderIndex] = {
+          ...placeholder,
+          meta: {
+            ...placeholder.meta,
+            compressionStatus: {
+              state: 'compressed',
+              startedAt: placeholderStartedAt,
+              completedAt: Date.now(),
+              ...(typeof result.messagesSummarized === 'number' && result.messagesSummarized > 0
+                ? { keptMessageCount: result.messagesSummarized }
+                : boundaryMeta?.messagesSummarized
+                  ? { keptMessageCount: boundaryMeta.messagesSummarized }
+                  : {}),
+              ...(typeof boundaryMeta?.preTokens === 'number' && boundaryMeta.preTokens > 0
+                ? { preTokens: boundaryMeta.preTokens }
+                : {}),
+              newCount: result.newCount
+            }
+          }
+        }
+      }
+      chatStore.replaceSessionMessages(sessionId, nextMessages)
       return 'compressed'
     } catch (err) {
+      // Clear the loader so it doesn't linger after a failure.
+      chatStore.updateMessage(sessionId, placeholderId, { meta: undefined })
       const errMsg = err instanceof Error ? err.message : String(err)
       console.error('[Manual Compress Error]', err)
       toast.error('Compression failed', { description: errMsg })

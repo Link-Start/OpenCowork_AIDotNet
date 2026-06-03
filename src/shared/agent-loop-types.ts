@@ -111,6 +111,8 @@ export type InteractiveAgentEvent =
       type: 'context_compressed'
       originalCount: number
       newCount: number
+      /** Number of older messages that were summarized (kept visible in UI under the new model). */
+      keptMessageCount?: number
       messages?: AgentLoopMessage[]
     }
   | {

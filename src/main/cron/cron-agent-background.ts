@@ -4484,10 +4484,21 @@ async function* runAgentLoop(
           if (result.compressed) {
             fullCompressionApplied = true
             consecutiveCompressionFailures = 0
+            const boundaryMessage = conversationMessages.find(
+              (message) => message.role === 'system' && message.meta?.compactBoundary
+            )
+            const boundaryMeta = boundaryMessage?.meta?.compactBoundary as
+              | { messagesSummarized?: number }
+              | undefined
+            const summarized =
+              result.messagesSummarized ??
+              boundaryMeta?.messagesSummarized ??
+              Math.max(0, originalCount - (conversationMessages.length - 2))
             yield {
               type: 'context_compressed',
               originalCount,
               newCount: conversationMessages.length,
+              keptMessageCount: summarized,
               messages: [...conversationMessages]
             }
             lastInputTokens = 0
