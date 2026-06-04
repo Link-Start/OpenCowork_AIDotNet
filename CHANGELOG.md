@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.113] - 2026-06-04
+
+### Added
+
+- Implemented WebDAV sync functionality with full UI integration for managing sync settings.
+- Added SyncPage component for configuring and monitoring WebDAV sync operations.
+- Introduced IPC channels for sync configuration, status queries, and conflict resolution.
+- Created sync type definitions for managing sync configurations and operations.
+- Enhanced SshTerminal to handle terminal resizing and notify remote sessions.
+- Added UI store management for opening and closing the sync page.
+- Implemented conflict resolution handling in the sync process.
+
+### Changed
+
+- Updated localization files for sync-related strings in both English and Chinese.
+
 ## [0.9.112] - 2026-05-29
 
 ### Added
