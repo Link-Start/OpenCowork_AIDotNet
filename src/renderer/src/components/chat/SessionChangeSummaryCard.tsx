@@ -7,7 +7,11 @@ import { useAgentStore, type AgentRunChangeSet } from '@renderer/stores/agent-st
 import { useUIStore } from '@renderer/stores/ui-store'
 import type { UnifiedMessage } from '@renderer/lib/api/types'
 import { useAggregatedChangeSummaries } from './change-summary-utils'
-import { aggregateDisplayableRunFileChanges, type AggregatedFileChange } from './file-change-utils'
+import {
+  aggregateDisplayableRunFileChanges,
+  latestDisplayableRunChangeSet,
+  type AggregatedFileChange
+} from './file-change-utils'
 
 interface SessionChangeSummaryCardProps {
   sessionId?: string | null
@@ -62,6 +66,10 @@ export function SessionChangeSummaryCard({
   const undoRunChanges = useAgentStore((state) => state.undoRunChanges)
   const openDetailPanel = useUIStore((state) => state.openDetailPanel)
   const changeSets = useSessionChangeSets({ sessionId, assistantMessageIds })
+  const latestChangeSet = React.useMemo(
+    () => latestDisplayableRunChangeSet(changeSets),
+    [changeSets]
+  )
   const [isUndoing, setIsUndoing] = React.useState(false)
   const requestedRefreshKeyRef = React.useRef<string | null>(null)
 
@@ -74,10 +82,10 @@ export function SessionChangeSummaryCard({
 
   const aggregatedChanges = React.useMemo(
     () =>
-      aggregateDisplayableRunFileChanges(changeSets.flatMap((changeSet) => changeSet.changes)).sort(
+      aggregateDisplayableRunFileChanges(latestChangeSet?.changes ?? []).sort(
         (left, right) => left.createdAt - right.createdAt
       ),
-    [changeSets]
+    [latestChangeSet]
   )
   const summariesByChangeId = useAggregatedChangeSummaries(aggregatedChanges)
   const summary = React.useMemo(
@@ -99,11 +107,15 @@ export function SessionChangeSummaryCard({
       Array.from(
         new Set(
           changeSets
-            .filter((changeSet) => changeSet.changes.some((change) => change.status === 'open'))
+            .filter(
+              (changeSet) =>
+                changeSet.runId === latestChangeSet?.runId &&
+                changeSet.changes.some((change) => change.status === 'open')
+            )
             .map((changeSet) => changeSet.runId)
         )
       ),
-    [changeSets]
+    [changeSets, latestChangeSet]
   )
   const canUndo = undoableRunIds.length > 0
   const canCollapseFileList = aggregatedChanges.length > DEFAULT_EXPANDED_FILE_LIMIT
@@ -131,7 +143,7 @@ export function SessionChangeSummaryCard({
     const firstChange = aggregatedChanges[0]
     openDetailPanel({
       type: 'change-review',
-      runId: firstChange?.runId ?? changeSets[0]?.runId ?? '',
+      runId: latestChangeSet?.runId ?? firstChange?.runId ?? '',
       initialChangeId: firstChange?.lastChangeId ?? null
     })
   }

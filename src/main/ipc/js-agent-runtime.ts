@@ -157,6 +157,10 @@ export class JsAgentRuntimeManager {
     return this.running
   }
 
+  hasActiveRuns(): boolean {
+    return this.activeRuns.size > 0
+  }
+
   async start(): Promise<boolean> {
     this.running = true
     return true

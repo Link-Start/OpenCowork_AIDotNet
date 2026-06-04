@@ -177,6 +177,66 @@
       "noSessions": "No sessions available"
     }
   },
+  "sync": {
+    "title": "Sync",
+    "subtitle": "Record-level OpenCowork data sync with WebDAV.",
+    "loading": "Loading sync settings...",
+    "provider": {
+      "title": "Provider",
+      "subtitle": "WebDAV is available in v1."
+    },
+    "form": {
+      "displayName": "Display name",
+      "serverUrl": "Server URL",
+      "username": "Username",
+      "password": "Password / app password",
+      "remoteDir": "Remote directory",
+      "interval": "Auto-sync interval (minutes)",
+      "retention": "Remote backups to keep",
+      "autoSync": "Auto sync",
+      "autoSyncDesc": "Runs on the configured interval."
+    },
+    "actions": {
+      "test": "Test",
+      "save": "Save",
+      "pull": "Pull",
+      "push": "Push",
+      "syncNow": "Sync now"
+    },
+    "status": {
+      "title": "Status",
+      "device": "Device: {{deviceId}}",
+      "lastRun": "Last run",
+      "remoteUpdated": "Remote updated",
+      "downloaded": "Downloaded",
+      "conflicts": "Conflicts",
+      "success": "Data is synced."
+    },
+    "confirm": {
+      "pushTitle": "Upload local data to WebDAV?",
+      "pullTitle": "Pull remote data into this device?",
+      "pushDesc": "This overwrites the remote sync state after creating a backup.",
+      "pullDesc": "Remote records are applied to this device.",
+      "confirm": "Continue"
+    },
+    "conflicts": {
+      "title": "Conflicts",
+      "subtitle": "Choose which side should win for each record.",
+      "apply": "Apply choices",
+      "local": "Local",
+      "remote": "Remote"
+    },
+    "toast": {
+      "loadFailed": "Failed to load sync settings: {{error}}",
+      "saved": "Sync settings saved",
+      "saveFailed": "Failed to save sync settings: {{error}}",
+      "testSuccess": "WebDAV connection works",
+      "testFailed": "Connection failed",
+      "success": "Sync completed",
+      "conflict": "Sync needs conflict resolution",
+      "chooseAll": "Choose a resolution for every conflict"
+    }
+  },
   "system": {
     "title": "System Settings",
     "subtitle": "Shell runtime, proxy, and OS-level execution preferences",

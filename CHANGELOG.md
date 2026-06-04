@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.112] - 2026-05-29
+
+### Added
+
+- Added context compression status card to surface current compression state more clearly in the UI.
+- Improved message merge logic so history is preserved when consolidating messages.
+
 ## [0.9.111] - 2026-05-28
 
 ### Added

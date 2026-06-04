@@ -45,6 +45,9 @@ export const IPC = {
   SHELL_STARTED: 'shell:started',
   SHELL_OUTPUT: 'shell:output',
   SHELL_OPEN_PATH: 'shell:openPath',
+  SHELL_SHOW_ITEM_IN_FOLDER: 'shell:showItemInFolder',
+  SHELL_TRASH_PATH: 'shell:trashPath',
+  SHELL_OPEN_WITH_APP: 'shell:openWithApp',
   SHELL_OPEN_EXTERNAL: 'shell:openExternal',
 
   // Local Terminal
@@ -96,6 +99,19 @@ export const IPC = {
   // Migration
   MIGRATION_PREVIEW: 'migration:preview',
   MIGRATION_APPLY: 'migration:apply',
+
+  // Sync
+  SYNC_CONFIG_GET: 'sync:config:get',
+  SYNC_CONFIG_SET: 'sync:config:set',
+  SYNC_PROVIDERS_LIST: 'sync:providers:list',
+  SYNC_CONNECTION_TEST: 'sync:connection:test',
+  SYNC_STATUS: 'sync:status',
+  SYNC_RUN: 'sync:run',
+  SYNC_CONFLICTS_RESOLVE: 'sync:conflicts:resolve',
+  SYNC_STATUS_CHANGED: 'sync:status-changed',
+  SYNC_RUN_PROGRESS: 'sync:run-progress',
+  SYNC_CONFLICT_FOUND: 'sync:conflict-found',
+  SYNC_RUN_FINISHED: 'sync:run-finished',
 
   // Usage Analytics
   USAGE_EVENTS_ADD: 'usage-events:add',

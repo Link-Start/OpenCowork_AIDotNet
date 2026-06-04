@@ -44,6 +44,11 @@ const SoulsPage = lazy(async () => {
   return { default: mod.SoulsPage }
 })
 
+const SyncPage = lazy(async () => {
+  const mod = await import('@renderer/components/sync/SyncPage')
+  return { default: mod.SyncPage }
+})
+
 const ResourcesPage = lazy(async () => {
   const mod = await import('@renderer/components/resources/ResourcesPage')
   return { default: mod.ResourcesPage }
@@ -259,6 +264,7 @@ export function Layout({ updateInfo, onOpenUpdateDialog }: LayoutProps): React.J
   const setConversationGuideOpen = useUIStore((s) => s.setConversationGuideOpen)
   const skillsPageOpen = useUIStore((s) => s.skillsPageOpen)
   const soulsPageOpen = useUIStore((s) => s.soulsPageOpen)
+  const syncPageOpen = useUIStore((s) => s.syncPageOpen)
   const resourcesPageOpen = useUIStore((s) => s.resourcesPageOpen)
   const drawPageOpen = useUIStore((s) => s.drawPageOpen)
   const translatePageOpen = useUIStore((s) => s.translatePageOpen)
@@ -276,6 +282,9 @@ export function Layout({ updateInfo, onOpenUpdateDialog }: LayoutProps): React.J
     }
     if (soulsPageOpen) {
       return { title: t('navRail.souls', { defaultValue: 'SOUL' }), subtitle: null }
+    }
+    if (syncPageOpen) {
+      return { title: t('navRail.sync', { defaultValue: 'Sync' }), subtitle: null }
     }
     if (settingsPageOpen) {
       return { title: t('navRail.settings', { defaultValue: 'Settings' }), subtitle: null }
@@ -336,6 +345,7 @@ export function Layout({ updateInfo, onOpenUpdateDialog }: LayoutProps): React.J
     settingsPageOpen,
     skillsPageOpen,
     soulsPageOpen,
+    syncPageOpen,
     t,
     tasksPageOpen,
     translatePageOpen
@@ -682,6 +692,15 @@ export function Layout({ updateInfo, onOpenUpdateDialog }: LayoutProps): React.J
                 >
                   <Suspense fallback={<LazyPageFallback />}>
                     <SoulsPage />
+                  </Suspense>
+                </PageTransition>
+              ) : syncPageOpen ? (
+                <PageTransition
+                  key="sync-page"
+                  className="flex-1 min-w-0 bg-background overflow-hidden"
+                >
+                  <Suspense fallback={<LazyPageFallback />}>
+                    <SyncPage />
                   </Suspense>
                 </PageTransition>
               ) : settingsPageOpen ? (

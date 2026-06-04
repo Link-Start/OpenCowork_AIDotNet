@@ -76,7 +76,7 @@ export function WorkingFolderSelectorDialog({
   const { t: tCommon } = useTranslation('common')
   const { t: tLayout } = useTranslation('layout')
   const sshConnections = useSshStore((state) => state.connections)
-  const sshLoaded = useSshStore((state) => state._loaded)
+  const loadSshConnections = useSshStore((state) => state.loadAll)
   const projectDefaultDirectoryMode = useSettingsStore((state) => state.projectDefaultDirectoryMode)
   const projectDefaultDirectory = useSettingsStore((state) => state.projectDefaultDirectory)
   const lastProjectDirectory = useSettingsStore((state) => state.lastProjectDirectory)
@@ -117,9 +117,9 @@ export function WorkingFolderSelectorDialog({
   React.useEffect(() => {
     if (!open) return
     void loadDesktopDirectories()
-    if (!sshLoaded) void useSshStore.getState().loadAll()
+    void loadSshConnections()
     setActiveSection(preferredSection)
-  }, [loadDesktopDirectories, open, preferredSection, sshLoaded])
+  }, [loadDesktopDirectories, loadSshConnections, open, preferredSection])
 
   React.useEffect(() => {
     if (!open) return

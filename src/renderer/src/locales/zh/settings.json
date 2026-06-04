@@ -177,6 +177,66 @@
       "noSessions": "没有可用的会话"
     }
   },
+  "sync": {
+    "title": "同步",
+    "subtitle": "通过 WebDAV 进行 OpenCowork 数据记录级同步。",
+    "loading": "正在加载同步设置...",
+    "provider": {
+      "title": "同步提供商",
+      "subtitle": "v1 暂时支持 WebDAV。"
+    },
+    "form": {
+      "displayName": "显示名称",
+      "serverUrl": "服务器地址",
+      "username": "用户名",
+      "password": "密码 / 应用密码",
+      "remoteDir": "远端目录",
+      "interval": "自动同步间隔（分钟）",
+      "retention": "远端备份保留数量",
+      "autoSync": "自动同步",
+      "autoSyncDesc": "按配置的间隔自动运行。"
+    },
+    "actions": {
+      "test": "测试",
+      "save": "保存",
+      "pull": "仅拉取",
+      "push": "仅上传",
+      "syncNow": "立即同步"
+    },
+    "status": {
+      "title": "状态",
+      "device": "设备：{{deviceId}}",
+      "lastRun": "最近同步",
+      "remoteUpdated": "远端更新时间",
+      "downloaded": "已下载",
+      "conflicts": "冲突",
+      "success": "数据已同步。"
+    },
+    "confirm": {
+      "pushTitle": "将本地数据上传到 WebDAV？",
+      "pullTitle": "将远端数据拉取到此设备？",
+      "pushDesc": "会先创建远端备份，然后覆盖远端同步状态。",
+      "pullDesc": "远端记录会被应用到此设备。",
+      "confirm": "继续"
+    },
+    "conflicts": {
+      "title": "冲突",
+      "subtitle": "为每条记录选择保留本地还是使用远端。",
+      "apply": "应用选择",
+      "local": "本地",
+      "remote": "远端"
+    },
+    "toast": {
+      "loadFailed": "加载同步设置失败：{{error}}",
+      "saved": "同步设置已保存",
+      "saveFailed": "保存同步设置失败：{{error}}",
+      "testSuccess": "WebDAV 连接正常",
+      "testFailed": "连接失败",
+      "success": "同步完成",
+      "conflict": "同步需要处理冲突",
+      "chooseAll": "请为每个冲突选择处理方式"
+    }
+  },
   "system": {
     "title": "系统设置",
     "subtitle": "Shell 运行时、代理与系统级执行偏好",

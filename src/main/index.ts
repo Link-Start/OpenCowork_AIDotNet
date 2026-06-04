@@ -61,6 +61,7 @@ import { registerImageGifHandlers } from './ipc/image-gif-handlers'
 import { registerGitHandlers } from './ipc/git-handlers'
 import { registerWikiHandlers } from './ipc/wiki-handlers'
 import { registerMigrationHandlers } from './ipc/migration-handlers'
+import { registerSyncHandlers } from './ipc/sync-handlers'
 import { registerSidecarHandlers, getSidecarManager } from './ipc/sidecar-manager'
 import { registerTeamRuntimeHandlers } from './ipc/team-runtime-handlers'
 import { registerTeamWorkerHandlers, stopAllIsolatedTeamWorkers } from './ipc/team-worker-handlers'
@@ -1126,6 +1127,7 @@ if (gotSingleInstanceLock) {
     registerGitHandlers()
     registerWikiHandlers()
     registerMigrationHandlers()
+    registerSyncHandlers()
     registerSidecarHandlers()
     registerTeamRuntimeHandlers()
     registerTeamWorkerHandlers()

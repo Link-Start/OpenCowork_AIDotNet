@@ -41,6 +41,7 @@ const MAX_IMAGE_READ_BYTES = 20 * 1024 * 1024 // 20 MB
 const MAX_LIST_DIR_ITEMS = 1_000
 const MAX_GLOB_MATCHES = 1_000
 const SEARCH_TOOL_MAX_RESULTS = 100
+const MAX_RECURSIVE_DIR_WATCHERS = 2_000
 
 async function assertFileSize(filePath: string, limit: number): Promise<number> {
   const stat = await fs.promises.stat(filePath)
@@ -2410,6 +2411,204 @@ async function runRipgrepSearch(args: {
   })
 }
 
+interface WatchedFileEntry {
+  watcher: fs.FSWatcher
+  refCount: number
+  windowRefs: Map<number, number>
+  timer: NodeJS.Timeout | null
+}
+
+interface WatchedDirectoryEntry {
+  rootPath: string
+  recursive: boolean
+  refCount: number
+  windowRefs: Map<number, number>
+  watchers: Map<string, fs.FSWatcher>
+  timer: NodeJS.Timeout | null
+  syncTimer: NodeJS.Timeout | null
+  syncing: boolean
+  closed: boolean
+}
+
+function getInvokeWindowId(event: Electron.IpcMainInvokeEvent): number | null {
+  return BrowserWindow.fromWebContents(event.sender)?.id ?? null
+}
+
+function addInvokeWindowSubscription(
+  windowRefs: Map<number, number>,
+  event: Electron.IpcMainInvokeEvent
+): void {
+  const windowId = getInvokeWindowId(event)
+  if (windowId !== null) windowRefs.set(windowId, (windowRefs.get(windowId) ?? 0) + 1)
+}
+
+function removeInvokeWindowSubscription(
+  windowRefs: Map<number, number>,
+  event: Electron.IpcMainInvokeEvent
+): void {
+  const windowId = getInvokeWindowId(event)
+  if (windowId === null) return
+
+  const nextCount = (windowRefs.get(windowId) ?? 0) - 1
+  if (nextCount > 0) {
+    windowRefs.set(windowId, nextCount)
+  } else {
+    windowRefs.delete(windowId)
+  }
+}
+
+function sendToSubscribedWindows(
+  windowRefs: Map<number, number>,
+  channel: string,
+  payload: unknown
+): void {
+  if (windowRefs.size === 0) {
+    for (const win of BrowserWindow.getAllWindows()) {
+      safeSendToWindow(win, channel, payload)
+    }
+    return
+  }
+
+  for (const windowId of windowRefs.keys()) {
+    const win = BrowserWindow.fromId(windowId)
+    if (!win) {
+      windowRefs.delete(windowId)
+      continue
+    }
+    safeSendToWindow(win, channel, payload)
+  }
+}
+
+function directoryWatchKey(dirPath: string, recursive: boolean): string {
+  return `${dirPath}\0${recursive ? 'recursive' : 'direct'}`
+}
+
+function shouldIgnoreWatchedDirectory(dirPath: string, rootPath: string): boolean {
+  const relativePath = path.relative(rootPath, dirPath)
+  if (!relativePath) return false
+  if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) return true
+  return relativePath.split(/[\\/]+/).some((part) => isDefaultIgnoredDirName(part))
+}
+
+function shouldIgnoreWatchedChange(changedPath: string | null, rootPath: string): boolean {
+  if (!changedPath) return false
+  return shouldIgnoreWatchedDirectory(changedPath, rootPath)
+}
+
+async function collectWatchableDirectories(
+  rootPath: string,
+  recursive: boolean
+): Promise<Set<string>> {
+  const directories = new Set<string>([rootPath])
+  if (!recursive) return directories
+
+  const queue = [rootPath]
+  while (queue.length > 0 && directories.size < MAX_RECURSIVE_DIR_WATCHERS) {
+    const current = queue.shift()!
+    let entries: fs.Dirent[]
+    try {
+      entries = await fs.promises.readdir(current, { withFileTypes: true })
+    } catch {
+      continue
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.isSymbolicLink()) continue
+      if (isDefaultIgnoredDirName(entry.name)) continue
+
+      const childPath = path.join(current, entry.name)
+      if (shouldIgnoreWatchedDirectory(childPath, rootPath)) continue
+
+      directories.add(childPath)
+      queue.push(childPath)
+      if (directories.size >= MAX_RECURSIVE_DIR_WATCHERS) break
+    }
+  }
+
+  return directories
+}
+
+function scheduleDirectoryWatcherSync(entry: WatchedDirectoryEntry): void {
+  if (entry.closed) return
+  if (!entry.recursive) return
+  if (entry.syncTimer) clearTimeout(entry.syncTimer)
+
+  entry.syncTimer = setTimeout(() => {
+    entry.syncTimer = null
+    void syncDirectoryWatchers(entry)
+  }, 500)
+}
+
+function scheduleDirectoryChanged(entry: WatchedDirectoryEntry, changedPath: string | null): void {
+  if (entry.closed) return
+  if (shouldIgnoreWatchedChange(changedPath, entry.rootPath)) return
+
+  if (entry.timer) clearTimeout(entry.timer)
+  entry.timer = setTimeout(() => {
+    entry.timer = null
+    sendToSubscribedWindows(entry.windowRefs, 'fs:dir-changed', {
+      path: entry.rootPath,
+      changedPath: changedPath ?? entry.rootPath
+    })
+  }, 300)
+
+  scheduleDirectoryWatcherSync(entry)
+}
+
+function watchDirectoryPath(entry: WatchedDirectoryEntry, dirPath: string): void {
+  if (entry.closed) return
+  if (entry.watchers.has(dirPath)) return
+
+  try {
+    const watcher = fs.watch(dirPath, { recursive: false }, (_eventType, filename) => {
+      const changedPath =
+        typeof filename === 'string' && filename.length > 0 ? path.join(dirPath, filename) : dirPath
+      scheduleDirectoryChanged(entry, changedPath)
+    })
+    watcher.on('error', () => {
+      watcher.close()
+      entry.watchers.delete(dirPath)
+    })
+    entry.watchers.set(dirPath, watcher)
+  } catch {
+    // Directory may disappear between traversal and watch registration.
+  }
+}
+
+async function syncDirectoryWatchers(entry: WatchedDirectoryEntry): Promise<void> {
+  if (entry.closed) return
+  if (entry.syncing) return
+  entry.syncing = true
+  try {
+    const directories = await collectWatchableDirectories(entry.rootPath, entry.recursive)
+    if (entry.closed) return
+
+    for (const dirPath of directories) {
+      watchDirectoryPath(entry, dirPath)
+    }
+
+    for (const [dirPath, watcher] of entry.watchers) {
+      if (directories.has(dirPath)) continue
+      watcher.close()
+      entry.watchers.delete(dirPath)
+    }
+  } finally {
+    entry.syncing = false
+  }
+}
+
+function closeDirectoryWatchEntry(entry: WatchedDirectoryEntry): void {
+  entry.closed = true
+  for (const watcher of entry.watchers.values()) {
+    watcher.close()
+  }
+  entry.watchers.clear()
+  if (entry.timer) clearTimeout(entry.timer)
+  if (entry.syncTimer) clearTimeout(entry.syncTimer)
+  entry.timer = null
+  entry.syncTimer = null
+}
+
 export function registerFsHandlers(): void {
   ipcMain.handle(
     'fs:read-file',
@@ -2473,8 +2672,7 @@ export function registerFsHandlers(): void {
         }
         if (typeof args.beforeContent === 'string' && beforeText !== args.beforeContent) {
           return {
-            error:
-              'File changed since it was read. Read the file again before editing or writing.'
+            error: 'File changed since it was read. Read the file again before editing or writing.'
           }
         }
         const dir = path.dirname(args.path)
@@ -3180,90 +3378,123 @@ export function registerFsHandlers(): void {
   })
 
   // File watching
-  const watchers = new Map<string, fs.FSWatcher>()
-  const debounceTimers = new Map<string, NodeJS.Timeout>()
+  const fileWatchers = new Map<string, WatchedFileEntry>()
 
-  ipcMain.handle('fs:watch-file', async (_event, args: { path: string }) => {
-    const filePath = args.path
-    if (watchers.has(filePath)) return { success: true }
+  ipcMain.handle('fs:watch-file', async (event, args: { path: string }) => {
+    const filePath = path.resolve(args.path)
+    const existing = fileWatchers.get(filePath)
+    if (existing) {
+      existing.refCount += 1
+      addInvokeWindowSubscription(existing.windowRefs, event)
+      return { success: true }
+    }
+
     try {
+      let watchEntry: WatchedFileEntry | null = null
       const watcher = fs.watch(filePath, () => {
-        const existing = debounceTimers.get(filePath)
-        if (existing) clearTimeout(existing)
-        debounceTimers.set(
-          filePath,
-          setTimeout(() => {
-            debounceTimers.delete(filePath)
-            const win = BrowserWindow.getAllWindows()[0]
-            if (win) {
-              safeSendToWindow(win, 'fs:file-changed', { path: filePath })
-            }
-          }, 300)
-        )
+        if (!watchEntry) return
+        if (watchEntry.timer) clearTimeout(watchEntry.timer)
+        watchEntry.timer = setTimeout(() => {
+          if (!watchEntry) return
+          watchEntry.timer = null
+          sendToSubscribedWindows(watchEntry.windowRefs, 'fs:file-changed', { path: filePath })
+        }, 300)
       })
-      watchers.set(filePath, watcher)
+
+      const entry: WatchedFileEntry = {
+        watcher,
+        refCount: 1,
+        windowRefs: new Map<number, number>(),
+        timer: null
+      }
+      watchEntry = entry
+      addInvokeWindowSubscription(entry.windowRefs, event)
+      entry.watcher.on('error', () => {
+        watchEntry?.watcher.close()
+        if (watchEntry?.timer) clearTimeout(watchEntry.timer)
+        fileWatchers.delete(filePath)
+      })
+      fileWatchers.set(filePath, entry)
       return { success: true }
     } catch (err) {
       return { error: String(err) }
     }
   })
 
-  ipcMain.handle('fs:unwatch-file', async (_event, args: { path: string }) => {
-    const filePath = args.path
-    const watcher = watchers.get(filePath)
-    if (watcher) {
-      watcher.close()
-      watchers.delete(filePath)
-    }
-    const timer = debounceTimers.get(filePath)
-    if (timer) {
-      clearTimeout(timer)
-      debounceTimers.delete(filePath)
-    }
+  ipcMain.handle('fs:unwatch-file', async (event, args: { path: string }) => {
+    const filePath = path.resolve(args.path)
+    const entry = fileWatchers.get(filePath)
+    if (!entry) return { success: true }
+
+    entry.refCount -= 1
+    removeInvokeWindowSubscription(entry.windowRefs, event)
+    if (entry.refCount > 0) return { success: true }
+
+    entry.watcher.close()
+    if (entry.timer) clearTimeout(entry.timer)
+    fileWatchers.delete(filePath)
     return { success: true }
   })
 
   // Directory watching
-  const dirWatchers = new Map<string, fs.FSWatcher>()
-  const dirDebounceTimers = new Map<string, NodeJS.Timeout>()
+  const dirWatchers = new Map<string, WatchedDirectoryEntry>()
 
-  ipcMain.handle('fs:watch-dir', async (_event, args: { path: string }) => {
-    const dirPath = args.path
-    if (dirWatchers.has(dirPath)) return { success: true }
-    try {
-      const watcher = fs.watch(dirPath, { recursive: false }, () => {
-        const existing = dirDebounceTimers.get(dirPath)
-        if (existing) clearTimeout(existing)
-        dirDebounceTimers.set(
-          dirPath,
-          setTimeout(() => {
-            dirDebounceTimers.delete(dirPath)
-            const win = BrowserWindow.getAllWindows()[0]
-            if (win) {
-              safeSendToWindow(win, 'fs:dir-changed', { path: dirPath })
-            }
-          }, 300)
-        )
-      })
-      dirWatchers.set(dirPath, watcher)
+  ipcMain.handle('fs:watch-dir', async (event, args: { path: string; recursive?: boolean }) => {
+    const dirPath = path.resolve(args.path)
+    const recursive = args.recursive === true
+    const key = directoryWatchKey(dirPath, recursive)
+    const existing = dirWatchers.get(key)
+    if (existing) {
+      existing.refCount += 1
+      addInvokeWindowSubscription(existing.windowRefs, event)
       return { success: true }
+    }
+
+    try {
+      const stats = await fs.promises.stat(dirPath)
+      if (!stats.isDirectory()) {
+        return { error: `Path is not a directory: ${dirPath}` }
+      }
+
+      const entry: WatchedDirectoryEntry = {
+        rootPath: dirPath,
+        recursive,
+        refCount: 1,
+        windowRefs: new Map<number, number>(),
+        watchers: new Map<string, fs.FSWatcher>(),
+        timer: null,
+        syncTimer: null,
+        syncing: false,
+        closed: false
+      }
+      addInvokeWindowSubscription(entry.windowRefs, event)
+      await syncDirectoryWatchers(entry)
+      dirWatchers.set(key, entry)
+      return { success: true, recursive, watched: entry.watchers.size }
     } catch (err) {
       return { error: String(err) }
     }
   })
 
-  ipcMain.handle('fs:unwatch-dir', async (_event, args: { path: string }) => {
-    const dirPath = args.path
-    const watcher = dirWatchers.get(dirPath)
-    if (watcher) {
-      watcher.close()
-      dirWatchers.delete(dirPath)
+  ipcMain.handle('fs:unwatch-dir', async (event, args: { path: string; recursive?: boolean }) => {
+    const dirPath = path.resolve(args.path)
+    const candidateKeys =
+      typeof args.recursive === 'boolean'
+        ? [directoryWatchKey(dirPath, args.recursive)]
+        : [directoryWatchKey(dirPath, true), directoryWatchKey(dirPath, false)]
+
+    for (const key of candidateKeys) {
+      const entry = dirWatchers.get(key)
+      if (!entry) continue
+
+      entry.refCount -= 1
+      removeInvokeWindowSubscription(entry.windowRefs, event)
+      if (entry.refCount > 0) continue
+
+      closeDirectoryWatchEntry(entry)
+      dirWatchers.delete(key)
     }
-    const timer = dirDebounceTimers.get(dirPath)
-    if (timer) {
-      clearTimeout(timer)
-      dirDebounceTimers.delete(dirPath)
-    }
+
     return { success: true }
   })
 

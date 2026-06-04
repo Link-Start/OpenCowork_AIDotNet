@@ -1,4 +1,4 @@
-import type { AgentRunFileChange } from '@renderer/stores/agent-store'
+import type { AgentRunChangeSet, AgentRunFileChange } from '@renderer/stores/agent-store'
 import type { DiffViewerChunk, DiffViewerLine } from './CodeDiffViewer'
 
 export interface AggregatedFileChange {
@@ -201,6 +201,26 @@ export function aggregateDisplayableRunFileChanges(
   changes: AgentRunFileChange[]
 ): AggregatedFileChange[] {
   return aggregateRunFileChanges(changes).filter((change) => hasDisplayableTrackedChange(change))
+}
+
+export function latestDisplayableRunChangeSet(
+  changeSets: readonly AgentRunChangeSet[]
+): AgentRunChangeSet | null {
+  let latest: AgentRunChangeSet | null = null
+
+  for (const changeSet of changeSets) {
+    if (aggregateDisplayableRunFileChanges(changeSet.changes).length === 0) continue
+
+    if (
+      !latest ||
+      changeSet.createdAt > latest.createdAt ||
+      (changeSet.createdAt === latest.createdAt && changeSet.updatedAt > latest.updatedAt)
+    ) {
+      latest = changeSet
+    }
+  }
+
+  return latest
 }
 
 export function matchesAggregatedChangeId(

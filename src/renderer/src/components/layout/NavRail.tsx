@@ -1,5 +1,6 @@
 import {
   CalendarDays,
+  CloudSync,
   FolderOpen,
   Image,
   MessageSquare,
@@ -22,6 +23,7 @@ const navItems: { value: NavItem | 'ssh'; icon: React.ReactNode; labelKey: strin
   { value: 'resources', icon: <FolderOpen className="size-5" />, labelKey: 'navRail.resources' },
   { value: 'skills', icon: <Wand2 className="size-5" />, labelKey: 'navRail.skills' },
   { value: 'souls', icon: <Sparkles className="size-5" />, labelKey: 'navRail.souls' },
+  { value: 'sync', icon: <CloudSync className="size-5" />, labelKey: 'navRail.sync' },
   { value: 'draw', icon: <Image className="size-5" />, labelKey: 'navRail.draw' },
   { value: 'ssh', icon: <Monitor className="size-5" />, labelKey: 'navRail.ssh' }
 ]
@@ -33,6 +35,7 @@ export function NavRail(): React.JSX.Element {
   const leftSidebarOpen = useUIStore((s) => s.leftSidebarOpen)
   const skillsPageOpen = useUIStore((s) => s.skillsPageOpen)
   const soulsPageOpen = useUIStore((s) => s.soulsPageOpen)
+  const syncPageOpen = useUIStore((s) => s.syncPageOpen)
   const resourcesPageOpen = useUIStore((s) => s.resourcesPageOpen)
   const drawPageOpen = useUIStore((s) => s.drawPageOpen)
   const translatePageOpen = useUIStore((s) => s.translatePageOpen)
@@ -49,6 +52,10 @@ export function NavRail(): React.JSX.Element {
     }
     if (item === 'souls') {
       useUIStore.getState().openSoulsPage()
+      return
+    }
+    if (item === 'sync') {
+      useUIStore.getState().openSyncPage()
       return
     }
     if (item === 'resources') {
@@ -72,6 +79,7 @@ export function NavRail(): React.JSX.Element {
     if (ui.settingsPageOpen) ui.closeSettingsPage()
     if (ui.skillsPageOpen) ui.closeSkillsPage()
     if (ui.soulsPageOpen) ui.closeSoulsPage()
+    if (ui.syncPageOpen) ui.closeSyncPage()
     if (ui.resourcesPageOpen) ui.closeResourcesPage()
     if (ui.drawPageOpen) ui.closeDrawPage()
     if (ui.translatePageOpen) ui.closeTranslatePage()
@@ -102,6 +110,7 @@ export function NavRail(): React.JSX.Element {
                     (item.value === 'resources' && resourcesPageOpen) ||
                     (item.value === 'skills' && skillsPageOpen) ||
                     (item.value === 'souls' && soulsPageOpen) ||
+                    (item.value === 'sync' && syncPageOpen) ||
                     (item.value === 'draw' && drawPageOpen) ||
                     (item.value === 'translate' && translatePageOpen) ||
                     (![
@@ -109,6 +118,7 @@ export function NavRail(): React.JSX.Element {
                       'resources',
                       'skills',
                       'souls',
+                      'sync',
                       'draw',
                       'translate',
                       'ssh'

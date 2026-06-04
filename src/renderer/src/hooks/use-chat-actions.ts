@@ -4810,6 +4810,7 @@ export function useChatActions(): {
                     event.messages.length > 0 &&
                     (event.reason === 'completed' || event.reason === 'max_iterations')
                   ) {
+                    flushRuntimeForegroundMutations()
                     const currentMessages =
                       useChatStore.getState().sessions.find((item) => item.id === sessionId)
                         ?.messages ?? []
@@ -4958,6 +4959,8 @@ export function useChatActions(): {
                     const placeholderId = sessionCompressionPlaceholderIds.get(sessionId!)
                     sessionCompressionPlaceholderIds.delete(sessionId!)
 
+                    streamDeltaBuffer.flushNow()
+                    flushRuntimeForegroundMutations()
                     const currentMessages =
                       useChatStore.getState().sessions.find((item) => item.id === sessionId)
                         ?.messages ?? []

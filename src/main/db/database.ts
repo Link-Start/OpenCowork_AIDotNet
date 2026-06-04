@@ -1202,6 +1202,33 @@ export function getDb(): Database.Database {
     CREATE INDEX IF NOT EXISTS idx_cron_run_logs_run ON cron_run_logs(run_id, sort_order);
   `)
 
+  // --- Sync metadata ---
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sync_record_state (
+      provider_id TEXT NOT NULL,
+      domain TEXT NOT NULL,
+      record_id TEXT NOT NULL,
+      content_hash TEXT NOT NULL,
+      synced_at INTEGER NOT NULL,
+      PRIMARY KEY (provider_id, domain, record_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS sync_tombstones (
+      provider_id TEXT NOT NULL,
+      domain TEXT NOT NULL,
+      record_id TEXT NOT NULL,
+      deleted_at INTEGER NOT NULL,
+      origin_device_id TEXT NOT NULL,
+      PRIMARY KEY (provider_id, domain, record_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_sync_record_state_provider
+      ON sync_record_state(provider_id, domain);
+
+    CREATE INDEX IF NOT EXISTS idx_sync_tombstones_provider
+      ON sync_tombstones(provider_id, domain, deleted_at);
+  `)
+
   return db
 }
 

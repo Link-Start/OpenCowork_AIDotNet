@@ -391,6 +391,12 @@ export function mergeCompressedMessagesKeepHistory(
  * we splice agentMessages[boundaryIdx..] over currentMessages[boundaryIdx..]
  * while preserving any trailing items the agent never had (e.g. the persistent
  * compression status marker).
+ *
+ * During a live renderer run, the loop-local assistant/tool-result messages use
+ * internal IDs while the UI streams into the stable `runId` assistant message.
+ * Once the compression event has already inserted the boundary + summary, the
+ * renderer tail is authoritative and replacing it here would duplicate or hide
+ * the content that streamed after compression.
  */
 export function mergeLoopEndMessagesKeepHistory(
   currentMessages: UnifiedMessage[],
@@ -398,6 +404,12 @@ export function mergeLoopEndMessagesKeepHistory(
 ): UnifiedMessage[] | null {
   const boundaryInAgent = agentMessages.find(isCompactBoundaryMessage)
   if (!boundaryInAgent) return null
+
+  const summaryInAgent = agentMessages.find((message) => isCompactSummaryMessage(message))
+  const currentIds = new Set(currentMessages.map((message) => message.id))
+  if (summaryInAgent && currentIds.has(boundaryInAgent.id) && currentIds.has(summaryInAgent.id)) {
+    return null
+  }
 
   const boundaryIdxAgent = agentMessages.indexOf(boundaryInAgent)
   const boundaryIdxCurrent = currentMessages.findIndex(

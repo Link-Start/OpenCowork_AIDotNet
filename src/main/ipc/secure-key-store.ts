@@ -22,7 +22,7 @@ export function readConfig(): Record<string, unknown> {
   return {}
 }
 
-function writeConfig(config: Record<string, unknown>): void {
+export function writeConfig(config: Record<string, unknown>): void {
   try {
     if (!fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true })

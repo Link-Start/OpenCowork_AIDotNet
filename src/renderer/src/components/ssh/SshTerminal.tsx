@@ -76,11 +76,35 @@ export function SshTerminal({ sessionId }: SshTerminalProps): React.JSX.Element 
     term.unicode.activeVersion = '11'
 
     term.open(containerRef.current)
-    fitAddon.fit()
 
     termRef.current = term
     fitAddonRef.current = fitAddon
     searchAddonRef.current = searchAddon
+
+    const notifyRemoteResize = (): void => {
+      ipcClient.send(IPC.SSH_RESIZE, {
+        sessionId,
+        cols: term.cols,
+        rows: term.rows
+      })
+    }
+
+    const fitTerminal = (): void => {
+      try {
+        fitAddon.fit()
+        notifyRemoteResize()
+      } catch {
+        // ignore
+      }
+    }
+
+    const scheduleFit = (): void => {
+      requestAnimationFrame(() => {
+        fitTerminal()
+      })
+    }
+
+    scheduleFit()
 
     // Track selection changes
     const selectionDisposable = term.onSelectionChange(() => {
@@ -166,50 +190,45 @@ export function SshTerminal({ sessionId }: SshTerminalProps): React.JSX.Element 
 
     // Fit on window resize
     const handleWindowResize = (): void => {
-      fitAddon.fit()
+      scheduleFit()
     }
     window.addEventListener('resize', handleWindowResize)
 
+    const visualViewport = window.visualViewport
+    const handleViewportResize = (): void => {
+      scheduleFit()
+    }
+    visualViewport?.addEventListener('resize', handleViewportResize)
+
     // ResizeObserver for container resize
     const resizeObserver = new ResizeObserver(() => {
-      requestAnimationFrame(() => {
-        try {
-          fitAddon.fit()
-        } catch {
-          // ignore
-        }
-      })
+      scheduleFit()
     })
     resizeObserver.observe(containerRef.current)
 
     // Re-fit when terminal becomes visible again (e.g. page switch back)
     const intersectionObserver = new IntersectionObserver((entries) => {
       if (entries[0]?.isIntersecting) {
-        requestAnimationFrame(() => {
-          try {
-            fitAddon.fit()
-            ipcClient.send(IPC.SSH_RESIZE, {
-              sessionId,
-              cols: term.cols,
-              rows: term.rows
-            })
-          } catch {
-            // ignore
-          }
-        })
+        scheduleFit()
       }
     })
     intersectionObserver.observe(containerRef.current)
 
-    // Send initial size to remote
-    setTimeout(() => {
-      fitAddon.fit()
-      ipcClient.send(IPC.SSH_RESIZE, {
-        sessionId,
-        cols: term.cols,
-        rows: term.rows
+    let fontsReadyDisposed = false
+    const fontReady = document.fonts?.ready
+    if (fontReady) {
+      void fontReady.then(() => {
+        if (fontsReadyDisposed) return
+        scheduleFit()
       })
+    }
+
+    const initialFitTimer = window.setTimeout(() => {
+      scheduleFit()
     }, 100)
+    const delayedFitTimer = window.setTimeout(() => {
+      scheduleFit()
+    }, 350)
 
     return () => {
       dataDisposable.dispose()
@@ -218,8 +237,12 @@ export function SshTerminal({ sessionId }: SshTerminalProps): React.JSX.Element 
       selectionDisposable.dispose()
       outputCleanup()
       window.removeEventListener('resize', handleWindowResize)
+      visualViewport?.removeEventListener('resize', handleViewportResize)
       resizeObserver.disconnect()
       intersectionObserver.disconnect()
+      window.clearTimeout(initialFitTimer)
+      window.clearTimeout(delayedFitTimer)
+      fontsReadyDisposed = true
       term.dispose()
       termRef.current = null
       fitAddonRef.current = null

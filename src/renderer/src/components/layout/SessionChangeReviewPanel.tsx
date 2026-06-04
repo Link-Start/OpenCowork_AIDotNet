@@ -26,6 +26,7 @@ import {
   fileName,
   foldContext,
   lineCount,
+  latestDisplayableRunChangeSet,
   matchesAggregatedChangeId,
   snapshotText,
   type AggregatedFileChange
@@ -359,12 +360,16 @@ export function SessionChangeReviewPanel({
       .sort((left, right) => left.createdAt - right.createdAt)
   }, [activeSessionId, assistantMessageIds, runChangesByRunId])
 
+  const latestChangeSet = React.useMemo(
+    () => latestDisplayableRunChangeSet(sessionChangeSets),
+    [sessionChangeSets]
+  )
   const aggregatedChanges = React.useMemo(
     () =>
-      aggregateDisplayableRunFileChanges(
-        sessionChangeSets.flatMap((changeSet) => changeSet.changes)
-      ).sort((left, right) => left.createdAt - right.createdAt),
-    [sessionChangeSets]
+      aggregateDisplayableRunFileChanges(latestChangeSet?.changes ?? []).sort(
+        (left, right) => left.createdAt - right.createdAt
+      ),
+    [latestChangeSet]
   )
   const summariesByChangeId = useAggregatedChangeSummaries(aggregatedChanges)
 
@@ -404,11 +409,15 @@ export function SessionChangeReviewPanel({
       Array.from(
         new Set(
           sessionChangeSets
-            .filter((changeSet) => changeSet.changes.some((change) => change.status === 'open'))
+            .filter(
+              (changeSet) =>
+                changeSet.runId === latestChangeSet?.runId &&
+                changeSet.changes.some((change) => change.status === 'open')
+            )
             .map((changeSet) => changeSet.runId)
         )
       ),
-    [sessionChangeSets]
+    [latestChangeSet, sessionChangeSets]
   )
   const actionable = undoableRunIds.length > 0
 
@@ -469,7 +478,7 @@ export function SessionChangeReviewPanel({
             <p className="mt-1 text-xs leading-5 text-muted-foreground">
               {t('rightPanel.reviewSessionDesc', {
                 defaultValue:
-                  'Review all file changes captured in the current session. Expand a file to inspect the aggregated diff.'
+                  'Review the latest file changes captured in the current session. Expand a file to inspect the diff.'
               })}
             </p>
           </div>

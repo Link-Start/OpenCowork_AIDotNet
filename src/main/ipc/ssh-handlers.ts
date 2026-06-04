@@ -1567,7 +1567,7 @@ function ensureSshConfigWatcher(): void {
   sshConfigWatcherAttached = true
   startSshConfigWatcher()
   onSshConfigChange(() => {
-    broadcastToRenderer('ssh:config:changed', {})
+    safeSendToAllWindows('ssh:config:changed', {})
   })
 }
 

@@ -6,6 +6,8 @@ import {
   FolderOpen,
   Folder,
   File,
+  Code2,
+  ExternalLink,
   FileCode,
   FileJson,
   FileText,
@@ -18,10 +20,12 @@ import {
   Copy,
   Check,
   AlertCircle,
+  Eye,
+  MessageSquarePlus,
   Pencil,
+  SquareTerminal,
   Trash2,
   Search,
-  GripVertical,
   X
 } from 'lucide-react'
 import { Button } from '@renderer/components/ui/button'
@@ -37,9 +41,11 @@ import { useChatStore } from '@renderer/stores/chat-store'
 import { useUIStore } from '@renderer/stores/ui-store'
 import { ipcClient } from '@renderer/lib/ipc/ipc-client'
 import { IPC } from '@renderer/lib/ipc/channels'
+import { ensureProjectTerminalReady } from '@renderer/lib/terminal/project-terminal-context'
 import { createSelectFileTag } from '@renderer/lib/select-file-tags'
 import { cn } from '@renderer/lib/utils'
 import { AnimatePresence, motion } from 'motion/react'
+import { toast } from 'sonner'
 
 // --- Types ---
 
@@ -59,8 +65,6 @@ interface FileSearchItem {
   name: string
   path: string
 }
-
-const INTERNAL_FILE_DRAG_MIME = 'application/x-opencowork-file-paths'
 
 // --- File icon helper ---
 
@@ -145,6 +149,14 @@ function collapseTree(nodes: TreeNode[]): TreeNode[] {
   }))
 }
 
+function collectExpandedPaths(nodes: TreeNode[], paths = new Set<string>()): Set<string> {
+  for (const node of nodes) {
+    if (node.type === 'directory' && node.expanded) paths.add(node.path)
+    if (node.children?.length) collectExpandedPaths(node.children, paths)
+  }
+  return paths
+}
+
 function toRelativePath(filePath: string, workingFolder?: string): string {
   if (!workingFolder) return filePath
   if (!filePath.startsWith(workingFolder)) return filePath
@@ -164,6 +176,27 @@ function parentPath(filePath: string, separator: string): string {
 
 function joinPath(parent: string, name: string, separator: string): string {
   return `${parent.replace(/[\\/]+$/, '')}${separator}${name}`
+}
+
+function getErrorMessage(err: unknown, fallback = 'Operation failed'): string {
+  if (err instanceof Error && err.message) return err.message
+  if (typeof err === 'string' && err.trim()) return err
+  return fallback
+}
+
+function getIpcError(result: unknown): string | null {
+  if (!result || typeof result !== 'object' || !('error' in result)) return null
+  const error = (result as { error?: unknown }).error
+  return typeof error === 'string' && error.length > 0 ? error : 'Operation failed'
+}
+
+type EntryNameValidationError = 'empty' | 'dot' | 'separator'
+
+function validateEntryName(name: string): EntryNameValidationError | null {
+  if (!name.trim()) return 'empty'
+  if (name === '.' || name === '..') return 'dot'
+  if (/[\\/]/.test(name)) return 'separator'
+  return null
 }
 
 function DepthGuides({ depth }: { depth: number }): React.JSX.Element | null {
@@ -241,10 +274,18 @@ interface TreeEditState {
 }
 
 interface TreeActions {
+  localActionsAvailable: boolean
   onDelete: (nodePath: string, nodeName: string, isDir: boolean) => void
   onRenameStart: (nodePath: string, nodeName: string) => void
   onRenameConfirm: (value: string) => void
   onRenameCancel: () => void
+  onAddToChat: (nodePath: string) => void
+  onCopyPath: (nodePath: string) => void
+  onPreview: (nodePath: string) => void
+  onOpenDefault: (nodePath: string) => void
+  onOpenTerminal: (nodePath: string, isDir: boolean) => void
+  onOpenWithCode: (nodePath: string) => void
+  onReveal: (nodePath: string) => void
   onNewFile: (dirPath: string) => void
   onNewFolder: (dirPath: string) => void
   onNewItemConfirm: (value: string) => void
@@ -257,9 +298,6 @@ function TreeItem({
   depth,
   activePath,
   onToggle,
-  onCopyPath,
-  onPreview,
-  onFileDragStart,
   editState,
   actions
 }: {
@@ -267,9 +305,6 @@ function TreeItem({
   depth: number
   activePath: string | null
   onToggle: (path: string) => void
-  onCopyPath: (path: string) => void
-  onPreview: (path: string, name: string) => void
-  onFileDragStart: (event: React.DragEvent<HTMLElement>, path: string) => void
   editState: TreeEditState
   actions: TreeActions
 }): React.JSX.Element {
@@ -286,16 +321,20 @@ function TreeItem({
   const isActive = activePath === node.path
 
   const handleCopy = useCallback(() => {
-    onCopyPath(node.path)
+    actions.onCopyPath(node.path)
     setCopied(true)
     setTimeout(() => setCopied(false), 1200)
-  }, [node.path, onCopyPath])
+  }, [actions, node.path])
+
+  const handleAddToChat = useCallback(() => {
+    actions.onAddToChat(node.path)
+  }, [actions, node.path])
 
   const rowContent = (
     <div
       className={cn(
         'workspace-filetree-row group relative flex items-center gap-2 rounded-xl px-2 py-1.5 text-[12px] transition-all',
-        isDir ? 'cursor-pointer' : 'cursor-grab active:cursor-grabbing',
+        'cursor-pointer',
         isActive
           ? 'workspace-filetree-row--active text-foreground'
           : isDir && node.expanded
@@ -304,13 +343,8 @@ function TreeItem({
         isIgnored && 'opacity-40'
       )}
       style={{ paddingLeft: `${depth * 14 + 6}px` }}
-      onClick={() => (isDir && !isIgnored ? onToggle(node.path) : onPreview(node.path, node.name))}
-      onDragStart={(event) => {
-        if (!isDir) {
-          onFileDragStart(event, node.path)
-        }
-      }}
-      draggable={!isDir && !isRenaming}
+      onClick={() => (isDir && !isIgnored ? onToggle(node.path) : actions.onPreview(node.path))}
+      onContextMenu={(event) => event.stopPropagation()}
       title={node.path}
     >
       <DepthGuides depth={depth} />
@@ -328,7 +362,7 @@ function TreeItem({
           <ChevronRight className="size-3 shrink-0 text-muted-foreground/60" />
         )
       ) : (
-        <GripVertical className="size-3 shrink-0 text-muted-foreground/25 transition-colors group-hover:text-muted-foreground/60" />
+        <span className="size-3 shrink-0" />
       )}
 
       {isDir ? (
@@ -371,25 +405,32 @@ function TreeItem({
           >
             {node.name}
           </span>
-          {!isDir && (
-            <span className="workspace-filetree-chip rounded-full px-1.5 py-0.5 text-[10px] opacity-0 transition-opacity group-hover:opacity-100">
-              {t('fileTree.dragToReference')}
-            </span>
-          )}
         </div>
       )}
 
       {!isDir && !isRenaming && (
-        <button
-          className="workspace-filetree-action shrink-0 rounded-md p-1 opacity-0 transition-all group-hover:opacity-100"
-          onClick={(e) => {
-            e.stopPropagation()
-            handleCopy()
-          }}
-          title={t('fileTree.copyPath')}
-        >
-          {copied ? <Check className="size-3 text-green-500" /> : <Copy className="size-3" />}
-        </button>
+        <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-all group-hover:opacity-100">
+          <button
+            className="workspace-filetree-action rounded-md p-1"
+            onClick={(e) => {
+              e.stopPropagation()
+              handleAddToChat()
+            }}
+            title={t('fileTree.addToChat')}
+          >
+            <MessageSquarePlus className="size-3" />
+          </button>
+          <button
+            className="workspace-filetree-action rounded-md p-1"
+            onClick={(e) => {
+              e.stopPropagation()
+              handleCopy()
+            }}
+            title={t('fileTree.copyPath')}
+          >
+            {copied ? <Check className="size-3 text-green-500" /> : <Copy className="size-3" />}
+          </button>
+        </div>
       )}
     </div>
   )
@@ -398,9 +439,28 @@ function TreeItem({
     <>
       <ContextMenu>
         <ContextMenuTrigger asChild>{rowContent}</ContextMenuTrigger>
-        <ContextMenuContent className="w-44">
+        <ContextMenuContent className="w-52">
+          {!isDir && (
+            <ContextMenuItem
+              className="gap-2 text-xs"
+              onSelect={() => actions.onPreview(node.path)}
+            >
+              <Eye className="size-3.5" /> {t('fileTree.preview')}
+            </ContextMenuItem>
+          )}
+          <ContextMenuItem className="gap-2 text-xs" onSelect={handleAddToChat}>
+            <MessageSquarePlus className="size-3.5" /> {t('fileTree.addToChat')}
+          </ContextMenuItem>
           {isDir && !isIgnored && (
             <>
+              <ContextMenuItem className="gap-2 text-xs" onSelect={() => onToggle(node.path)}>
+                {node.expanded ? (
+                  <ChevronDown className="size-3.5" />
+                ) : (
+                  <ChevronRight className="size-3.5" />
+                )}
+                {node.expanded ? t('fileTree.collapseFolder') : t('fileTree.expandFolder')}
+              </ContextMenuItem>
               <ContextMenuItem
                 className="gap-2 text-xs"
                 onSelect={() => actions.onNewFile(node.path)}
@@ -422,16 +482,45 @@ function TreeItem({
               <ContextMenuSeparator />
             </>
           )}
+          <ContextMenuItem className="gap-2 text-xs" onSelect={handleCopy}>
+            <Copy className="size-3.5" /> {t('action.copyPath', { ns: 'common' })}
+          </ContextMenuItem>
+          <ContextMenuItem
+            className="gap-2 text-xs"
+            onSelect={() => actions.onOpenTerminal(node.path, isDir)}
+          >
+            <SquareTerminal className="size-3.5" /> {t('fileTree.openTerminal')}
+          </ContextMenuItem>
+          {actions.localActionsAvailable && !isIgnored && (
+            <>
+              <ContextMenuSeparator />
+              <ContextMenuItem
+                className="gap-2 text-xs"
+                onSelect={() => actions.onOpenDefault(node.path)}
+              >
+                <ExternalLink className="size-3.5" /> {t('fileTree.openDefault')}
+              </ContextMenuItem>
+              <ContextMenuItem
+                className="gap-2 text-xs"
+                onSelect={() => actions.onOpenWithCode(node.path)}
+              >
+                <Code2 className="size-3.5" /> {t('fileTree.openWithCode')}
+              </ContextMenuItem>
+              <ContextMenuItem
+                className="gap-2 text-xs"
+                onSelect={() => actions.onReveal(node.path)}
+              >
+                <FolderOpen className="size-3.5" /> {t('fileTree.revealInFinder')}
+              </ContextMenuItem>
+            </>
+          )}
+          <ContextMenuSeparator />
           <ContextMenuItem
             className="gap-2 text-xs"
             onSelect={() => actions.onRenameStart(node.path, node.name)}
           >
             <Pencil className="size-3.5" /> {t('action.rename', { ns: 'common' })}
           </ContextMenuItem>
-          <ContextMenuItem className="gap-2 text-xs" onSelect={handleCopy}>
-            <Copy className="size-3.5" /> {t('action.copyPath', { ns: 'common' })}
-          </ContextMenuItem>
-          <ContextMenuSeparator />
           <ContextMenuItem
             className="gap-2 text-xs text-destructive focus:text-destructive"
             onSelect={() => actions.onDelete(node.path, node.name, isDir)}
@@ -476,9 +565,6 @@ function TreeItem({
                   depth={depth + 1}
                   activePath={activePath}
                   onToggle={onToggle}
-                  onCopyPath={onCopyPath}
-                  onPreview={onPreview}
-                  onFileDragStart={onFileDragStart}
                   editState={editState}
                   actions={actions}
                 />
@@ -523,6 +609,8 @@ export function FileTreePanel({
 
       return {
         sessionId: resolvedSessionId,
+        projectId: currentSession?.projectId ?? currentProject?.id ?? null,
+        projectName: currentProject?.name ?? null,
         workingFolder: currentSession?.workingFolder ?? currentProject?.workingFolder,
         sshConnectionId: currentSession?.sshConnectionId ?? currentProject?.sshConnectionId
       }
@@ -533,6 +621,7 @@ export function FileTreePanel({
   const previewPanelState = useUIStore((s) => s.previewPanelState)
 
   const [tree, setTree] = useState<TreeNode[]>([])
+  const treeRef = useRef<TreeNode[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
@@ -566,44 +655,70 @@ export function FileTreePanel({
     [sshConnectionId]
   )
 
-  const loadRoot = useCallback(async () => {
-    if (!workingFolder) return
-    setLoading(true)
-    setError(null)
-    try {
-      const nodes = await loadDir(workingFolder)
-      setTree(nodes)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setLoading(false)
-    }
-  }, [workingFolder, loadDir])
+  useEffect(() => {
+    treeRef.current = tree
+  }, [tree])
+
+  const hydrateExpandedNodes = useCallback(
+    async (nodes: TreeNode[], expandedPaths: Set<string>): Promise<TreeNode[]> => {
+      const hydrate = async (items: TreeNode[]): Promise<TreeNode[]> => {
+        return Promise.all(
+          items.map(async (node) => {
+            if (node.type !== 'directory') return node
+            const expanded = expandedPaths.has(node.path)
+            if (!expanded) {
+              return { ...node, expanded: false, loaded: false, children: [] }
+            }
+
+            try {
+              const children = await loadDir(node.path)
+              return {
+                ...node,
+                expanded: true,
+                loaded: true,
+                children: await hydrate(children)
+              }
+            } catch {
+              return { ...node, expanded: true, loaded: true, children: node.children ?? [] }
+            }
+          })
+        )
+      }
+
+      return hydrate(nodes)
+    },
+    [loadDir]
+  )
+
+  const loadRoot = useCallback(
+    async (preserveExpanded = false) => {
+      if (!workingFolder) return
+      setLoading(true)
+      setError(null)
+      try {
+        const expandedPaths: Set<string> = preserveExpanded
+          ? collectExpandedPaths(treeRef.current)
+          : new Set<string>()
+        const nodes = await loadDir(workingFolder)
+        const nextTree = preserveExpanded ? await hydrateExpandedNodes(nodes, expandedPaths) : nodes
+        setTree(nextTree)
+      } catch (err) {
+        setError(getErrorMessage(err, 'Failed to load files'))
+      } finally {
+        setLoading(false)
+      }
+    },
+    [hydrateExpandedNodes, workingFolder, loadDir]
+  )
 
   useEffect(() => {
-    loadRoot()
+    treeRef.current = []
+    void loadRoot(false)
   }, [loadRoot])
 
-  // Refresh all expanded directories in the tree (for file system watcher)
-  const refreshExpandedDirs = useCallback(async () => {
-    const refreshAll = async (nodes: TreeNode[]): Promise<TreeNode[]> => {
-      return Promise.all(
-        nodes.map(async (n) => {
-          if (n.type === 'directory' && n.expanded && n.loaded) {
-            try {
-              const children = await loadDir(n.path)
-              return { ...n, children: children.length > 0 ? await refreshAll(children) : children }
-            } catch {
-              return n
-            }
-          }
-          if (n.children) return { ...n, children: await refreshAll(n.children) }
-          return n
-        })
-      )
-    }
-    setTree(await refreshAll(tree))
-  }, [tree, loadDir])
+  const refreshTree = useCallback(async () => {
+    await loadRoot(true)
+  }, [loadRoot])
 
   // Watch working directory for changes and auto-refresh
   useEffect(() => {
@@ -611,29 +726,35 @@ export function FileTreePanel({
 
     let mounted = true
     let refreshTimer: NodeJS.Timeout | null = null
-    const handleDirChanged = (_event: unknown, _data: { path: string }) => {
+    const handleDirChanged = (...args: unknown[]): void => {
+      const payload = args[0]
+      const data =
+        payload && typeof payload === 'object'
+          ? (payload as { path?: string; changedPath?: string })
+          : undefined
       if (!mounted) return
+      if (data?.path && data.path !== workingFolder) return
       // Debounce refresh to avoid excessive updates
       if (refreshTimer) clearTimeout(refreshTimer)
       refreshTimer = setTimeout(() => {
         if (!mounted) return
-        void refreshExpandedDirs()
+        void refreshTree()
       }, 500)
     }
 
     // Start watching the working directory
-    void ipcClient.invoke(IPC.FS_WATCH_DIR, { path: workingFolder })
+    void ipcClient.invoke(IPC.FS_WATCH_DIR, { path: workingFolder, recursive: true })
 
     // Listen for directory change events
-    const cleanup = window.electron.ipcRenderer.on('fs:dir-changed', handleDirChanged)
+    const cleanup = ipcClient.on(IPC.FS_DIR_CHANGED, handleDirChanged)
 
     return () => {
       mounted = false
       if (refreshTimer) clearTimeout(refreshTimer)
       cleanup()
-      void ipcClient.invoke(IPC.FS_UNWATCH_DIR, { path: workingFolder })
+      void ipcClient.invoke(IPC.FS_UNWATCH_DIR, { path: workingFolder, recursive: true })
     }
-  }, [workingFolder, sshConnectionId, refreshExpandedDirs])
+  }, [workingFolder, sshConnectionId, refreshTree])
 
   useEffect(() => {
     const query = searchQuery.trim()
@@ -719,44 +840,34 @@ export function FileTreePanel({
           })
         )
       }
-      setTree(await toggleNode(tree))
+      setTree(await toggleNode(treeRef.current))
     },
-    [tree, loadDir]
+    [loadDir]
   )
 
   // Refresh a single directory's children in the tree (after create/rename/delete)
   const refreshDir = useCallback(
     async (dirPath: string) => {
-      const refresh = async (nodes: TreeNode[]): Promise<TreeNode[]> => {
-        return Promise.all(
-          nodes.map(async (n) => {
-            if (n.path === dirPath && n.type === 'directory') {
-              try {
-                const children = await loadDir(dirPath)
-                return { ...n, expanded: true, loaded: true, children }
-              } catch {
-                return n
-              }
-            }
-            if (n.children) return { ...n, children: await refresh(n.children) }
-            return n
-          })
-        )
-      }
-      setTree(await refresh(tree))
+      if (dirPath) await refreshTree()
     },
-    [tree, loadDir]
+    [refreshTree]
   )
 
   const handleCopyPath = useCallback(
     (filePath: string) => {
-      // Make path relative to working folder if possible
-      const rel =
-        workingFolder && filePath.startsWith(workingFolder)
-          ? filePath.slice(workingFolder.length).replace(/^[\\//]/, '')
-          : filePath
-      useUIStore.getState().setPendingInsertText(createSelectFileTag(rel))
-      navigator.clipboard.writeText(filePath)
+      void navigator.clipboard.writeText(filePath).catch((err) => {
+        toast.error(t('fileTree.copyFailed'), {
+          description: getErrorMessage(err, 'Unable to copy path')
+        })
+      })
+    },
+    [t]
+  )
+
+  const handleAddToChat = useCallback(
+    (filePath: string) => {
+      const relativePath = toRelativePath(filePath, workingFolder)
+      useUIStore.getState().setPendingInsertText(createSelectFileTag(relativePath))
     },
     [workingFolder]
   )
@@ -764,6 +875,42 @@ export function FileTreePanel({
   // --- Context menu action handlers ---
 
   const sep = sshConnectionId ? '/' : workingFolder?.includes('/') ? '/' : '\\'
+
+  const getNameValidationErrorMessage = useCallback(
+    (error: EntryNameValidationError): string => {
+      if (error === 'empty') {
+        return t('fileTree.nameEmpty', { defaultValue: 'Name cannot be empty' })
+      }
+      if (error === 'dot') {
+        return t('fileTree.nameDotReserved', {
+          defaultValue: 'Name cannot be "." or ".."'
+        })
+      }
+      return t('fileTree.nameSeparator', {
+        defaultValue: 'Name cannot contain path separators'
+      })
+    },
+    [t]
+  )
+
+  const showActionError = useCallback((title: string, err: unknown) => {
+    toast.error(title, {
+      description: getErrorMessage(err)
+    })
+  }, [])
+
+  const pathExists = useCallback(
+    async (targetPath: string): Promise<boolean> => {
+      const result = await ipcClient.invoke(
+        sshConnectionId ? IPC.SSH_FS_STAT_PATH : IPC.FS_STAT_PATH,
+        sshConnectionId ? { connectionId: sshConnectionId, path: targetPath } : { path: targetPath }
+      )
+      const error = getIpcError(result)
+      if (error) throw new Error(error)
+      return Boolean((result as { exists?: boolean } | undefined)?.exists)
+    },
+    [sshConnectionId]
+  )
 
   const handleDelete = useCallback(
     async (nodePath: string, nodeName: string, isDir: boolean) => {
@@ -776,21 +923,23 @@ export function FileTreePanel({
       })
       if (!confirmed) return
       try {
-        await ipcClient.invoke(
-          sshConnectionId ? IPC.SSH_FS_DELETE : IPC.FS_DELETE,
-          sshConnectionId ? { connectionId: sshConnectionId, path: nodePath } : { path: nodePath }
+        const result = await ipcClient.invoke(
+          sshConnectionId ? IPC.SSH_FS_DELETE : IPC.SHELL_TRASH_PATH,
+          sshConnectionId ? { connectionId: sshConnectionId, path: nodePath } : nodePath
         )
+        const error = getIpcError(result)
+        if (error) throw new Error(error)
         const parentDir = parentPath(nodePath, sep)
         if (parentDir === workingFolder) {
-          await loadRoot()
+          await loadRoot(true)
         } else {
           await refreshDir(parentDir)
         }
       } catch (err) {
-        console.error('Delete failed:', err)
+        showActionError(t('fileTree.deleteFailed', { defaultValue: 'Delete failed' }), err)
       }
     },
-    [sep, sshConnectionId, t, workingFolder, loadRoot, refreshDir]
+    [sep, sshConnectionId, t, workingFolder, loadRoot, refreshDir, showActionError]
   )
 
   const handleRenameStart = useCallback((nodePath: string) => {
@@ -801,36 +950,59 @@ export function FileTreePanel({
   const handleRenameConfirm = useCallback(
     async (newName: string) => {
       if (!renamingPath) return
+      const validationError = validateEntryName(newName)
+      if (validationError) {
+        toast.error(t('fileTree.invalidName', { defaultValue: 'Invalid name' }), {
+          description: getNameValidationErrorMessage(validationError)
+        })
+        return
+      }
+
       const parentDir = parentPath(renamingPath, sep)
       const newPath = joinPath(parentDir, newName, sep)
       try {
-        await ipcClient.invoke(
+        if (newPath !== renamingPath && (await pathExists(newPath))) {
+          throw new Error(t('fileTree.targetExists', { defaultValue: 'Target already exists' }))
+        }
+
+        const result = await ipcClient.invoke(
           sshConnectionId ? IPC.SSH_FS_MOVE : IPC.FS_MOVE,
           sshConnectionId
             ? { connectionId: sshConnectionId, from: renamingPath, to: newPath }
             : { from: renamingPath, to: newPath }
         )
+        const error = getIpcError(result)
+        if (error) throw new Error(error)
         setRenamingPath(null)
         if (parentDir === workingFolder) {
-          await loadRoot()
+          await loadRoot(true)
         } else {
           await refreshDir(parentDir)
         }
       } catch (err) {
-        console.error('Rename failed:', err)
+        showActionError(t('fileTree.renameFailed', { defaultValue: 'Rename failed' }), err)
       }
     },
-    [renamingPath, sep, sshConnectionId, workingFolder, loadRoot, refreshDir]
+    [
+      renamingPath,
+      sep,
+      sshConnectionId,
+      workingFolder,
+      loadRoot,
+      refreshDir,
+      pathExists,
+      showActionError,
+      getNameValidationErrorMessage,
+      t
+    ]
   )
 
   const handleRenameCancel = useCallback(() => setRenamingPath(null), [])
 
-  const handleNewFile = useCallback(
+  const expandDirectoryForNewItem = useCallback(
     async (dirPath: string) => {
-      setNewItemParent(dirPath)
-      setNewItemType('file')
-      setRenamingPath(null)
-      // Ensure the directory is expanded
+      if (dirPath === workingFolder) return
+
       const expandNode = async (nodes: TreeNode[]): Promise<TreeNode[]> => {
         return Promise.all(
           nodes.map(async (n) => {
@@ -846,9 +1018,19 @@ export function FileTreePanel({
           })
         )
       }
-      setTree(await expandNode(tree))
+      setTree(await expandNode(treeRef.current))
     },
-    [tree, loadDir]
+    [loadDir, workingFolder]
+  )
+
+  const handleNewFile = useCallback(
+    async (dirPath: string) => {
+      setNewItemParent(dirPath)
+      setNewItemType('file')
+      setRenamingPath(null)
+      await expandDirectoryForNewItem(dirPath)
+    },
+    [expandDirectoryForNewItem]
   )
 
   const handleNewFolder = useCallback(
@@ -856,51 +1038,61 @@ export function FileTreePanel({
       setNewItemParent(dirPath)
       setNewItemType('directory')
       setRenamingPath(null)
-      const expandNode = async (nodes: TreeNode[]): Promise<TreeNode[]> => {
-        return Promise.all(
-          nodes.map(async (n) => {
-            if (n.path === dirPath && n.type === 'directory' && !n.expanded) {
-              if (!n.loaded) {
-                const children = await loadDir(dirPath)
-                return { ...n, expanded: true, loaded: true, children }
-              }
-              return { ...n, expanded: true }
-            }
-            if (n.children) return { ...n, children: await expandNode(n.children) }
-            return n
-          })
-        )
-      }
-      setTree(await expandNode(tree))
+      await expandDirectoryForNewItem(dirPath)
     },
-    [tree, loadDir]
+    [expandDirectoryForNewItem]
   )
 
   const handleNewItemConfirm = useCallback(
     async (name: string) => {
       if (!newItemParent) return
+      const validationError = validateEntryName(name)
+      if (validationError) {
+        toast.error(t('fileTree.invalidName', { defaultValue: 'Invalid name' }), {
+          description: getNameValidationErrorMessage(validationError)
+        })
+        return
+      }
+
       const newPath = joinPath(newItemParent, name, sep)
       try {
+        if (await pathExists(newPath)) {
+          throw new Error(t('fileTree.targetExists', { defaultValue: 'Target already exists' }))
+        }
+
+        let result: unknown
         if (newItemType === 'directory') {
-          await ipcClient.invoke(
+          result = await ipcClient.invoke(
             sshConnectionId ? IPC.SSH_FS_MKDIR : IPC.FS_MKDIR,
             sshConnectionId ? { connectionId: sshConnectionId, path: newPath } : { path: newPath }
           )
         } else {
-          await ipcClient.invoke(
+          result = await ipcClient.invoke(
             sshConnectionId ? IPC.SSH_FS_WRITE_FILE : IPC.FS_WRITE_FILE,
             sshConnectionId
               ? { connectionId: sshConnectionId, path: newPath, content: '' }
               : { path: newPath, content: '' }
           )
         }
+        const error = getIpcError(result)
+        if (error) throw new Error(error)
         setNewItemParent(null)
         await refreshDir(newItemParent)
       } catch (err) {
-        console.error('Create failed:', err)
+        showActionError(t('fileTree.createFailed', { defaultValue: 'Create failed' }), err)
       }
     },
-    [newItemParent, newItemType, sep, sshConnectionId, refreshDir]
+    [
+      newItemParent,
+      newItemType,
+      sep,
+      sshConnectionId,
+      refreshDir,
+      pathExists,
+      showActionError,
+      getNameValidationErrorMessage,
+      t
+    ]
   )
 
   const handleNewItemCancel = useCallback(() => setNewItemParent(null), [])
@@ -912,23 +1104,88 @@ export function FileTreePanel({
     [refreshDir]
   )
 
+  const handleOpenDefault = useCallback(
+    async (nodePath: string) => {
+      if (sshConnectionId) {
+        toast.info(t('fileTree.localOnlyAction', { defaultValue: 'This action is local only' }))
+        return
+      }
+
+      const result = await ipcClient.invoke(IPC.SHELL_OPEN_PATH, nodePath)
+      if (typeof result === 'string' && result.length > 0) {
+        toast.error(t('fileTree.openFailed', { defaultValue: 'Open failed' }), {
+          description: result
+        })
+      }
+    },
+    [sshConnectionId, t]
+  )
+
+  const handleReveal = useCallback(
+    async (nodePath: string) => {
+      if (sshConnectionId) {
+        toast.info(t('fileTree.localOnlyAction', { defaultValue: 'This action is local only' }))
+        return
+      }
+
+      const result = await ipcClient.invoke(IPC.SHELL_SHOW_ITEM_IN_FOLDER, nodePath)
+      const error = getIpcError(result)
+      if (error) {
+        toast.error(t('fileTree.revealFailed', { defaultValue: 'Reveal failed' }), {
+          description: error
+        })
+      }
+    },
+    [sshConnectionId, t]
+  )
+
+  const handleOpenWithCode = useCallback(
+    async (nodePath: string) => {
+      if (sshConnectionId) {
+        toast.info(t('fileTree.localOnlyAction', { defaultValue: 'This action is local only' }))
+        return
+      }
+
+      const result = await ipcClient.invoke(IPC.SHELL_OPEN_WITH_APP, {
+        path: nodePath,
+        appId: 'vscode'
+      })
+      const error = getIpcError(result)
+      if (error) {
+        toast.error(t('fileTree.openWithCodeFailed', { defaultValue: 'Open in VS Code failed' }), {
+          description: error
+        })
+      }
+    },
+    [sshConnectionId, t]
+  )
+
+  const handleOpenTerminal = useCallback(
+    async (nodePath: string, isDir: boolean) => {
+      const terminalPath = isDir ? nodePath : parentPath(nodePath, sep)
+      const tabId = await ensureProjectTerminalReady({
+        projectId: sessionView.projectId,
+        projectName: sessionView.projectName,
+        workingFolder: sshConnectionId ? workingFolder : terminalPath,
+        sshConnectionId
+      })
+
+      if (!tabId) {
+        toast.error(t('fileTree.openTerminalFailed', { defaultValue: 'Failed to open terminal' }))
+        return
+      }
+
+      if (sessionView.projectId) {
+        useUIStore.getState().setBottomTerminalDockOpen(sessionView.projectId, true)
+      }
+    },
+    [sep, sessionView.projectId, sessionView.projectName, sshConnectionId, workingFolder, t]
+  )
+
   const activePath = previewPanelState?.source === 'file' ? previewPanelState.filePath : null
   const treeStats = useMemo(() => countTreeStats(tree), [tree])
   const normalizedSearchQuery = searchQuery.trim().toLowerCase()
   const isSearching = normalizedSearchQuery.length > 0
-
-  const editState: TreeEditState = { renamingPath, newItemParent, newItemType }
-  const treeActions: TreeActions = {
-    onDelete: handleDelete,
-    onRenameStart: handleRenameStart,
-    onRenameConfirm: handleRenameConfirm,
-    onRenameCancel: handleRenameCancel,
-    onNewFile: handleNewFile,
-    onNewFolder: handleNewFolder,
-    onNewItemConfirm: handleNewItemConfirm,
-    onNewItemCancel: handleNewItemCancel,
-    onRefresh: handleRefresh
-  }
 
   const handlePreview = useCallback(
     (filePath: string) => {
@@ -937,20 +1194,47 @@ export function FileTreePanel({
     [sessionView.sessionId]
   )
 
-  const handleFileDragStart = useCallback(
-    (event: React.DragEvent<HTMLElement>, filePath: string) => {
-      const relativePath = toRelativePath(filePath, workingFolder)
-      event.dataTransfer.effectAllowed = 'copy'
-      event.dataTransfer.setData(INTERNAL_FILE_DRAG_MIME, JSON.stringify([filePath]))
-      event.dataTransfer.setData('text/plain', relativePath)
-    },
-    [workingFolder]
-  )
+  const editState: TreeEditState = { renamingPath, newItemParent, newItemType }
+  const treeActions: TreeActions = {
+    localActionsAvailable: !sshConnectionId,
+    onDelete: handleDelete,
+    onRenameStart: handleRenameStart,
+    onRenameConfirm: handleRenameConfirm,
+    onRenameCancel: handleRenameCancel,
+    onAddToChat: handleAddToChat,
+    onCopyPath: handleCopyPath,
+    onPreview: handlePreview,
+    onOpenDefault: handleOpenDefault,
+    onOpenTerminal: handleOpenTerminal,
+    onOpenWithCode: handleOpenWithCode,
+    onReveal: handleReveal,
+    onNewFile: handleNewFile,
+    onNewFolder: handleNewFolder,
+    onNewItemConfirm: handleNewItemConfirm,
+    onNewItemCancel: handleNewItemCancel,
+    onRefresh: handleRefresh
+  }
 
   const handleCollapseAll = useCallback(() => {
     setTree((current) => collapseTree(current))
   }, [])
   const compactSheetSurface = surface === 'sheet'
+  const rootNewItemInput =
+    newItemParent === workingFolder ? (
+      <InlineInput
+        defaultValue={newItemType === 'file' ? 'untitled' : 'new-folder'}
+        depth={0}
+        icon={
+          newItemType === 'file' ? (
+            <File className="size-3.5 text-muted-foreground/60" />
+          ) : (
+            <Folder className="size-3.5 text-amber-400/70" />
+          )
+        }
+        onConfirm={handleNewItemConfirm}
+        onCancel={handleNewItemCancel}
+      />
+    ) : null
 
   if (!workingFolder) {
     return (
@@ -991,9 +1275,6 @@ export function FileTreePanel({
                     >
                       {workingFolder.split(/[\\/]/).pop()}
                     </div>
-                    <span className="workspace-filetree-chip rounded-full px-1.5 py-0.5 text-[10px]">
-                      {t('fileTree.dragToReference')}
-                    </span>
                   </div>
                   <div
                     className="mt-1 truncate text-[11px] text-muted-foreground"
@@ -1003,6 +1284,26 @@ export function FileTreePanel({
                   </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="size-7 rounded-lg"
+                    onClick={() => void handleNewFile(workingFolder)}
+                    disabled={isSearching}
+                    title={t('fileTree.newFile')}
+                  >
+                    <FilePlus2 className="size-3.5" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="size-7 rounded-lg"
+                    onClick={() => void handleNewFolder(workingFolder)}
+                    disabled={isSearching}
+                    title={t('fileTree.newFolder')}
+                  >
+                    <FolderPlus className="size-3.5" />
+                  </Button>
                   <Button
                     variant="ghost"
                     size="icon"
@@ -1018,7 +1319,7 @@ export function FileTreePanel({
                     size="icon"
                     className="size-7 rounded-lg"
                     onClick={() => {
-                      void loadRoot()
+                      void refreshTree()
                     }}
                     disabled={loading}
                     title={t('action.refresh', { ns: 'common' })}
@@ -1042,6 +1343,54 @@ export function FileTreePanel({
                 )}
               </div>
             </>
+          )}
+
+          {compactSheetSurface && (
+            <div className="mb-3 flex items-center gap-2">
+              <div className="flex size-8 shrink-0 items-center justify-center rounded-xl border border-amber-500/20 bg-amber-500/10">
+                <FolderOpen className="size-3.5 text-amber-400" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-sm font-medium text-foreground" title={workingFolder}>
+                  {workingFolder.split(/[\\/]/).pop()}
+                </div>
+                <div className="truncate text-[11px] text-muted-foreground" title={workingFolder}>
+                  {workingFolder}
+                </div>
+              </div>
+              <div className="flex shrink-0 items-center gap-1">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-7 rounded-lg"
+                  onClick={() => void handleNewFile(workingFolder)}
+                  disabled={isSearching}
+                  title={t('fileTree.newFile')}
+                >
+                  <FilePlus2 className="size-3.5" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-7 rounded-lg"
+                  onClick={() => void handleNewFolder(workingFolder)}
+                  disabled={isSearching}
+                  title={t('fileTree.newFolder')}
+                >
+                  <FolderPlus className="size-3.5" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-7 rounded-lg"
+                  onClick={() => void refreshTree()}
+                  disabled={loading}
+                  title={t('action.refresh', { ns: 'common' })}
+                >
+                  <RefreshCw className={cn('size-3.5', loading && 'animate-spin')} />
+                </Button>
+              </div>
+            </div>
           )}
 
           <div className={cn('relative', !compactSheetSurface && 'mt-3')}>
@@ -1073,99 +1422,175 @@ export function FileTreePanel({
           </div>
         )}
 
-        <div
-          className={cn(
-            'min-h-0 flex-1 overflow-y-auto text-[12px]',
-            compactSheetSurface ? 'px-3 py-3' : 'px-2 py-2'
-          )}
-        >
-          {loading && tree.length === 0 ? (
-            <div className="flex h-full items-center justify-center py-8">
-              <RefreshCw className="size-4 animate-spin text-muted-foreground" />
-            </div>
-          ) : isSearching ? (
-            searchLoading ? (
-              <div className="workspace-filetree-empty flex items-center gap-2 rounded-xl px-3 py-3 text-xs text-muted-foreground">
-                <RefreshCw className="size-3.5 animate-spin" />
-                <span>{t('fileTree.searching', { defaultValue: 'Searching files...' })}</span>
-              </div>
-            ) : searchResults.length === 0 ? (
-              <div className="workspace-filetree-empty workspace-filetree-empty--dashed flex flex-col items-center justify-center gap-2 rounded-xl px-4 py-10 text-center">
-                <Search className="size-5 text-muted-foreground/50" />
-                <div className="text-xs text-muted-foreground">
-                  {t('fileTree.noSearchResults', { defaultValue: 'No matching files' })}
+        <ContextMenu>
+          <ContextMenuTrigger asChild>
+            <div
+              className={cn(
+                'min-h-0 flex-1 overflow-y-auto text-[12px]',
+                compactSheetSurface ? 'px-3 py-3' : 'px-2 py-2'
+              )}
+            >
+              {loading && tree.length === 0 ? (
+                <div className="flex h-full items-center justify-center py-8">
+                  <RefreshCw className="size-4 animate-spin text-muted-foreground" />
                 </div>
-              </div>
-            ) : (
-              <div className="space-y-1.5">
-                {searchResults.map((file) => {
-                  const isActive = activePath === file.path
-                  const relativePath = toRelativePath(file.path, workingFolder)
-                  return (
-                    <button
-                      key={file.path}
-                      type="button"
-                      className={cn(
-                        'workspace-filetree-row group flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left transition-all',
-                        isActive
-                          ? 'workspace-filetree-row--active'
-                          : 'workspace-filetree-row--interactive'
-                      )}
-                      draggable
-                      onDragStart={(event) => handleFileDragStart(event, file.path)}
-                      onClick={() => handlePreview(file.path)}
-                      title={file.path}
-                    >
-                      <GripVertical className="size-3 shrink-0 text-muted-foreground/25 transition-colors group-hover:text-muted-foreground/60" />
-                      {fileIcon(file.name)}
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate text-sm font-medium text-foreground/90">
-                          {file.name}
+              ) : isSearching ? (
+                searchLoading ? (
+                  <div className="workspace-filetree-empty flex items-center gap-2 rounded-xl px-3 py-3 text-xs text-muted-foreground">
+                    <RefreshCw className="size-3.5 animate-spin" />
+                    <span>{t('fileTree.searching', { defaultValue: 'Searching files...' })}</span>
+                  </div>
+                ) : searchResults.length === 0 ? (
+                  <div className="workspace-filetree-empty workspace-filetree-empty--dashed flex flex-col items-center justify-center gap-2 rounded-xl px-4 py-10 text-center">
+                    <Search className="size-5 text-muted-foreground/50" />
+                    <div className="text-xs text-muted-foreground">
+                      {t('fileTree.noSearchResults', { defaultValue: 'No matching files' })}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-1.5">
+                    {searchResults.map((file) => {
+                      const isActive = activePath === file.path
+                      const relativePath = toRelativePath(file.path, workingFolder)
+                      return (
+                        <div
+                          key={file.path}
+                          className={cn(
+                            'workspace-filetree-row group flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-left transition-all',
+                            isActive
+                              ? 'workspace-filetree-row--active'
+                              : 'workspace-filetree-row--interactive'
+                          )}
+                          onClick={() => handlePreview(file.path)}
+                          title={file.path}
+                        >
+                          {fileIcon(file.name)}
+                          <div className="min-w-0 flex-1">
+                            <div className="truncate text-sm font-medium text-foreground/90">
+                              {file.name}
+                            </div>
+                            <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
+                              {relativePath}
+                            </div>
+                          </div>
+                          <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-all group-hover:opacity-100">
+                            <button
+                              className="workspace-filetree-action rounded-md p-1"
+                              onClick={(event) => {
+                                event.stopPropagation()
+                                handleAddToChat(file.path)
+                              }}
+                              title={t('fileTree.addToChat')}
+                            >
+                              <MessageSquarePlus className="size-3" />
+                            </button>
+                            <button
+                              className="workspace-filetree-action rounded-md p-1"
+                              onClick={(event) => {
+                                event.stopPropagation()
+                                handleCopyPath(file.path)
+                              }}
+                              title={t('fileTree.copyPath')}
+                            >
+                              <Copy className="size-3" />
+                            </button>
+                          </div>
                         </div>
-                        <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
-                          {relativePath}
-                        </div>
-                      </div>
-                      <span className="workspace-filetree-chip rounded-full px-1.5 py-0.5 text-[10px] opacity-0 transition-opacity group-hover:opacity-100">
-                        {t('fileTree.dragToReference')}
-                      </span>
-                    </button>
-                  )
-                })}
-              </div>
-            )
-          ) : tree.length === 0 ? (
-            <div className="workspace-filetree-empty workspace-filetree-empty--dashed flex flex-col items-center justify-center gap-2 rounded-xl px-4 py-10 text-center">
-              <Folder className="size-5 text-muted-foreground/50" />
-              <div className="text-xs text-muted-foreground">
-                {t('fileTree.empty', { defaultValue: 'No files in current directory' })}
-              </div>
+                      )
+                    })}
+                  </div>
+                )
+              ) : tree.length === 0 && !rootNewItemInput ? (
+                <div className="workspace-filetree-empty workspace-filetree-empty--dashed flex flex-col items-center justify-center gap-2 rounded-xl px-4 py-10 text-center">
+                  <Folder className="size-5 text-muted-foreground/50" />
+                  <div className="text-xs text-muted-foreground">
+                    {t('fileTree.empty', { defaultValue: 'No files in current directory' })}
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-1">
+                  {rootNewItemInput}
+                  {tree.map((node) => (
+                    <TreeItem
+                      key={node.path}
+                      node={node}
+                      depth={0}
+                      activePath={activePath}
+                      onToggle={handleToggle}
+                      editState={editState}
+                      actions={treeActions}
+                    />
+                  ))}
+                </div>
+              )}
             </div>
-          ) : (
-            <div className="space-y-1">
-              {tree.map((node) => (
-                <TreeItem
-                  key={node.path}
-                  node={node}
-                  depth={0}
-                  activePath={activePath}
-                  onToggle={handleToggle}
-                  onCopyPath={handleCopyPath}
-                  onPreview={handlePreview}
-                  onFileDragStart={handleFileDragStart}
-                  editState={editState}
-                  actions={treeActions}
-                />
-              ))}
-            </div>
-          )}
-        </div>
+          </ContextMenuTrigger>
+          <ContextMenuContent className="w-52">
+            <ContextMenuItem
+              className="gap-2 text-xs"
+              onSelect={() => handleNewFile(workingFolder)}
+            >
+              <FilePlus2 className="size-3.5" /> {t('fileTree.newFile')}
+            </ContextMenuItem>
+            <ContextMenuItem
+              className="gap-2 text-xs"
+              onSelect={() => handleNewFolder(workingFolder)}
+            >
+              <FolderPlus className="size-3.5" /> {t('fileTree.newFolder')}
+            </ContextMenuItem>
+            <ContextMenuItem className="gap-2 text-xs" onSelect={() => refreshTree()}>
+              <RefreshCw className="size-3.5" /> {t('action.refresh', { ns: 'common' })}
+            </ContextMenuItem>
+            <ContextMenuSeparator />
+            <ContextMenuItem
+              className="gap-2 text-xs"
+              onSelect={() => handleAddToChat(workingFolder)}
+            >
+              <MessageSquarePlus className="size-3.5" /> {t('fileTree.addToChat')}
+            </ContextMenuItem>
+            <ContextMenuItem
+              className="gap-2 text-xs"
+              onSelect={() => handleCopyPath(workingFolder)}
+            >
+              <Copy className="size-3.5" /> {t('action.copyPath', { ns: 'common' })}
+            </ContextMenuItem>
+            <ContextMenuItem
+              className="gap-2 text-xs"
+              onSelect={() => handleOpenTerminal(workingFolder, true)}
+            >
+              <SquareTerminal className="size-3.5" /> {t('fileTree.openTerminal')}
+            </ContextMenuItem>
+            {!sshConnectionId && (
+              <>
+                <ContextMenuSeparator />
+                <ContextMenuItem
+                  className="gap-2 text-xs"
+                  onSelect={() => handleOpenDefault(workingFolder)}
+                >
+                  <ExternalLink className="size-3.5" /> {t('fileTree.openDefault')}
+                </ContextMenuItem>
+                <ContextMenuItem
+                  className="gap-2 text-xs"
+                  onSelect={() => handleOpenWithCode(workingFolder)}
+                >
+                  <Code2 className="size-3.5" /> {t('fileTree.openWithCode')}
+                </ContextMenuItem>
+                <ContextMenuItem
+                  className="gap-2 text-xs"
+                  onSelect={() => handleReveal(workingFolder)}
+                >
+                  <FolderOpen className="size-3.5" /> {t('fileTree.revealInFinder')}
+                </ContextMenuItem>
+              </>
+            )}
+          </ContextMenuContent>
+        </ContextMenu>
 
         {!compactSheetSurface && (
           <div className="workspace-filetree-footer px-3 py-2 text-[10px] text-muted-foreground/80">
             {isSearching
               ? t('fileTree.searchHint', {
-                  defaultValue: 'Click to preview, drag to input to insert file reference'
+                  defaultValue: 'Click to preview, or use Add to Chat to insert a file reference'
                 })
               : t('fileTree.stats', {
                   folders: treeStats.folders,

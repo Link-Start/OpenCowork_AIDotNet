@@ -23,9 +23,15 @@ function shellEscape(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`
 }
 
+function shellPathExpr(value: string): string {
+  if (value === '~') return '"$HOME"'
+  if (value.startsWith('~/')) return `"$HOME"${shellEscape(value.slice(1))}`
+  return shellEscape(value)
+}
+
 function withRemoteWorkingDirectory(command: string, workingFolder?: string): string {
   const folder = workingFolder?.trim()
-  return folder ? `cd ${shellEscape(folder)} && ${command}` : command
+  return folder ? `cd ${shellPathExpr(folder)} && ${command}` : command
 }
 
 export function createSshCommandExecutor(ctx: ToolContext): CommandExecutor | null {

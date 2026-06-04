@@ -22,6 +22,7 @@ export type NavItem =
   | 'resources'
   | 'skills'
   | 'souls'
+  | 'sync'
   | 'draw'
   | 'translate'
   | 'tasks'
@@ -323,6 +324,9 @@ interface UIStore {
   soulsPageOpen: boolean
   openSoulsPage: () => void
   closeSoulsPage: () => void
+  syncPageOpen: boolean
+  openSyncPage: () => void
+  closeSyncPage: () => void
   resourcesPageOpen: boolean
   openResourcesPage: () => void
   closeResourcesPage: () => void
@@ -606,6 +610,7 @@ const CHAT_SURFACE_NAV_RESET = {
   settingsPageOpen: false,
   skillsPageOpen: false,
   soulsPageOpen: false,
+  syncPageOpen: false,
   resourcesPageOpen: false,
   translatePageOpen: false,
   drawPageOpen: false,
@@ -1114,6 +1119,7 @@ export const useUIStore = create<UIStore>()(
           settingsTab: tab ?? 'general',
           skillsPageOpen: false,
           soulsPageOpen: false,
+          syncPageOpen: false,
           resourcesPageOpen: false,
           translatePageOpen: false,
           drawPageOpen: false,
@@ -1128,6 +1134,7 @@ export const useUIStore = create<UIStore>()(
           skillsPageOpen: true,
           settingsPageOpen: false,
           soulsPageOpen: false,
+          syncPageOpen: false,
           resourcesPageOpen: false,
           translatePageOpen: false,
           drawPageOpen: false,
@@ -1141,12 +1148,27 @@ export const useUIStore = create<UIStore>()(
           soulsPageOpen: true,
           settingsPageOpen: false,
           skillsPageOpen: false,
+          syncPageOpen: false,
           resourcesPageOpen: false,
           translatePageOpen: false,
           drawPageOpen: false,
           tasksPageOpen: false
         }),
       closeSoulsPage: () => set({ soulsPageOpen: false }),
+      syncPageOpen: false,
+      openSyncPage: () =>
+        set({
+          activeNavItem: 'sync',
+          syncPageOpen: true,
+          settingsPageOpen: false,
+          skillsPageOpen: false,
+          soulsPageOpen: false,
+          resourcesPageOpen: false,
+          translatePageOpen: false,
+          drawPageOpen: false,
+          tasksPageOpen: false
+        }),
+      closeSyncPage: () => set({ syncPageOpen: false }),
       resourcesPageOpen: false,
       openResourcesPage: () =>
         set({
@@ -1155,6 +1177,7 @@ export const useUIStore = create<UIStore>()(
           settingsPageOpen: false,
           skillsPageOpen: false,
           soulsPageOpen: false,
+          syncPageOpen: false,
           translatePageOpen: false,
           drawPageOpen: false,
           tasksPageOpen: false
@@ -1168,6 +1191,7 @@ export const useUIStore = create<UIStore>()(
           settingsPageOpen: false,
           skillsPageOpen: false,
           soulsPageOpen: false,
+          syncPageOpen: false,
           resourcesPageOpen: false,
           drawPageOpen: false,
           tasksPageOpen: false
@@ -1181,6 +1205,7 @@ export const useUIStore = create<UIStore>()(
           settingsPageOpen: false,
           skillsPageOpen: false,
           soulsPageOpen: false,
+          syncPageOpen: false,
           resourcesPageOpen: false,
           translatePageOpen: false,
           tasksPageOpen: false
@@ -1194,6 +1219,7 @@ export const useUIStore = create<UIStore>()(
           settingsPageOpen: false,
           skillsPageOpen: false,
           soulsPageOpen: false,
+          syncPageOpen: false,
           resourcesPageOpen: false,
           translatePageOpen: false,
           drawPageOpen: false

@@ -62,6 +62,12 @@ function writeSettings(settings: Record<string, unknown>): void {
   scheduleDiskFlush()
 }
 
+export function replaceSettingsForSync(settings: Record<string, unknown>): void {
+  settingsCache = settings
+  dirty = true
+  flushSettingsSync()
+}
+
 export function flushSettingsSync(): void {
   if (flushTimer) {
     clearTimeout(flushTimer)

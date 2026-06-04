@@ -41,7 +41,7 @@ export function ProjectBindingSelector({
   const projects = useChatStore((state) => state.projects)
   const updateProjectDirectory = useChatStore((state) => state.updateProjectDirectory)
   const sshConnections = useSshStore((state) => state.connections)
-  const sshLoaded = useSshStore((state) => state._loaded)
+  const loadSshConnections = useSshStore((state) => state.loadAll)
   const [desktopDirectories, setDesktopDirectories] = React.useState<DesktopDirectoryOption[]>([])
   const [desktopDirectoriesLoading, setDesktopDirectoriesLoading] = React.useState(false)
   const [sshDirInputs, setSshDirInputs] = React.useState<Record<string, string>>({})
@@ -102,8 +102,8 @@ export function ProjectBindingSelector({
   )
 
   React.useEffect(() => {
-    if (!sshLoaded) void useSshStore.getState().loadAll()
-  }, [sshLoaded])
+    void loadSshConnections()
+  }, [loadSshConnections])
 
   React.useEffect(() => {
     void loadDesktopDirectories()

@@ -52,6 +52,7 @@ type SidecarBridgeManager = {
   stop: () => Promise<void>
   request: (method: string, params?: unknown, timeoutMs?: number) => Promise<unknown>
   notify: (method: string, params?: unknown) => void
+  hasActiveRuns: () => boolean
   readonly isRunning: boolean
 }
 

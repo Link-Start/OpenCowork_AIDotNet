@@ -1,4 +1,5 @@
 import { ipcMain, shell, BrowserWindow, app } from 'electron'
+import { spawn } from 'child_process'
 import * as fs from 'fs'
 import * as path from 'path'
 import { safeSendToWindow } from '../window-ipc'
@@ -66,6 +67,13 @@ interface ShellStartedEvent {
   execId: string
   processId: string
   terminalId: string
+}
+
+type OpenWithAppId = 'vscode'
+
+interface OpenCommand {
+  command: string
+  args: string[]
 }
 
 function stripAnsi(raw: string): string {
@@ -258,6 +266,59 @@ async function terminateShellTerminal(terminalId: string): Promise<void> {
   }
 }
 
+function runOpenCommand({ command, args }: OpenCommand): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      detached: false,
+      stdio: 'ignore',
+      windowsHide: true
+    })
+
+    child.on('error', reject)
+    child.on('close', (code) => {
+      if (code === 0) {
+        resolve()
+        return
+      }
+      reject(new Error(`${command} exited with code ${code ?? 'unknown'}`))
+    })
+  })
+}
+
+function getOpenWithCommands(appId: OpenWithAppId, targetPath: string): OpenCommand[] {
+  if (appId !== 'vscode') return []
+
+  if (process.platform === 'darwin') {
+    return [
+      { command: '/usr/bin/open', args: ['-a', 'Visual Studio Code', targetPath] },
+      { command: 'code', args: [targetPath] }
+    ]
+  }
+
+  if (process.platform === 'win32') {
+    return [{ command: 'cmd.exe', args: ['/d', '/s', '/c', 'code', targetPath] }]
+  }
+
+  return [{ command: 'code', args: [targetPath] }]
+}
+
+async function openWithWhitelistedApp(appId: OpenWithAppId, targetPath: string): Promise<void> {
+  const commands = getOpenWithCommands(appId, targetPath)
+  if (commands.length === 0) throw new Error(`Unsupported application: ${appId}`)
+
+  let lastError: unknown
+  for (const command of commands) {
+    try {
+      await runOpenCommand(command)
+      return
+    } catch (err) {
+      lastError = err
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(`Failed to open ${targetPath}`)
+}
+
 export function registerShellHandlers(): void {
   const runningShellProcesses = new Map<
     string,
@@ -421,6 +482,51 @@ export function registerShellHandlers(): void {
   ipcMain.handle('shell:openPath', async (_event, folderPath: string) => {
     return shell.openPath(folderPath)
   })
+
+  ipcMain.handle('shell:showItemInFolder', async (_event, targetPath: string) => {
+    try {
+      const resolvedPath = path.resolve(targetPath)
+      if (!fs.existsSync(resolvedPath)) {
+        return { error: `Path does not exist: ${resolvedPath}` }
+      }
+
+      shell.showItemInFolder(resolvedPath)
+      return { success: true }
+    } catch (err) {
+      return { error: String(err) }
+    }
+  })
+
+  ipcMain.handle('shell:trashPath', async (_event, targetPath: string) => {
+    try {
+      const resolvedPath = path.resolve(targetPath)
+      if (!fs.existsSync(resolvedPath)) {
+        return { error: `Path does not exist: ${resolvedPath}` }
+      }
+
+      await shell.trashItem(resolvedPath)
+      return { success: true }
+    } catch (err) {
+      return { error: String(err) }
+    }
+  })
+
+  ipcMain.handle(
+    'shell:openWithApp',
+    async (_event, args: { path: string; appId: OpenWithAppId }) => {
+      try {
+        const resolvedPath = path.resolve(args.path)
+        if (!fs.existsSync(resolvedPath)) {
+          return { error: `Path does not exist: ${resolvedPath}` }
+        }
+
+        await openWithWhitelistedApp(args.appId, resolvedPath)
+        return { success: true }
+      } catch (err) {
+        return { error: String(err) }
+      }
+    }
+  )
 
   ipcMain.handle('shell:openExternal', async (_event, url: string) => {
     if (url && (url.startsWith('http://') || url.startsWith('https://'))) {
