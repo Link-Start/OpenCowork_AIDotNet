@@ -192,9 +192,26 @@ export interface CompactSummaryMeta {
   recentMessagesPreserved: boolean
 }
 
+export interface CompressionStatusMeta {
+  /** 'compressing' while the summarizer is running; 'compressed' once it succeeds. */
+  state: 'compressing' | 'compressed'
+  /** Wall-clock timestamp when the placeholder was first inserted. */
+  startedAt: number
+  /** Wall-clock timestamp when the placeholder transitioned to 'compressed'. */
+  completedAt?: number
+  /** Number of older messages that were summarized but are kept visible in the UI. */
+  keptMessageCount?: number
+  /** Pre-compression token count (mirrors compactBoundary.preTokens), surfaced for the inline card. */
+  preTokens?: number
+  /** Post-compression message count (boundary + summary + preserved). */
+  newCount?: number
+}
+
 export interface MessageMeta {
   compactBoundary?: CompactBoundaryMeta
   compactSummary?: CompactSummaryMeta
+  /** Inline compression status card — present on the synthetic system placeholder, not on real messages. */
+  compressionStatus?: CompressionStatusMeta
 }
 
 export interface UnifiedMessage {
@@ -338,6 +355,11 @@ export interface ResponsesImageGenerationConfig {
   partialImages?: number
   quality?: ResponsesImageGenerationQuality
   size?: ResponsesImageGenerationSize
+}
+
+export interface ImageGenerationStreamConfig {
+  enabled?: boolean
+  partialImages?: number
 }
 
 export type AuthMode = 'apiKey' | 'oauth' | 'channel'
@@ -601,6 +623,8 @@ export interface ProviderConfig {
   responseSummary?: ResponseSummary
   /** OpenAI Responses: image_generation tool configuration */
   responsesImageGeneration?: ResponsesImageGenerationConfig
+  /** Request-scoped image streaming preview control for drawing flows. */
+  imageGenerationStream?: ImageGenerationStreamConfig
   /** OpenAI Responses: enable prompt caching with session-based key */
   enablePromptCache?: boolean
   /** Whether OpenAI Computer Use should be enabled for this request */

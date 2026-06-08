@@ -826,7 +826,16 @@ class OpenAIResponsesProvider implements APIProvider {
 
   private buildToolsPayload(tools: ToolDefinition[], config: ProviderConfig): unknown[] {
     const formattedTools = this.formatTools(tools)
-    const imageGenerationTool = buildResponsesImageGenerationTool(config.responsesImageGeneration)
+    const responsesImageGeneration = config.imageGenerationStream
+      ? {
+          ...(config.responsesImageGeneration ?? {}),
+          partialImages:
+            config.imageGenerationStream.enabled === true
+              ? (config.imageGenerationStream.partialImages ?? 2)
+              : 0
+        }
+      : config.responsesImageGeneration
+    const imageGenerationTool = buildResponsesImageGenerationTool(responsesImageGeneration)
     const specialTools: unknown[] = []
     if (config.computerUseEnabled) {
       specialTools.push({ type: 'computer' })

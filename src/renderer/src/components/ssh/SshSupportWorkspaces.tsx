@@ -319,7 +319,8 @@ export function SshKnownHostsWorkspace(): React.JSX.Element {
                 defaultValue: 'known_hosts is still empty.'
               })}
               body={t('workspace.knownHosts.emptyBody', {
-                defaultValue: 'After connecting to a new host, or manually writing entries, trusted host fingerprints will appear here.'
+                defaultValue:
+                  'After connecting to a new host, or manually writing entries, trusted host fingerprints will appear here.'
               })}
               actionLabel={t('workspace.knownHosts.new', { defaultValue: 'Add entry' })}
               onAction={() => {
@@ -561,7 +562,8 @@ export function SshPortForwardingWorkspace(): React.JSX.Element {
                 defaultValue: 'No saved port forwarding templates yet.'
               })}
               body={t('workspace.forwarding.emptyBody', {
-                defaultValue: 'Common local forwarding, remote forwarding and SOCKS proxies can all be configured here.'
+                defaultValue:
+                  'Common local forwarding, remote forwarding and SOCKS proxies can all be configured here.'
               })}
               actionLabel={t('workspace.forwarding.new', { defaultValue: 'Add rule' })}
               onAction={resetForm}
@@ -624,7 +626,7 @@ export function SshPortForwardingWorkspace(): React.JSX.Element {
                 : t('workspace.forwarding.new', { defaultValue: 'Add rule' })}
             </div>
             <div className="mt-1 text-[0.8rem] text-muted-foreground">
-              {t('workspace.personalVault', { defaultValue: 'Personal vault' })}
+              {t('workspace.personalVault', { defaultValue: 'Host profile' })}
             </div>
           </div>
           <button
@@ -725,7 +727,9 @@ export function SshPortForwardingWorkspace(): React.JSX.Element {
             </Field>
           </SectionCard>
 
-          <SectionCard title={t('workspace.forwarding.command', { defaultValue: 'Command preview' })}>
+          <SectionCard
+            title={t('workspace.forwarding.command', { defaultValue: 'Command preview' })}
+          >
             <div className="rounded-[18px] border border-border bg-muted/45 p-3 font-mono text-[0.78rem] leading-6 text-foreground">
               {commandPreview || 'ssh -L 8080:127.0.0.1:80 user@example.com -p 22'}
             </div>
@@ -848,12 +852,12 @@ export function SshSnippetsWorkspace(): React.JSX.Element {
 
   return (
     <div className="flex min-w-0 flex-1 overflow-hidden">
-      <main className="flex min-w-0 flex-1 flex-col border-r border-[#d7dee8] bg-[#eef2f6]">
-        <div className="border-b border-[#d7dee8] px-4 py-3">
+      <main className="flex min-w-0 flex-1 flex-col border-r border-border bg-background">
+        <div className="border-b border-border px-4 py-3">
           <div className="flex items-center gap-2">
             <Button
               size="sm"
-              className="h-10 rounded-[14px] bg-[#59627b] px-4 text-[0.8rem] font-semibold text-white hover:bg-[#50586f]"
+              className="h-10 rounded-[14px] bg-secondary px-4 text-[0.8rem] font-semibold text-secondary-foreground hover:bg-secondary/80"
               onClick={resetForm}
             >
               <Plus className="size-3.5" />
@@ -886,7 +890,8 @@ export function SshSnippetsWorkspace(): React.JSX.Element {
                 defaultValue: 'No saved command snippets yet.'
               })}
               body={t('workspace.snippets.emptyBody', {
-                defaultValue: 'Store common restart, deploy, troubleshoot commands here for quick reuse.'
+                defaultValue:
+                  'Store common restart, deploy, troubleshoot commands here for quick reuse.'
               })}
               actionLabel={t('workspace.snippets.new', { defaultValue: 'Add snippet' })}
               onAction={resetForm}
@@ -946,7 +951,7 @@ export function SshSnippetsWorkspace(): React.JSX.Element {
                 : t('workspace.snippets.new', { defaultValue: 'Add snippet' })}
             </div>
             <div className="mt-1 text-[0.8rem] text-muted-foreground">
-              {t('workspace.personalVault', { defaultValue: 'Personal vault' })}
+              {t('workspace.personalVault', { defaultValue: 'Host profile' })}
             </div>
           </div>
           <button
@@ -1111,7 +1116,8 @@ export function SshLogsWorkspace(): React.JSX.Element {
             </div>
             <div className="mt-1 text-[0.82rem] text-muted-foreground">
               {t('workspace.logs.subtitle', {
-                defaultValue: 'View recent connections, session status and upload transfer activity.'
+                defaultValue:
+                  'View recent connections, session status and upload transfer activity.'
               })}
             </div>
           </div>
@@ -1144,7 +1150,9 @@ export function SshLogsWorkspace(): React.JSX.Element {
             )}
           </SectionCard>
 
-          <SectionCard title={t('workspace.logs.connections', { defaultValue: 'Recent connections' })}>
+          <SectionCard
+            title={t('workspace.logs.connections', { defaultValue: 'Recent connections' })}
+          >
             {recentConnections.length === 0 ? (
               <div className="text-[0.84rem] text-muted-foreground">
                 {t('workspace.logs.noConnections', { defaultValue: 'No connection history yet.' })}

@@ -1,12 +1,18 @@
 import {
+  Briefcase,
+  ChevronDown,
+  CircleHelp,
+  Code2,
   Download,
   FolderOpen,
   HelpCircle,
+  ListChecks,
   Loader2,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
+  Send,
   SquareTerminal,
   ShieldCheck
 } from 'lucide-react'
@@ -15,10 +21,16 @@ import { toast } from 'sonner'
 import { useShallow } from 'zustand/react/shallow'
 import { confirm } from '@renderer/components/ui/confirm-dialog'
 import { Button } from '@renderer/components/ui/button'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger
+} from '@renderer/components/ui/dropdown-menu'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@renderer/components/ui/tooltip'
 import { useChatStore } from '@renderer/stores/chat-store'
 import { useSettingsStore } from '@renderer/stores/settings-store'
-import { useUIStore } from '@renderer/stores/ui-store'
+import { useUIStore, type AppMode } from '@renderer/stores/ui-store'
 import { cn } from '@renderer/lib/utils'
 import { PendingInboxPopover } from './PendingInboxPopover'
 import { WindowControls } from './WindowControls'
@@ -39,6 +51,20 @@ interface TitleBarProps {
   insetForMacTrafficLights?: boolean
 }
 
+function getTitlebarModeOptions(tCommon: (key: string) => string): Array<{
+  value: AppMode
+  label: string
+  icon: React.JSX.Element
+}> {
+  return [
+    { value: 'chat', label: tCommon('mode.chat'), icon: <Send className="size-3.5" /> },
+    { value: 'clarify', label: tCommon('mode.clarify'), icon: <CircleHelp className="size-3.5" /> },
+    { value: 'cowork', label: tCommon('mode.cowork'), icon: <Briefcase className="size-3.5" /> },
+    { value: 'code', label: tCommon('mode.code'), icon: <Code2 className="size-3.5" /> },
+    { value: 'acp', label: tCommon('mode.acp'), icon: <ShieldCheck className="size-3.5" /> }
+  ]
+}
+
 export function TitleBar({
   updateInfo,
   onOpenUpdateDialog,
@@ -55,20 +81,27 @@ export function TitleBar({
   const toggleLeftSidebar = useUIStore((s) => s.toggleLeftSidebar)
   const rightPanelOpen = useUIStore((s) => s.rightPanelOpen)
   const toggleRightPanel = useUIStore((s) => s.toggleRightPanel)
-  const setRuntimeStatusPanelTriggerHovered = useUIStore(
-    (s) => s.setRuntimeStatusPanelTriggerHovered
-  )
+  const runtimeStatusPanelOpen = useUIStore((s) => s.runtimeStatusPanelOpen)
+  const toggleRuntimeStatusPanel = useUIStore((s) => s.toggleRuntimeStatusPanel)
   const workingFolderSheetOpen = useUIStore((s) => s.workingFolderSheetOpen)
   const toggleWorkingFolderSheet = useUIStore((s) => s.toggleWorkingFolderSheet)
   const setBottomTerminalDockOpen = useUIStore((s) => s.setBottomTerminalDockOpen)
   const chatView = useUIStore((s) => s.chatView)
   const mode = useUIStore((s) => s.mode)
+  const setMode = useUIStore((s) => s.setMode)
   const settingsPageOpen = useUIStore((s) => s.settingsPageOpen)
   const skillsPageOpen = useUIStore((s) => s.skillsPageOpen)
+  const soulsPageOpen = useUIStore((s) => s.soulsPageOpen)
   const resourcesPageOpen = useUIStore((s) => s.resourcesPageOpen)
   const drawPageOpen = useUIStore((s) => s.drawPageOpen)
   const translatePageOpen = useUIStore((s) => s.translatePageOpen)
   const tasksPageOpen = useUIStore((s) => s.tasksPageOpen)
+  const activeSessionId = useChatStore((s) => s.activeSessionId)
+  const activeSessionIsStreaming = useChatStore((s) =>
+    activeSessionId ? Boolean(s.streamingMessages[activeSessionId]) : false
+  )
+  const activeProjectId = useChatStore((s) => s.activeProjectId)
+  const updateSessionMode = useChatStore((s) => s.updateSessionMode)
   const sessionContext = useChatStore(
     useShallow((state) => {
       const activeSession = state.activeSessionId
@@ -120,11 +153,30 @@ export function TitleBar({
   const chatSurfaceActive =
     !settingsPageOpen &&
     !skillsPageOpen &&
+    !soulsPageOpen &&
     !resourcesPageOpen &&
     !drawPageOpen &&
     !translatePageOpen &&
     !tasksPageOpen
+  const allModeOptions = getTitlebarModeOptions(tCommon)
+  const modeProjectScoped =
+    chatView === 'session' ? Boolean(sessionContext.sessionProjectId) : Boolean(activeProjectId)
+  const availableModeOptions = modeProjectScoped
+    ? allModeOptions.filter((option) => option.value !== 'chat')
+    : allModeOptions.filter((option) => option.value === 'chat')
+  const showTitlebarModeSwitch =
+    chatSurfaceActive &&
+    (chatView === 'home' || chatView === 'project' || chatView === 'session') &&
+    availableModeOptions.length > 1
+  const defaultProjectModeOption =
+    allModeOptions.find((option) => option.value === 'cowork') ?? allModeOptions[0]!
+  const activeTitlebarMode =
+    availableModeOptions.find((option) => option.value === mode) ??
+    (modeProjectScoped ? defaultProjectModeOption : undefined) ??
+    availableModeOptions[0] ??
+    allModeOptions[0]!
   const showInspectorToggle = chatSurfaceActive && chatView === 'session'
+  const showRuntimeStatusToggle = chatSurfaceActive && chatView === 'session'
   const showFileManagerToggle =
     chatSurfaceActive && chatView === 'session' && Boolean(sessionContext.sessionProjectId)
   const canOpenFileManager = Boolean(sessionContext.sessionWorkingFolder)
@@ -136,7 +188,10 @@ export function TitleBar({
     sessionContext.terminalWorkingFolder || sessionContext.terminalSshConnectionId
   )
   const showProjectToolGroup =
-    showProjectTerminalToggle || showFileManagerToggle || showInspectorToggle
+    showRuntimeStatusToggle ||
+    showProjectTerminalToggle ||
+    showFileManagerToggle ||
+    showInspectorToggle
   const projectToolButtonClass =
     'workspace-titlebar-toolbutton titlebar-no-drag inline-flex size-[30px] items-center justify-center rounded-[11px] transition-all'
 
@@ -145,6 +200,13 @@ export function TitleBar({
 
     const nextOpen = !terminalDockOpen
     setBottomTerminalDockOpen(sessionContext.terminalProjectId, nextOpen)
+  }
+
+  const handleTitlebarModeSwitch = (nextMode: AppMode): void => {
+    setMode(nextMode)
+    if (chatView === 'session' && activeSessionId) {
+      updateSessionMode(activeSessionId, nextMode)
+    }
   }
 
   const handleToggleAutoApprove = async (): Promise<void> => {
@@ -185,10 +247,45 @@ export function TitleBar({
                 )}
               </Button>
             </TooltipTrigger>
-            <TooltipContent>
-              {t('commandPalette.toggleSidebar', { defaultValue: 'Toggle sidebar' })}
-            </TooltipContent>
+            <TooltipContent>{t('commandPalette.toggleSidebar')}</TooltipContent>
           </Tooltip>
+        ) : null}
+
+        {showTitlebarModeSwitch ? (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="sm"
+                data-tour="mode-switch"
+                className="workspace-titlebar-action titlebar-no-drag h-7 gap-1.5 rounded-md px-2 text-[11px] text-muted-foreground hover:text-foreground"
+                disabled={activeSessionIsStreaming}
+              >
+                {activeTitlebarMode.icon}
+                <span>{activeTitlebarMode.label}</span>
+                <ChevronDown className="size-3.5 text-muted-foreground" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="w-40">
+              {availableModeOptions.map((option) => {
+                const active = mode === option.value
+                return (
+                  <DropdownMenuItem
+                    key={option.value}
+                    className={cn(
+                      'gap-2',
+                      active &&
+                        'bg-accent text-accent-foreground focus:bg-accent focus:text-accent-foreground'
+                    )}
+                    onSelect={() => handleTitlebarModeSwitch(option.value)}
+                  >
+                    {option.icon}
+                    <span>{option.label}</span>
+                  </DropdownMenuItem>
+                )
+              })}
+            </DropdownMenuContent>
+          </DropdownMenu>
         ) : null}
 
         <div className="min-w-0 flex-1">
@@ -264,6 +361,27 @@ export function TitleBar({
 
         {showProjectToolGroup && (
           <div className="titlebar-no-drag flex items-center gap-1">
+            {showRuntimeStatusToggle && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    aria-pressed={runtimeStatusPanelOpen}
+                    data-active={runtimeStatusPanelOpen ? 'true' : 'false'}
+                    className={projectToolButtonClass}
+                    onClick={toggleRuntimeStatusPanel}
+                  >
+                    <ListChecks className="size-[14px]" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  {runtimeStatusPanelOpen
+                    ? t('topbar.closeRuntimeStatus')
+                    : t('topbar.openRuntimeStatus')}
+                </TooltipContent>
+              </Tooltip>
+            )}
+
             {showProjectTerminalToggle && sessionContext.terminalProjectId && (
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -317,11 +435,9 @@ export function TitleBar({
                 <TooltipContent>
                   {canOpenFileManager
                     ? workingFolderSheetOpen
-                      ? t('topbar.closeFileManager', { defaultValue: 'Close file manager' })
-                      : t('topbar.openFileManager', { defaultValue: 'Open file manager' })
-                    : t('topbar.fileManagerUnavailable', {
-                        defaultValue: 'Select a working folder to open the file manager'
-                      })}
+                      ? t('topbar.closeFileManager')
+                      : t('topbar.openFileManager')
+                    : t('topbar.fileManagerUnavailable')}
                 </TooltipContent>
               </Tooltip>
             )}
@@ -334,10 +450,6 @@ export function TitleBar({
                     aria-pressed={rightPanelOpen}
                     data-active={rightPanelOpen ? 'true' : 'false'}
                     className={projectToolButtonClass}
-                    onMouseEnter={() => setRuntimeStatusPanelTriggerHovered(true)}
-                    onMouseLeave={() => setRuntimeStatusPanelTriggerHovered(false)}
-                    onFocus={() => setRuntimeStatusPanelTriggerHovered(true)}
-                    onBlur={() => setRuntimeStatusPanelTriggerHovered(false)}
                     onClick={toggleRightPanel}
                   >
                     {rightPanelOpen ? (
@@ -348,9 +460,7 @@ export function TitleBar({
                   </button>
                 </TooltipTrigger>
                 <TooltipContent>
-                  {rightPanelOpen
-                    ? t('topbar.closeInspector', { defaultValue: 'Close inspector' })
-                    : t('topbar.openInspector', { defaultValue: 'Open inspector' })}
+                  {rightPanelOpen ? t('topbar.closeInspector') : t('topbar.openInspector')}
                 </TooltipContent>
               </Tooltip>
             )}
@@ -367,7 +477,7 @@ export function TitleBar({
               <HelpCircle className="size-4" />
             </button>
           </TooltipTrigger>
-          <TooltipContent>{t('topbar.help', { defaultValue: 'Open guide' })}</TooltipContent>
+          <TooltipContent>{t('topbar.help')}</TooltipContent>
         </Tooltip>
       </div>
 

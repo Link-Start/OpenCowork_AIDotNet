@@ -2,8 +2,9 @@ import { toolRegistry } from '../agent/tool-registry'
 import { IPC } from '../ipc/channels'
 import { DEFAULT_COMMAND_TIMEOUT_MS, selectCommandExecutor } from './command-executor'
 import { encodeBashToolResult } from './bash-output'
-import type { ToolHandler } from './tool-types'
+import type { ToolContext, ToolHandler } from './tool-types'
 import { useAgentStore } from '@renderer/stores/agent-store'
+import { resolveShellExecutable, useSettingsStore } from '@renderer/stores/settings-store'
 
 let execCounter = 0
 const LONG_RUNNING_COMMAND_PATTERNS: RegExp[] = [
@@ -51,6 +52,130 @@ function isLikelyLongRunningCommand(command: string): boolean {
   const normalized = command.trim()
   if (!normalized) return false
   return LONG_RUNNING_COMMAND_PATTERNS.some((pattern) => pattern.test(normalized))
+}
+
+function getConfiguredShellExecutable(): string | undefined {
+  const settings = useSettingsStore.getState()
+  return resolveShellExecutable({
+    endpoint: settings.shellExecutionEndpoint,
+    customShellExecutable: settings.customShellExecutable,
+    platform: window.electron.process.platform
+  })
+}
+
+function normalizeComparablePath(value: string): string {
+  const normalized = value.replace(/\\/g, '/').replace(/\/+$/g, '')
+  return window.electron.process.platform === 'win32' ? normalized.toLowerCase() : normalized
+}
+
+function splitShellPath(value: string): { root: string; parts: string[]; separator: string } {
+  const separator = value.includes('\\') ? '\\' : '/'
+  const normalized = value.replace(/\\/g, '/')
+  const drive = normalized.match(/^[a-zA-Z]:/)
+  let root = ''
+  let rest = normalized
+
+  if (drive) {
+    root = `${drive[0]}/`
+    rest = normalized.slice(root.length)
+  } else if (normalized.startsWith('/')) {
+    root = '/'
+    rest = normalized.replace(/^\/+/, '')
+  }
+
+  return {
+    root,
+    parts: rest.split('/').filter(Boolean),
+    separator
+  }
+}
+
+function formatShellPath(root: string, parts: string[], separator: string): string {
+  const body = parts.join(separator)
+  if (!root) return body || '.'
+  const formattedRoot = root.replace(/\//g, separator)
+  return body ? `${formattedRoot}${body}` : formattedRoot
+}
+
+function resolveShellPath(basePath: string, targetPath: string): string {
+  const trimmedTarget = targetPath.trim()
+  const absolute =
+    /^[a-zA-Z]:[\\/]/.test(trimmedTarget) ||
+    trimmedTarget.startsWith('/') ||
+    trimmedTarget.startsWith('\\')
+  const seed = absolute ? trimmedTarget : `${basePath.replace(/[\\/]+$/, '')}/${trimmedTarget}`
+  const parsed = splitShellPath(seed)
+  const parts: string[] = []
+
+  for (const part of parsed.parts) {
+    if (part === '.') continue
+    if (part === '..') {
+      parts.pop()
+      continue
+    }
+    parts.push(part)
+  }
+
+  return formatShellPath(parsed.root, parts, parsed.separator)
+}
+
+function isPathInside(childPath: string, parentPath: string): boolean {
+  const child = `${normalizeComparablePath(childPath)}/`
+  const parent = `${normalizeComparablePath(parentPath)}/`
+  return child === parent || child.startsWith(parent)
+}
+
+function parseStandaloneCdCommand(command: string): string | null {
+  const trimmed = command.trim()
+  if (!/^cd(?:\s|$)/i.test(trimmed)) return null
+  if (/[;&|`\n\r]/.test(trimmed)) return null
+
+  let target = trimmed.replace(/^cd(?:\s+|$)/i, '').trim()
+  if (/^\/d\s+/i.test(target)) target = target.replace(/^\/d\s+/i, '').trim()
+  if (
+    (target.startsWith('"') && target.endsWith('"')) ||
+    (target.startsWith("'") && target.endsWith("'"))
+  ) {
+    target = target.slice(1, -1)
+  }
+  return target || '.'
+}
+
+function getBashWorkingFolder(ctx: ToolContext): string | undefined {
+  return ctx.sharedState?.bashCwd || ctx.workingFolder
+}
+
+function handlePersistentCd(command: string, ctx: ToolContext): string | null {
+  const target = parseStandaloneCdCommand(command)
+  if (target === null) return null
+
+  const workspace = ctx.workingFolder?.trim()
+  if (!workspace) {
+    return encodeBashToolResult({
+      exitCode: 1,
+      stderr: 'cd requires an active working folder for persistent cwd tracking.'
+    })
+  }
+
+  const current = getBashWorkingFolder(ctx) || workspace
+  const resolved = target === '~' ? workspace : resolveShellPath(current, target)
+  if (!isPathInside(resolved, workspace)) {
+    if (!ctx.sharedState) ctx.sharedState = {}
+    ctx.sharedState.bashCwd = workspace
+    return encodeBashToolResult({
+      exitCode: 1,
+      stderr: `cd target is outside the workspace. Reset cwd to ${workspace}.`,
+      cwd: workspace
+    })
+  }
+
+  if (!ctx.sharedState) ctx.sharedState = {}
+  ctx.sharedState.bashCwd = resolved
+  return encodeBashToolResult({
+    exitCode: 0,
+    stdout: `cwd changed to ${resolved}`,
+    cwd: resolved
+  })
 }
 
 function keepLastLines(
@@ -175,12 +300,16 @@ const bashHandler: ToolHandler = {
     if (!command.trim()) {
       return encodeBashToolResult({ exitCode: 1, stderr: 'Missing command' })
     }
+    const cdResult = handlePersistentCd(command, ctx)
+    if (cdResult !== null) return cdResult
+    const cwd = getBashWorkingFolder(ctx)
 
     const commandExecutor = selectCommandExecutor(ctx)
     if (commandExecutor?.transport === 'ssh') {
       return (
         await commandExecutor.executeForeground({
           command,
+          cwd,
           timeout: typeof input.timeout === 'number' ? input.timeout : DEFAULT_COMMAND_TIMEOUT_MS
         })
       ).output
@@ -198,11 +327,13 @@ const bashHandler: ToolHandler = {
         : (explicitBackground ?? false)
     const execId = `exec-${Date.now()}-${++execCounter}`
     const toolUseId = ctx.currentToolUseId
+    const shell = getConfiguredShellExecutable()
 
     if (runInBackground) {
       const result = (await ctx.ipc.invoke(IPC.PROCESS_SPAWN, {
         command,
-        cwd: ctx.workingFolder,
+        cwd,
+        ...(shell ? { shell } : {}),
         metadata: {
           source: 'bash-tool',
           sessionId: ctx.sessionId,
@@ -226,7 +357,7 @@ const bashHandler: ToolHandler = {
       useAgentStore.getState().registerBackgroundProcess({
         id: result.id,
         command,
-        cwd: ctx.workingFolder,
+        cwd,
         sessionId: ctx.sessionId,
         toolUseId,
         source: 'bash-tool',
@@ -245,6 +376,7 @@ const bashHandler: ToolHandler = {
         processId: result.id,
         command,
         sessionId: ctx.sessionId ?? null,
+        cwd,
         stdout: autoBackground
           ? `Auto-background started for long-running command (id=${result.id}). Open Context panel to monitor, stop, or interact.`
           : `Background process started (id=${result.id}). Open Context panel to monitor, stop, or interact.`
@@ -264,14 +396,20 @@ const bashHandler: ToolHandler = {
     let outputTimer: ReturnType<typeof setTimeout> | null = null
     let lastOutputFlush = 0
     let foregroundResultMetadata: { processId?: string; terminalId?: string } | undefined
+    const updateLivePreview = (): void => {
+      if (!toolUseId) return
+      useAgentStore.getState().updateToolCall(
+        toolUseId,
+        {
+          output: buildLivePreviewPayload(preview, foregroundResultMetadata)
+        },
+        ctx.sessionId
+      )
+    }
     const flushOutput = (): void => {
       outputTimer = null
       lastOutputFlush = Date.now()
-      if (toolUseId) {
-        useAgentStore.getState().updateToolCall(toolUseId, {
-          output: buildLivePreviewPayload(preview, foregroundResultMetadata)
-        })
-      }
+      updateLivePreview()
     }
 
     const cleanupStarted = ctx.ipc.on(IPC.SHELL_STARTED, (...args: unknown[]) => {
@@ -316,8 +454,9 @@ const bashHandler: ToolHandler = {
       const result = (await ctx.ipc.invoke(IPC.SHELL_EXEC, {
         command,
         timeout: input.timeout ?? DEFAULT_COMMAND_TIMEOUT_MS,
-        cwd: ctx.workingFolder,
-        execId
+        cwd,
+        execId,
+        ...(shell ? { shell } : {})
       })) as { processId?: string; terminalId?: string }
       foregroundResultMetadata = {
         processId: result.processId,

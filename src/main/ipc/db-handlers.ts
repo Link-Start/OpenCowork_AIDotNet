@@ -9,13 +9,12 @@ import * as goalsDao from '../db/goals-dao'
 import * as drawRunsDao from '../db/draw-runs-dao'
 import * as usageEventsDao from '../db/usage-events-dao'
 import * as wikiDao from '../db/wiki-dao'
+import { getGoalRuntimeService } from '../goals/goal-runtime'
+import { emitGoalCleared, emitGoalEventAdded, emitGoalUpdated } from '../goals/goal-sync'
 import { safeSendToAllWindows } from '../window-ipc'
 
 const CHAT_SESSION_UPDATED = 'chat:session-updated'
 const CHAT_SESSION_DELETED = 'chat:session-deleted'
-const GOAL_UPDATED = 'goal:updated'
-const GOAL_CLEARED = 'goal:cleared'
-const GOAL_EVENT_ADDED = 'goal:event-added'
 const MAX_GOAL_OBJECTIVE_CHARS = 4000
 const GOAL_EVENT_TYPES = new Set<goalsDao.SessionGoalEventType>([
   'created',
@@ -24,8 +23,10 @@ const GOAL_EVENT_TYPES = new Set<goalsDao.SessionGoalEventType>([
   'budget_updated',
   'status_changed',
   'usage_accounted',
+  'usage_limited',
   'budget_limited',
   'completion_deferred',
+  'blocked',
   'completed',
   'stall_paused',
   'auto_continue_blocked',
@@ -58,18 +59,6 @@ function emitSessionDeleted(
   })
 }
 
-function emitGoalUpdated(goal: goalsDao.SessionGoalRow, reason: string): void {
-  safeSendToAllWindows(GOAL_UPDATED, { reason, goal })
-}
-
-function emitGoalCleared(sessionId: string, reason: string): void {
-  safeSendToAllWindows(GOAL_CLEARED, { reason, sessionId })
-}
-
-function emitGoalEventAdded(event: goalsDao.SessionGoalEventRow, reason: string): void {
-  safeSendToAllWindows(GOAL_EVENT_ADDED, { reason, event })
-}
-
 function normalizeGoalObjective(value: unknown): string {
   const objective = typeof value === 'string' ? value.trim() : ''
   if (!objective) {
@@ -85,6 +74,8 @@ function normalizeGoalStatus(value: unknown): goalsDao.SessionGoalStatus | undef
   if (
     value === 'active' ||
     value === 'paused' ||
+    value === 'blocked' ||
+    value === 'usage_limited' ||
     value === 'budget_limited' ||
     value === 'complete'
   ) {
@@ -305,75 +296,57 @@ export function registerDbHandlers(options: RegisterDbHandlersOptions = {}): voi
     }
   )
 
-  ipcMain.handle(
-    'db:messages:add',
-    (
-      _event,
-      msg: {
-        id: string
-        sessionId: string
-        role: string
-        content: string
-        meta?: string | null
-        createdAt: number
-        usage?: string | null
-        sortOrder: number
-      }
-    ) => {
-      // Ensure session exists to avoid FK constraint failure (race with fire-and-forget IPC)
-      const existing = sessionsDao.getSession(msg.sessionId)
+  ipcMain.handle('db:messages:add', (_event, msg: messagesDao.MessageInput) => {
+    // Ensure session exists to avoid FK constraint failure (race with fire-and-forget IPC)
+    const existing = sessionsDao.getSession(msg.sessionId)
+    if (!existing) {
+      sessionsDao.createSession({
+        id: msg.sessionId,
+        title: 'New Conversation',
+        mode: 'chat',
+        createdAt: msg.createdAt,
+        updatedAt: msg.createdAt
+      })
+    }
+    messagesDao.addMessage(msg)
+    emitSessionUpdated(msg.sessionId, existing ? 'message-added' : 'session-created-with-message')
+    return { success: true }
+  })
+
+  ipcMain.handle('db:messages:add-batch', (_event, msgs: messagesDao.MessageInput[]) => {
+    if (!Array.isArray(msgs) || msgs.length === 0) return { success: true }
+    const sessionIds = new Set(msgs.map((m) => m.sessionId))
+    for (const sessionId of sessionIds) {
+      const existing = sessionsDao.getSession(sessionId)
       if (!existing) {
+        const earliest = msgs.filter((m) => m.sessionId === sessionId)[0]
         sessionsDao.createSession({
-          id: msg.sessionId,
+          id: sessionId,
           title: 'New Conversation',
           mode: 'chat',
-          createdAt: msg.createdAt,
-          updatedAt: msg.createdAt
+          createdAt: earliest.createdAt,
+          updatedAt: earliest.createdAt
         })
       }
-      messagesDao.addMessage(msg)
-      emitSessionUpdated(msg.sessionId, existing ? 'message-added' : 'session-created-with-message')
-      return { success: true }
     }
-  )
+    messagesDao.addMessages(msgs)
+    for (const sessionId of sessionIds) {
+      emitSessionUpdated(sessionId, 'message-added')
+    }
+    return { success: true }
+  })
 
-  ipcMain.handle(
-    'db:messages:add-batch',
-    (
-      _event,
-      msgs: Array<{
-        id: string
-        sessionId: string
-        role: string
-        content: string
-        meta?: string | null
-        createdAt: number
-        usage?: string | null
-        sortOrder: number
-      }>
-    ) => {
-      if (!Array.isArray(msgs) || msgs.length === 0) return { success: true }
-      const sessionIds = new Set(msgs.map((m) => m.sessionId))
-      for (const sessionId of sessionIds) {
-        const existing = sessionsDao.getSession(sessionId)
-        if (!existing) {
-          const earliest = msgs.filter((m) => m.sessionId === sessionId)[0]
-          sessionsDao.createSession({
-            id: sessionId,
-            title: 'New Conversation',
-            mode: 'chat',
-            createdAt: earliest.createdAt,
-            updatedAt: earliest.createdAt
-          })
-        }
-      }
-      messagesDao.addMessages(msgs)
-      for (const sessionId of sessionIds) {
-        emitSessionUpdated(sessionId, 'message-added')
-      }
-      return { success: true }
+  ipcMain.handle('db:messages:upsert', (_event, msg: messagesDao.MessageInput) => {
+    // Upsert is used by streaming/final persistence. It is intentionally silent:
+    // the renderer already has the live state, and emitting structural updates here
+    // can trigger DB reloads that race against in-memory streaming.
+    const existing = sessionsDao.getSession(msg.sessionId)
+    if (!existing) {
+      return { success: false, error: 'session-not-found' }
     }
-  )
+    messagesDao.upsertMessage(msg)
+    return { success: true }
+  })
 
   ipcMain.handle(
     'db:messages:update',
@@ -451,6 +424,7 @@ export function registerDbHandlers(options: RegisterDbHandlersOptions = {}): voi
         tokenBudget?: unknown
       }
     ) => {
+      const previousGoal = goalsDao.getGoal(args.sessionId) ?? null
       const goal = goalsDao.createGoal({
         sessionId: args.sessionId,
         objective: normalizeGoalObjective(args.objective),
@@ -460,6 +434,12 @@ export function registerDbHandlers(options: RegisterDbHandlersOptions = {}): voi
         return { success: false, error: 'A goal already exists for this session' }
       }
       emitGoalUpdated(goal, 'goal-created')
+      void getGoalRuntimeService().handleGoalMutation({
+        sessionId: args.sessionId,
+        previousGoal,
+        nextGoal: goal,
+        reason: 'goal-created'
+      })
       return { success: true, goal }
     }
   )
@@ -475,6 +455,7 @@ export function registerDbHandlers(options: RegisterDbHandlersOptions = {}): voi
         tokenBudget?: unknown
       }
     ) => {
+      const previousGoal = goalsDao.getGoal(args.sessionId) ?? null
       const goal = goalsDao.replaceGoal({
         sessionId: args.sessionId,
         objective: normalizeGoalObjective(args.objective),
@@ -482,6 +463,12 @@ export function registerDbHandlers(options: RegisterDbHandlersOptions = {}): voi
         tokenBudget: normalizeGoalTokenBudget(args.tokenBudget) ?? null
       })
       emitGoalUpdated(goal, 'goal-set')
+      void getGoalRuntimeService().handleGoalMutation({
+        sessionId: args.sessionId,
+        previousGoal,
+        nextGoal: goal,
+        reason: 'goal-set'
+      })
       return { success: true, goal }
     }
   )
@@ -512,17 +499,31 @@ export function registerDbHandlers(options: RegisterDbHandlersOptions = {}): voi
         patch.tokenBudget = normalizeGoalTokenBudget(args.patch.tokenBudget) ?? null
       }
 
+      const previousGoal = goalsDao.getGoal(args.sessionId) ?? null
       const goal = goalsDao.updateGoal(args.sessionId, patch)
       if (!goal) return { success: false, error: 'No goal exists for this session' }
       emitGoalUpdated(goal, 'goal-updated')
+      void getGoalRuntimeService().handleGoalMutation({
+        sessionId: args.sessionId,
+        previousGoal,
+        nextGoal: goal,
+        reason: 'goal-updated'
+      })
       return { success: true, goal }
     }
   )
 
   ipcMain.handle('db:goals:clear', (_event, sessionId: string) => {
+    const previousGoal = goalsDao.getGoal(sessionId) ?? null
     const cleared = goalsDao.clearGoal(sessionId)
     if (cleared) {
       emitGoalCleared(sessionId, 'goal-cleared')
+      void getGoalRuntimeService().handleGoalMutation({
+        sessionId,
+        previousGoal,
+        nextGoal: null,
+        reason: 'goal-cleared'
+      })
     }
     return { success: true, cleared }
   })

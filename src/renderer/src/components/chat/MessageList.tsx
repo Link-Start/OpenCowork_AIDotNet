@@ -11,22 +11,25 @@ import {
   ArrowDown,
   MessagesSquare
 } from 'lucide-react'
-import type { ToolResultContent, UnifiedMessage } from '@renderer/lib/api/types'
+import type { ContentBlock, ToolResultContent, UnifiedMessage } from '@renderer/lib/api/types'
 import { useChatStore } from '@renderer/stores/chat-store'
 import { useUIStore } from '@renderer/stores/ui-store'
-import { useAgentStore, type SubAgentState } from '@renderer/stores/agent-store'
+import { useAgentStore } from '@renderer/stores/agent-store'
 import { useTeamStore, type ActiveTeam } from '@renderer/stores/team-store'
 import { MessageItem } from './MessageItem'
+import { SessionChangeSummaryCard } from './SessionChangeSummaryCard'
 import {
   buildChatRenderableMessageMetaFromAnalysis,
   buildTranscriptStaticAnalysis,
-  type ChatRenderableMessageMeta
+  type ChatRenderableMessageMeta,
+  type TailToolExecutionState
 } from './transcript-utils'
 import { buildOrchestrationRuns } from '@renderer/lib/orchestration/build-runs'
 import { type EditableUserMessageDraft } from '@renderer/lib/image-attachments'
 import type { RequestRetryState } from '@renderer/lib/agent/types'
 import { isStreamingPerfEnabled, recordStreamingReactCommit } from '@renderer/lib/streaming-perf'
 import { ipcClient } from '@renderer/lib/ipc/ipc-client'
+import { selectSessionScopedAgentState } from '@renderer/lib/agent/session-scoped-agent-state'
 
 const modeHints = {
   chat: {
@@ -80,6 +83,22 @@ interface AskUserQuestionPresence {
   toolUseId: string
 }
 
+function getMessageToolUseIds(message: UnifiedMessage): string[] {
+  if (!Array.isArray(message.content)) return []
+  return message.content
+    .filter((block): block is Extract<ContentBlock, { type: 'tool_use' }> => {
+      return block.type === 'tool_use'
+    })
+    .map((block) => block.id)
+    .filter(Boolean)
+}
+
+function hasCompleteTailToolExecutionResults(state: TailToolExecutionState | null): boolean {
+  if (!state || state.toolUseBlocks.length === 0) return false
+
+  return state.toolUseBlocks.every((toolUse) => state.toolResultMap.has(toolUse.id))
+}
+
 interface UserMessageLocatorItem {
   id: string
   index: number
@@ -109,12 +128,14 @@ interface UserMessageIndexRow {
 }
 
 type ChatStoreSnapshot = ReturnType<typeof useChatStore.getState>
-type AgentStoreSnapshot = ReturnType<typeof useAgentStore.getState>
 type TeamStoreSnapshot = ReturnType<typeof useTeamStore.getState>
 
 interface MessageRowProps {
   message: UnifiedMessage
   sessionId?: string | null
+  sessionAssistantMessageIds?: readonly string[]
+  sessionMessages?: readonly UnifiedMessage[]
+  sessionToolUseIds?: readonly string[]
   isStreaming: boolean
   isLastUserMessage: boolean
   isLastAssistantMessage: boolean
@@ -134,11 +155,6 @@ interface MessageRowProps {
 }
 
 const EMPTY_MESSAGES: UnifiedMessage[] = []
-const EMPTY_SUBAGENT_MAP: Record<string, SubAgentState> = Object.freeze({}) as Record<
-  string,
-  SubAgentState
->
-const EMPTY_SUBAGENT_HISTORY: SubAgentState[] = []
 const EMPTY_TEAM_HISTORY: ActiveTeam[] = []
 const AUTO_SCROLL_BOTTOM_THRESHOLD = 24
 const STREAMING_AUTO_SCROLL_BOTTOM_THRESHOLD = 80
@@ -155,6 +171,8 @@ const PENDING_ASSISTANT_ROW_KEY_PREFIX = '__pending_assistant__'
 const USER_LOCATOR_PREVIEW_LIMIT = 88
 const USER_LOCATOR_SCROLL_OFFSET = 28
 const USER_LOCATOR_HIGHLIGHT_MS = 1400
+const OLDER_MESSAGE_LOAD_SCROLL_THRESHOLD = 72
+const MIN_RENDERABLE_HISTORY_ROWS = 3
 const EMPTY_ORCHESTRATION_STATE = { runs: [], byId: new Map(), byMessageId: new Map() }
 const MESSAGE_COLUMN_CLASS = 'mx-auto w-full max-w-[820px] px-5'
 const MESSAGE_COLUMN_COMPACT_CLASS = 'mx-auto w-full max-w-[720px] px-5'
@@ -167,16 +185,6 @@ interface MessageListSessionSelection {
   workingFolder?: string
   loadedRangeStart: number
   projectId?: string
-}
-
-interface SessionScopedAgentSelection {
-  activeSubAgents: Record<string, SubAgentState>
-  completedSubAgents: Record<string, SubAgentState>
-  subAgentHistory: SubAgentState[]
-  hasActiveToolCallOutput: boolean
-  isSessionRunning: boolean
-  hasOrchestrationData: boolean
-  signature: string
 }
 
 interface SessionScopedTeamSelection {
@@ -196,16 +204,6 @@ const EMPTY_MESSAGE_LIST_SESSION_SELECTION: MessageListSessionSelection = {
   workingFolder: undefined
 }
 
-const EMPTY_SESSION_AGENT_SELECTION: SessionScopedAgentSelection = {
-  activeSubAgents: EMPTY_SUBAGENT_MAP,
-  completedSubAgents: EMPTY_SUBAGENT_MAP,
-  subAgentHistory: EMPTY_SUBAGENT_HISTORY,
-  hasActiveToolCallOutput: false,
-  isSessionRunning: false,
-  hasOrchestrationData: false,
-  signature: 'empty'
-}
-
 const EMPTY_SESSION_TEAM_SELECTION: SessionScopedTeamSelection = {
   activeTeam: null,
   teamHistory: EMPTY_TEAM_HISTORY,
@@ -214,7 +212,6 @@ const EMPTY_SESSION_TEAM_SELECTION: SessionScopedTeamSelection = {
   signature: 'empty'
 }
 
-const sessionScopedAgentSelectionCache = new Map<string, SessionScopedAgentSelection>()
 const sessionScopedTeamSelectionCache = new Map<string, SessionScopedTeamSelection>()
 
 function areToolResultsEqual(a?: ToolResultsLookup, b?: ToolResultsLookup): boolean {
@@ -243,6 +240,18 @@ function areStringSetsEqual(a?: Set<string>, b?: Set<string>): boolean {
 
   return true
 }
+
+function areStringArraysEqual(a?: readonly string[], b?: readonly string[]): boolean {
+  if (a === b) return true
+  if (!a || !b) return !a && !b
+  if (a.length !== b.length) return false
+
+  for (let index = 0; index < a.length; index += 1) {
+    if (a[index] !== b[index]) return false
+  }
+
+  return true
+}
 void areStringSetsEqual
 
 function areRequestRetryStatesEqual(
@@ -259,32 +268,6 @@ function areRequestRetryStatesEqual(
     a.statusCode === b.statusCode &&
     a.reason === b.reason
   )
-}
-
-function hasSessionSignatureEntry(sig: string, value: string): boolean {
-  if (!sig || !value) return false
-  return sig.split('\u0000').includes(value)
-}
-
-function buildSubAgentRenderSignature(agent: SubAgentState): string {
-  return [
-    agent.toolUseId,
-    agent.sessionId ?? '',
-    agent.displayName ?? '',
-    agent.name,
-    agent.isRunning ? '1' : '0',
-    agent.success === null ? '' : agent.success ? '1' : '0',
-    agent.errorMessage ?? '',
-    String(agent.iteration),
-    String(agent.startedAt),
-    String(agent.completedAt ?? ''),
-    agent.description ?? '',
-    agent.prompt ?? '',
-    agent.report ?? '',
-    agent.streamingText ?? '',
-    String(agent.toolCalls.length),
-    String(agent.transcript.length)
-  ].join('::')
 }
 
 function buildTeamMemberRenderSignature(team: ActiveTeam): string {
@@ -372,95 +355,6 @@ function selectMessageListSession(
   }
 }
 
-function selectSessionScopedAgentState(
-  state: AgentStoreSnapshot,
-  sessionId: string | null | undefined
-): SessionScopedAgentSelection {
-  if (!sessionId) return EMPTY_SESSION_AGENT_SELECTION
-
-  let activeSubAgents = EMPTY_SUBAGENT_MAP
-  let completedSubAgents = EMPTY_SUBAGENT_MAP
-  let subAgentHistory = EMPTY_SUBAGENT_HISTORY
-  const signatureParts: string[] = []
-
-  for (const [key, subAgent] of Object.entries(state.activeSubAgents)) {
-    if (subAgent.sessionId !== sessionId) continue
-    if (activeSubAgents === EMPTY_SUBAGENT_MAP) activeSubAgents = {}
-    activeSubAgents[key] = subAgent
-    signatureParts.push(`a:${buildSubAgentRenderSignature(subAgent)}`)
-  }
-
-  for (const [key, subAgent] of Object.entries(state.completedSubAgents)) {
-    if (subAgent.sessionId !== sessionId) continue
-    if (completedSubAgents === EMPTY_SUBAGENT_MAP) completedSubAgents = {}
-    completedSubAgents[key] = subAgent
-    signatureParts.push(`c:${buildSubAgentRenderSignature(subAgent)}`)
-  }
-
-  for (const subAgent of state.subAgentHistory) {
-    if (subAgent.sessionId !== sessionId) continue
-    if (subAgentHistory === EMPTY_SUBAGENT_HISTORY) subAgentHistory = []
-    subAgentHistory.push(subAgent)
-    signatureParts.push(`h:${buildSubAgentRenderSignature(subAgent)}`)
-  }
-
-  let hasActiveToolCallOutput = false
-  for (const toolCall of state.pendingToolCalls) {
-    if (
-      (!toolCall.sessionId || toolCall.sessionId === sessionId) &&
-      (toolCall.status === 'running' || toolCall.status === 'streaming')
-    ) {
-      hasActiveToolCallOutput = true
-      break
-    }
-  }
-  if (!hasActiveToolCallOutput) {
-    for (const toolCall of state.executedToolCalls) {
-      if (
-        (!toolCall.sessionId || toolCall.sessionId === sessionId) &&
-        (toolCall.status === 'running' || toolCall.status === 'streaming')
-      ) {
-        hasActiveToolCallOutput = true
-        break
-      }
-    }
-  }
-
-  const hasRunningBackgroundProcess = Object.values(state.backgroundProcesses).some(
-    (process) => process.sessionId === sessionId && process.status === 'running'
-  )
-
-  const isSessionRunning =
-    state.runningSessions[sessionId] === 'running' ||
-    hasSessionSignatureEntry(state.runningSubAgentSessionIdsSig, sessionId) ||
-    hasRunningBackgroundProcess
-
-  signatureParts.unshift(
-    `run:${isSessionRunning ? '1' : '0'}`,
-    `tool:${hasActiveToolCallOutput ? '1' : '0'}`
-  )
-
-  const signature = signatureParts.join('\u0001')
-  const cached = sessionScopedAgentSelectionCache.get(sessionId)
-  if (cached?.signature === signature) return cached
-
-  const nextSelection: SessionScopedAgentSelection = {
-    activeSubAgents,
-    completedSubAgents,
-    subAgentHistory,
-    hasActiveToolCallOutput,
-    isSessionRunning,
-    hasOrchestrationData:
-      activeSubAgents !== EMPTY_SUBAGENT_MAP ||
-      completedSubAgents !== EMPTY_SUBAGENT_MAP ||
-      subAgentHistory !== EMPTY_SUBAGENT_HISTORY,
-    signature
-  }
-
-  sessionScopedAgentSelectionCache.set(sessionId, nextSelection)
-  return nextSelection
-}
-
 function selectSessionScopedTeamState(
   state: TeamStoreSnapshot,
   sessionId: string | null | undefined
@@ -528,6 +422,9 @@ function areMessageRowPropsEqual(prev: MessageRowProps, next: MessageRowProps): 
   return (
     prev.message === next.message &&
     prev.sessionId === next.sessionId &&
+    areStringArraysEqual(prev.sessionAssistantMessageIds, next.sessionAssistantMessageIds) &&
+    prev.sessionMessages === next.sessionMessages &&
+    areStringArraysEqual(prev.sessionToolUseIds, next.sessionToolUseIds) &&
     prev.isStreaming === next.isStreaming &&
     prev.isLastUserMessage === next.isLastUserMessage &&
     prev.isLastAssistantMessage === next.isLastAssistantMessage &&
@@ -763,6 +660,9 @@ function UserMessageLocator({
 const MessageRow = React.memo(function MessageRow({
   message,
   sessionId,
+  sessionAssistantMessageIds,
+  sessionMessages,
+  sessionToolUseIds,
   isStreaming,
   isLastUserMessage,
   isLastAssistantMessage,
@@ -795,6 +695,8 @@ const MessageRow = React.memo(function MessageRow({
         message={message}
         messageId={message.id}
         sessionId={sessionId}
+        sessionAssistantMessageIds={sessionAssistantMessageIds}
+        sessionToolUseIds={sessionToolUseIds}
         isStreaming={isStreaming}
         isLastUserMessage={isLastUserMessage}
         isLastAssistantMessage={isLastAssistantMessage}
@@ -810,6 +712,14 @@ const MessageRow = React.memo(function MessageRow({
         hiddenToolUseIds={hiddenToolUseIds}
         requestRetryState={requestRetryState}
       />
+      {message.role === 'assistant' && isLastAssistantMessage && !isStreaming && sessionId ? (
+        <SessionChangeSummaryCard
+          sessionId={sessionId}
+          assistantMessageIds={sessionAssistantMessageIds}
+          messages={sessionMessages}
+          toolUseIds={sessionToolUseIds}
+        />
+      ) : null}
     </div>
   )
 }, areMessageRowPropsEqual)
@@ -859,13 +769,18 @@ function MessageListInner(props: MessageListProps): React.JSX.Element {
     hasActiveToolCallOutput,
     isSessionRunning: isAgentSessionRunning,
     hasOrchestrationData: hasAgentOrchestrationData
-  } = useAgentStore((s) => selectSessionScopedAgentState(s, activeSessionId))
+  } = useAgentStore((s) => selectSessionScopedAgentState(s, activeSessionId, { mode: 'coarse' }))
+  const primarySessionStatus = useAgentStore((s) =>
+    activeSessionId ? (s.runningSessions[activeSessionId] ?? null) : null
+  )
   const {
     activeTeam,
     teamHistory,
     isTeamRunning,
     hasOrchestrationData: hasTeamOrchestrationData
   } = useTeamStore((s) => selectSessionScopedTeamState(s, activeSessionId))
+  const isPrimarySessionRunning =
+    primarySessionStatus === 'running' || primarySessionStatus === 'retrying'
   const isSessionRunning = isAgentSessionRunning || isTeamRunning || hasStreamingMessage
   const hasSessionOrchestrationData = React.useMemo(
     () => hasAgentOrchestrationData || hasTeamOrchestrationData,
@@ -932,6 +847,7 @@ function MessageListInner(props: MessageListProps): React.JSX.Element {
     null
   )
   const [highlightedMessageId, setHighlightedMessageId] = React.useState<string | null>(null)
+  const [isLoadingOlderMessages, setIsLoadingOlderMessages] = React.useState(false)
   const [userLocatorSnapshot, setUserLocatorSnapshot] = React.useState<{
     sessionId: string | null
     rows: UserMessageIndexRow[]
@@ -968,9 +884,10 @@ function MessageListInner(props: MessageListProps): React.JSX.Element {
 
   const continueAssistantMessageId = React.useMemo(() => {
     if (streamingMessageId || isSessionRunning) return null
+    if (!hasCompleteTailToolExecutionResults(tailToolExecutionState)) return null
     return tailToolExecutionState?.assistantMessageId ?? null
   }, [isSessionRunning, streamingMessageId, tailToolExecutionState])
-  const showPendingAssistantRow = isSessionRunning && !streamingMessageId
+  const showPendingAssistantRow = (isPrimarySessionRunning || isTeamRunning) && !streamingMessageId
   const pendingAssistantRowKey = React.useMemo(
     () =>
       `${PENDING_ASSISTANT_ROW_KEY_PREFIX}:${activeSessionId ?? currentActiveSessionId ?? 'active'}`,
@@ -994,6 +911,24 @@ function MessageListInner(props: MessageListProps): React.JSX.Element {
         continueAssistantMessageId
       ),
     [continueAssistantMessageId, streamingMessageId, transcriptAnalysis]
+  )
+  const assistantChangeTargets = React.useMemo(
+    () =>
+      messages
+        .filter((message) => message.role === 'assistant')
+        .map((message) => ({
+          messageId: message.id,
+          toolUseIds: getMessageToolUseIds(message)
+        })),
+    [messages]
+  )
+  const sessionAssistantMessageIds = React.useMemo(
+    () => assistantChangeTargets.map((target) => target.messageId),
+    [assistantChangeTargets]
+  )
+  const sessionToolUseIds = React.useMemo(
+    () => Array.from(new Set(assistantChangeTargets.flatMap((target) => target.toolUseIds))),
+    [assistantChangeTargets]
   )
 
   const userLocatorItems = React.useMemo<UserMessageLocatorItem[]>(() => {
@@ -1080,6 +1015,10 @@ function MessageListInner(props: MessageListProps): React.JSX.Element {
     () => findPendingAskUserQuestion(rows, toolResultsLookup, messageLookup),
     [messageLookup, rows, toolResultsLookup]
   )
+  const isAwaitingInitialMessages =
+    Boolean(activeSessionId) &&
+    messages.length === 0 &&
+    (!activeSessionLoaded || activeSessionMessageCount > 0 || loadedRangeStart > 0)
 
   const lastMessageRowIndex = rows.length - 1
   const userLocatorItemById = React.useMemo(
@@ -1226,6 +1165,48 @@ function MessageListInner(props: MessageListProps): React.JSX.Element {
     [activeSessionId, markProgrammaticScroll]
   )
 
+  const loadOlderMessages = React.useCallback(async (): Promise<number> => {
+    if (!activeSessionId || isLoadingOlderMessages || loadedRangeStart <= 0) return 0
+
+    const ref = listRef.current
+    const previousScrollHeight = ref?.scrollHeight ?? 0
+    const previousScrollTop = ref?.scrollTop ?? 0
+
+    autoScrollModeRef.current = 'off'
+    setIsLoadingOlderMessages(true)
+    try {
+      const loaded = await useChatStore.getState().loadOlderSessionMessages(activeSessionId)
+      if (loaded <= 0) return 0
+
+      await new Promise<void>((resolve) => {
+        window.requestAnimationFrame(() => {
+          window.requestAnimationFrame(() => resolve())
+        })
+      })
+
+      const nextRef = listRef.current
+      if (nextRef) {
+        const scrollDelta = nextRef.scrollHeight - previousScrollHeight
+        if (scrollDelta !== 0) {
+          markProgrammaticScroll()
+          nextRef.scrollTop = Math.max(0, previousScrollTop + scrollDelta)
+        }
+      }
+      syncBottomState()
+      syncActiveUserLocator()
+      return loaded
+    } finally {
+      setIsLoadingOlderMessages(false)
+    }
+  }, [
+    activeSessionId,
+    isLoadingOlderMessages,
+    loadedRangeStart,
+    markProgrammaticScroll,
+    syncActiveUserLocator,
+    syncBottomState
+  ])
+
   const requestScrollToBottom = React.useCallback(
     ({
       behavior = 'auto',
@@ -1285,7 +1266,22 @@ function MessageListInner(props: MessageListProps): React.JSX.Element {
   const handleListScroll = React.useCallback(() => {
     syncBottomState()
     syncActiveUserLocator()
-  }, [syncActiveUserLocator, syncBottomState])
+    const ref = listRef.current
+    if (
+      ref &&
+      !isLoadingOlderMessages &&
+      loadedRangeStart > 0 &&
+      ref.scrollTop <= OLDER_MESSAGE_LOAD_SCROLL_THRESHOLD
+    ) {
+      void loadOlderMessages()
+    }
+  }, [
+    isLoadingOlderMessages,
+    loadOlderMessages,
+    loadedRangeStart,
+    syncActiveUserLocator,
+    syncBottomState
+  ])
 
   React.useEffect(() => {
     if (!activeSessionId) return
@@ -1345,6 +1341,19 @@ function MessageListInner(props: MessageListProps): React.JSX.Element {
   }, [canAutoScroll, pendingAskUserQuestion, requestScrollToBottom, rows.length])
 
   React.useEffect(() => {
+    if (!activeSessionId || isAwaitingInitialMessages || isLoadingOlderMessages) return
+    if (loadedRangeStart <= 0 || renderableMessages.length >= MIN_RENDERABLE_HISTORY_ROWS) return
+    void loadOlderMessages()
+  }, [
+    activeSessionId,
+    isAwaitingInitialMessages,
+    isLoadingOlderMessages,
+    loadOlderMessages,
+    loadedRangeStart,
+    renderableMessages.length
+  ])
+
+  React.useEffect(() => {
     syncActiveUserLocator()
   }, [syncActiveUserLocator])
 
@@ -1385,11 +1394,6 @@ function MessageListInner(props: MessageListProps): React.JSX.Element {
       editor.focus()
     }
   }, [])
-
-  const isAwaitingInitialMessages =
-    Boolean(activeSessionId) &&
-    messages.length === 0 &&
-    (!activeSessionLoaded || activeSessionMessageCount > 0 || loadedRangeStart > 0)
 
   if (isAwaitingInitialMessages) {
     return (
@@ -1476,6 +1480,9 @@ function MessageListInner(props: MessageListProps): React.JSX.Element {
                 key={row.messageId}
                 message={message}
                 sessionId={targetSessionId}
+                sessionAssistantMessageIds={sessionAssistantMessageIds}
+                sessionMessages={messages}
+                sessionToolUseIds={sessionToolUseIds}
                 isStreaming={streamingMessageId === row.messageId}
                 isLastUserMessage={row.isLastUserMessage}
                 isLastAssistantMessage={row.isLastAssistantMessage}
@@ -1514,6 +1521,20 @@ function MessageListInner(props: MessageListProps): React.JSX.Element {
         style={{ overflowAnchor: 'none' }}
         onScroll={handleListScroll}
       >
+        {loadedRangeStart > 0 && (
+          <div className={`${MESSAGE_COLUMN_CLASS} flex justify-center pb-3 pt-3`}>
+            <button
+              type="button"
+              className="rounded-full border border-border/70 bg-background/92 px-3 py-1.5 text-xs text-muted-foreground shadow-sm backdrop-blur-sm transition-colors hover:text-foreground disabled:cursor-wait disabled:opacity-70"
+              onClick={() => void loadOlderMessages()}
+              disabled={isLoadingOlderMessages}
+            >
+              {isLoadingOlderMessages
+                ? t('messageList.loadingOlder')
+                : t('messageList.loadOlder', { count: loadedRangeStart })}
+            </button>
+          </div>
+        )}
         {(() => {
           const liveCutoffIndex = Math.max(0, lastMessageRowIndex - TAIL_LIVE_MESSAGE_COUNT)
 
@@ -1529,6 +1550,9 @@ function MessageListInner(props: MessageListProps): React.JSX.Element {
                   key={row.key}
                   message={pendingAssistantMessage}
                   sessionId={targetSessionId}
+                  sessionAssistantMessageIds={sessionAssistantMessageIds}
+                  sessionMessages={messages}
+                  sessionToolUseIds={sessionToolUseIds}
                   isStreaming
                   isLastUserMessage={false}
                   isLastAssistantMessage
@@ -1560,6 +1584,9 @@ function MessageListInner(props: MessageListProps): React.JSX.Element {
                 key={row.key}
                 message={message}
                 sessionId={targetSessionId}
+                sessionAssistantMessageIds={sessionAssistantMessageIds}
+                sessionMessages={messages}
+                sessionToolUseIds={sessionToolUseIds}
                 isStreaming={isStreaming}
                 isLastUserMessage={isLastUserMessage}
                 isLastAssistantMessage={isLastAssistantMessage}

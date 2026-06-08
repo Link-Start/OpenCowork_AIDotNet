@@ -11,6 +11,8 @@ import type {
 import {
   generateImagesFromText,
   editImageWithPrompt,
+  streamImagesFromText,
+  streamImageEditWithPrompt,
   OpenAIImagesRequestError,
   type Base64ImageInput,
   type GeneratedImage
@@ -83,6 +85,16 @@ async function persistGeneratedImage(image: GeneratedImage): Promise<ImageBlock>
   }
 }
 
+function createTransientImageBlock(image: GeneratedImage): ImageBlock {
+  return {
+    type: 'image',
+    source:
+      image.sourceType === 'base64'
+        ? { type: 'base64', mediaType: image.mediaType, data: image.data }
+        : { type: 'url', url: image.data }
+  }
+}
+
 class OpenAIImagesProvider implements APIProvider {
   readonly name = 'OpenAI Images'
   readonly type = 'openai-images' as const
@@ -94,6 +106,9 @@ class OpenAIImagesProvider implements APIProvider {
     signal?: AbortSignal
   ): AsyncIterable<StreamEvent> {
     const requestStartedAt = Date.now()
+    let firstImageAt: number | null = null
+    let lastPartialImage: GeneratedImage | null = null
+    let emittedFinalImage = false
 
     console.log('[OpenAI Images Provider] sendMessage called with config:', {
       type: config.type,
@@ -112,7 +127,7 @@ class OpenAIImagesProvider implements APIProvider {
 
       // Extract text prompt and check for images
       let textPrompt = ''
-      let imageInput: Base64ImageInput | null = null
+      const imageInputs: Base64ImageInput[] = []
 
       if (typeof lastUserMessage.content === 'string') {
         textPrompt = lastUserMessage.content
@@ -121,14 +136,13 @@ class OpenAIImagesProvider implements APIProvider {
         for (const block of contentBlocks) {
           if (block.type === 'text') {
             textPrompt += block.text
-          } else if (block.type === 'image' && !imageInput) {
-            // Use the first image for editing
+          } else if (block.type === 'image') {
             const imgBlock = block as ImageBlock
             if (imgBlock.source.type === 'base64') {
-              imageInput = {
+              imageInputs.push({
                 dataUrl: `data:${imgBlock.source.mediaType || 'image/png'};base64,${imgBlock.source.data}`,
                 mediaType: imgBlock.source.mediaType
-              }
+              })
             } else if (imgBlock.source.type === 'url' && imgBlock.source.url) {
               // For URL images, we'd need to fetch and convert to base64
               // For now, skip URL images
@@ -142,26 +156,68 @@ class OpenAIImagesProvider implements APIProvider {
         textPrompt = 'Edit this image'
       }
 
-      // Call appropriate API based on whether we have an image
-      let results
-      if (imageInput) {
-        // Image editing - no text delta, just generate
-        results = await editImageWithPrompt({
-          config,
-          prompt: textPrompt,
-          image: imageInput,
-          signal
-        })
-      } else {
-        // Text-to-image generation - no text delta, just generate
-        results = await generateImagesFromText({
-          config,
-          prompt: textPrompt,
-          signal
-        })
+      if (config.imageGenerationStream?.enabled === true) {
+        const stream =
+          imageInputs.length > 0
+            ? streamImageEditWithPrompt({
+                config,
+                prompt: textPrompt,
+                images: imageInputs,
+                signal
+              })
+            : streamImagesFromText({
+                config,
+                prompt: textPrompt,
+                signal
+              })
+
+        for await (const event of stream) {
+          if (firstImageAt === null) firstImageAt = Date.now()
+          if (event.kind === 'partial') {
+            lastPartialImage = event.image
+            yield {
+              type: 'image_generation_partial',
+              imageBlock: createTransientImageBlock(event.image),
+              ...(typeof event.partialImageIndex === 'number'
+                ? { partialImageIndex: event.partialImageIndex }
+                : {})
+            }
+            continue
+          }
+
+          emittedFinalImage = true
+          const imageBlock = await persistGeneratedImage(event.image)
+          yield { type: 'image_generated', imageBlock }
+        }
+
+        const requestCompletedAt = Date.now()
+        yield {
+          type: 'message_end',
+          stopReason: 'stop',
+          timing: {
+            totalMs: requestCompletedAt - requestStartedAt,
+            ttftMs: firstImageAt
+              ? firstImageAt - requestStartedAt
+              : requestCompletedAt - requestStartedAt
+          }
+        }
+        return
       }
 
-      // Yield each generated image as an image_generated event
+      const results =
+        imageInputs.length > 0
+          ? await editImageWithPrompt({
+              config,
+              prompt: textPrompt,
+              images: imageInputs,
+              signal
+            })
+          : await generateImagesFromText({
+              config,
+              prompt: textPrompt,
+              signal
+            })
+
       for (const img of results) {
         const imageBlock = await persistGeneratedImage(img)
         yield { type: 'image_generated', imageBlock }
@@ -181,6 +237,12 @@ class OpenAIImagesProvider implements APIProvider {
       const normalizedError = normalizeImageProviderError(error)
       console.error('[OpenAI Images Provider] Error:', normalizedError.message, error)
 
+      if (lastPartialImage && !emittedFinalImage && !signal?.aborted) {
+        console.warn('[OpenAI Images Provider] Preserving last streamed preview after failure.')
+        const imageBlock = await persistGeneratedImage(lastPartialImage)
+        yield { type: 'image_generated', imageBlock }
+      }
+
       // Yield a structured image error so UI can render a friendly card
       yield {
         type: 'image_error',
@@ -196,7 +258,9 @@ class OpenAIImagesProvider implements APIProvider {
         stopReason: 'error',
         timing: {
           totalMs: requestCompletedAt - requestStartedAt,
-          ttftMs: requestCompletedAt - requestStartedAt
+          ttftMs: firstImageAt
+            ? firstImageAt - requestStartedAt
+            : requestCompletedAt - requestStartedAt
         }
       }
 

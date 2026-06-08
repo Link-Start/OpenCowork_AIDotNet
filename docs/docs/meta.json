@@ -1,13 +1,17 @@
 {
-  "title": "OpenCowork 文档",
+  "title": "OpenCowork",
   "pages": [
     "index",
-    "getting-started",
-    "core-concepts",
-    "features",
-    "plugins",
-    "providers",
-    "architecture",
-    "development"
+    "start",
+    "install",
+    "channels",
+    "agents",
+    "capabilities",
+    "skills",
+    "models",
+    "platforms",
+    "ops",
+    "reference",
+    "help"
   ]
 }

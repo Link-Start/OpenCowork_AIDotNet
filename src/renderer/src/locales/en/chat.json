@@ -9,6 +9,9 @@
     "placeholderInitWorkspace": "No AGENTS.md found in the current working folder. Try /init first to initialize the project context...",
     "noApiKey": "No API key configured. Click here to open Settings.",
     "attachImages": "Attach images (paste or drag & drop also supported)",
+    "attachMediaFailed": "Failed to add the selected files",
+    "mediaFilter": "Images and documents",
+    "allFilesFilter": "All files",
     "dropImages": "Drop images or files",
     "dropFiles": "Drop files to insert paths",
     "disableThinking": "Disable deep thinking",
@@ -34,6 +37,11 @@
     "projectNameHint": "Selecting a folder uses the folder name as the project name.",
     "projectNamePlaceholder": "For example: OpenCoWork",
     "createProject": "Create project",
+    "createProjectSubtitle": "Choose a local or SSH folder. The project name follows the folder name.",
+    "projectSource": "Project source",
+    "sourceLocal": "Local",
+    "sourceSsh": "SSH",
+    "selectFolderFirst": "Select a folder first",
     "currentWorkingFolder": "Current working folder",
     "selectedWorkingFolder": "Selected working folder",
     "noWorkingFolderSelected": "No folder selected",
@@ -43,9 +51,14 @@
     "defaultProjectDirectoryPlaceholder": "Leave empty to use last used directory",
     "browseDefaultDirectory": "Browse",
     "defaultProjectDirectoryFallback": "Fallback: system Documents directory",
+    "systemDefaultLocation": "System default",
     "clearConversation": "Clear conversation",
     "clearConfirmTitle": "Clear all messages?",
     "clearConfirmDesc": "This will remove all messages in this conversation. This action cannot be undone.",
+    "compressionBudget": "Compression Budget",
+    "remaining": "remaining",
+    "compressionBudget": "Compression Budget",
+    "remaining": "remaining",
     "sendTooltip": "Send (Enter)",
     "stopTooltip": "Stop (Esc)",
     "optimizePrompt": "Optimize prompt",
@@ -55,6 +68,9 @@
     "optimizationResultsDesc": "Select one of the optimized versions below to use in your prompt.",
     "useThisOption": "Use This",
     "noWorkingFolder": "Please select a working folder before using {{mode}} mode. Click here to select.",
+    "planModeMenu": "Plan Mode",
+    "pursueGoalMenu": "Pursue Goal",
+    "planModeUnavailable": "Plan Mode needs a project working folder.",
     "enterPlanMode": "Enter Plan Mode",
     "exitPlanMode": "Exit Plan Mode",
     "planModeActive": "Plan Mode — exploring codebase, no file changes",
@@ -66,10 +82,13 @@
     "noDesktopFolders": "No folders found on Desktop",
     "selectOtherFolder": "Select other folder",
     "selectOtherFolderHint": "Open the system folder picker and choose any local directory",
+    "selectLocalProjectFolder": "Select local working folder",
+    "selectLocalProjectFolderHint": "Open the system folder picker. It starts from your last/default project location.",
+    "pickerDefaultLocation": "Picker opens at: {{path}}",
     "sshConnections": "SSH Connections",
     "noSshConnections": "No SSH connections configured",
     "sshDirectory": "Remote directory",
-    "sshDirectoryPlaceholder": "",
+    "sshDirectoryPlaceholder": "/home/user/project",
     "sshSelect": "Select",
     "sshConnected": "Connected",
     "queueTitle": "Queued messages",
@@ -77,8 +96,12 @@
     "queueRunningHint": "Sent in order after the current turn completes",
     "queueResume": "Resume",
     "queueEditing": "Edit queued message",
+    "queueQuote": "Quote",
     "queueImageCount": "{{count}} images",
     "queueImageOnly": "[Images only]",
+    "slashSuggestions": "Command & skill suggestions",
+    "loadingSlashSuggestions": "Loading commands and skills...",
+    "noSlashSuggestionsFound": "No matching commands or skills",
     "queueCleared": "Queued messages cleared",
     "queueClearConfirmTitle": "Clear queued messages?",
     "queueClearConfirmDesc": "This will remove {{count}} queued messages in the current session.",
@@ -261,6 +284,12 @@
   },
   "goal": {
     "title": "Goal",
+    "runningTitle": "Pursuing goal",
+    "pausedTitle": "Paused goal",
+    "blockedTitle": "Blocked goal",
+    "usageLimitedTitle": "Usage-limited goal",
+    "completedTitle": "Completed goal",
+    "limitedTitle": "Budget-limited goal",
     "notSet": "not set",
     "noSessionGoal": "No session goal.",
     "noUsage": "0s",
@@ -274,6 +303,7 @@
     "show": "Show",
     "hide": "Hide",
     "managerTitle": "Goal Manager",
+    "editTitle": "Edit goal",
     "statusLabel": "Status",
     "tokensLabel": "Tokens",
     "budgetLabel": "Budget",
@@ -295,11 +325,14 @@
     "status": {
       "active": "active",
       "paused": "paused",
+      "blocked": "blocked",
+      "usage_limited": "limited by usage",
       "budget_limited": "limited by budget",
       "complete": "complete"
     },
     "errors": {
-      "invalidBudget": "Token budget must be a positive integer."
+      "invalidBudget": "Token budget must be a positive integer.",
+      "objectiveOnly": "Goal mode can only start from text input."
     },
     "toasts": {
       "updateFailed": "Goal update failed",
@@ -317,8 +350,10 @@
       "budget_updated": "Budget updated",
       "status_changed": "Status changed",
       "usage_accounted": "Run accounted",
+      "usage_limited": "Usage limit reached",
       "budget_limited": "Budget reached",
       "completion_deferred": "Completion deferred",
+      "blocked": "Goal blocked",
       "completed": "Goal completed",
       "stall_paused": "Paused by stall guard",
       "auto_continue_blocked": "Auto-continue waiting",
@@ -329,6 +364,8 @@
     "runtime": {
       "budgetReached": "Goal budget reached. I stopped starting new work for this goal; increase the budget or replace the goal to continue.",
       "completionDeferred": "Goal completion deferred. Completion gate found: {{blockers}}. The goal remains active.",
+      "blocked": "Goal blocked after the same blocker recurred across consecutive goal turns: {{blockers}}.",
+      "usageLimited": "Goal paused by a provider or runtime usage limit: {{details}}.",
       "complete": "Goal complete. Final audit: {{usage}}; no unfinished tasks, failed tools, queued user messages, or pending plan gate.",
       "stallPaused": "Goal paused by the stall guard after {{count}} continuation rounds without tool or task progress. Review the goal or resume it when ready.",
       "autoContinueBlocked": "Goal auto-continue is waiting: {{blockers}}."
@@ -354,7 +391,8 @@
       "TaskGet": "Get Task",
       "TaskUpdate": "Update Task",
       "TaskList": "List Tasks",
-      "Delete": "Delete"
+      "Delete": "Delete",
+      "Skill": "Skill"
     }
   },
   "toolCall": {
@@ -377,12 +415,51 @@
     },
     "directoryListing": "Directory Listing",
     "foldersAndFiles": "{{folders}} folders · {{files}} files",
+    "lineCount": "{{count}} lines",
+    "charCount": "{{count}} chars",
+    "tokenCount": "{{value}} tokens",
+    "outputLineCount": "{{count}} output lines",
+    "lineRange": "lines {{start}}-{{end}}",
+    "lineRangeFrom": "from line {{start}}",
+    "searchInPath": "in {{path}}",
+    "includeGlob": "include {{include}}",
+    "excludeGlob": "exclude {{exclude}}",
+    "imageFile": "image",
+    "preview": "preview",
+    "timeoutMs": "timeout: {{value}}ms",
+    "lineDelta": "-{{old}} / +{{next}} lines",
+    "charDelta": "-{{old}} / +{{next}} chars",
+    "hiddenLivePayload": "Detailed Write/Edit content stays hidden until the tool finishes.",
+    "widget": {
+      "rendering": "Rendering widget...",
+      "renderingWithChars": "Rendering widget ({{chars}} chars)...",
+      "waitingCode": "Waiting for widget code...",
+      "imageCopied": "Image copied to clipboard",
+      "copyImageFailed": "Failed to copy image",
+      "copied": "Copied",
+      "copyImage": "Copy image to clipboard"
+    },
+    "submitReport": {
+      "submitted": "Report submitted",
+      "submitting": "Submitting report",
+      "live": "live",
+      "preview": "preview",
+      "copy": "Copy report",
+      "chars": "chars",
+      "lines": "lines",
+      "blocks": "blocks",
+      "previewContinues": "Preview continues as the report streams in...",
+      "waiting": "Waiting for report text..."
+    },
     "taskList": "Task List",
     "tasksDone": "{{completed}}/{{total}} done",
     "content": "Content",
     "diff": "Diff",
     "appliedSuccessfully": "Applied successfully",
+    "skillUsed": "Used Skill",
+    "skillLoading": "Loading Skill",
     "receivingArgs": "receiving args...",
+    "executing": "executing...",
     "showAll": "Show all ({{chars}} chars, {{lines}} lines)",
     "showAllTokens": "Show all (~{{tokens}} tokens, {{lines}} lines)",
     "showFirst40": "Show first 40 lines",
@@ -468,6 +545,62 @@
       },
       "type": {
         "summary": "Mode: {{mode}}"
+      }
+    },
+    "browser": {
+      "running": "Browser action in progress",
+      "completed": "Browser action completed",
+      "failed": "Browser action failed",
+      "executing": "Executing browser action...",
+      "input": "Input",
+      "output": "Output",
+      "notes": "Notes",
+      "screenshotPreview": "Screenshot preview",
+      "contentPreview": "Content preview",
+      "elementsPreview": "Elements",
+      "previewTruncated": "first {{count}} chars",
+      "BrowserNavigate": {
+        "title": "Browser Navigate"
+      },
+      "BrowserGetContent": {
+        "title": "Browser Content"
+      },
+      "BrowserScreenshot": {
+        "title": "Browser Screenshot"
+      },
+      "BrowserSnapshot": {
+        "title": "Browser Snapshot"
+      },
+      "BrowserClick": {
+        "title": "Browser Click"
+      },
+      "BrowserType": {
+        "title": "Browser Type"
+      },
+      "BrowserScroll": {
+        "title": "Browser Scroll"
+      },
+      "fields": {
+        "title": "Title",
+        "url": "URL",
+        "type": "Type",
+        "clicked": "Clicked",
+        "element": "Element",
+        "value": "Value",
+        "scrollY": "Scroll Y",
+        "scrollHeight": "Scroll Height",
+        "viewport": "Viewport",
+        "elements": "Elements"
+      },
+      "summary": {
+        "content": "{{type}} · {{count}} chars",
+        "screenshot": "{{width}} × {{height}}",
+        "image": "image",
+        "elements": "{{count}} elements",
+        "snapshot": "interactive elements",
+        "type": "type text",
+        "typeSubmit": "{{selector}} · submit",
+        "scrollY": "Y {{value}}"
       }
     }
   },
@@ -575,6 +708,8 @@
     "exporting": "Exporting...",
     "copyAll": "Copy All",
     "copied": "Copied!",
+    "loadOlder": "Load earlier messages ({{count}} hidden)",
+    "loadingOlder": "Loading earlier messages...",
     "scrollToBottom": "Scroll to bottom",
     "userLocator": {
       "title": "User messages",
@@ -585,7 +720,10 @@
     "imageCopied": "Image copied to clipboard",
     "imageCopiedDesc": "You can paste it into chat or documents",
     "exportImageFailed": "Export image failed",
-    "homeWorkspaceCaption": "Workspace"
+    "homeWorkspaceCaption": "Workspace",
+    "homeTitleChatQuestion": "What should we talk through?",
+    "homeTitleBuildQuestion": "What should we build in {{name}}?",
+    "thisWorkspace": "this workspace"
   },
   "projectHome": {
     "noProjectSelected": "No project selected",
@@ -601,18 +739,65 @@
     "actionsLabel": "Quick access",
     "noWorkingFolder": "No working folder configured"
   },
+  "projectArchive": {
+    "noChannelSummary": "View project collaboration channels and connection status.",
+    "loadFailed": "Failed to load project archive",
+    "saved": "Project archive saved",
+    "saveFailed": "Failed to save project archive",
+    "noProjectTitle": "No project selected",
+    "noProjectDesc": "Return to home page to select a project first, then view the project archive.",
+    "backHome": "Return to home",
+    "backProject": "Return to project home",
+    "loading": "Loading project archive...",
+    "unsavedState": "Unsaved changes",
+    "savedState": "Content synced",
+    "pathUnavailable": "Path unavailable",
+    "reloadAction": "Reload",
+    "effectiveHint": "Prefers .agents in the working directory; if old files still exist at the working directory root, they will also be read and written back compatibly.",
+    "memoryRootTitle": "Project Memory Root",
+    "lastSavedAt": "Saved at {{time}}",
+    "upToDate": "Up to date",
+    "missingFileHint": "{{file}} does not exist yet. Initial template loaded, click Save to create the file.",
+    "legacyLocationHint": "Current file is from an old location in the working directory root, save will continue writing back to the original location.",
+    "placeholder": "Edit {{file}} here ...",
+    "savingAction": "Saving...",
+    "resetAction": "Reset",
+    "errorLabel": "Error: ",
+    "files": {
+      "agents": {
+        "description": "Project-level work agreements, boundaries, and collaboration guidelines."
+      },
+      "soul": {
+        "description": "Project-specific personality/style supplement, takes priority over global SOUL.md."
+      },
+      "user": {
+        "description": "Your preferences, goals, and collaboration style for this project."
+      },
+      "memory": {
+        "description": "Long-term memory, decisions, and context for this project."
+      },
+      "daily": {
+        "title": "Daily Memory",
+        "description": "Record today's project temporary context, can be organized into MEMORY.md later."
+      }
+    }
+  },
   "skills": {
     "addActions": "Add actions",
     "addToChat": "Add to Chat",
+    "attachMedia": "Add photos and files",
     "commandsLabel": "Commands",
+    "availableCommands": "Available commands",
+    "loadingCommands": "Loading commands...",
+    "noCommands": "No commands found",
     "skillsLabel": "Skills",
     "availableSkills": "Available Skills",
     "loadingSkills": "Loading skills...",
     "noSkills": "No skills installed",
-    "channelsLabel": "channles",
-    "availableChannels": "Available channles",
-    "noChannels": "No channles configured",
-    "configureInSettings": "Add channles in Settings → channles",
+    "channelsLabel": "Channels",
+    "availableChannels": "Available Channels",
+    "noChannels": "No channels configured",
+    "configureInSettings": "Add channels in Settings → Channels",
     "configureChannels": "Configure...",
     "pluginsLabel": "Plugins",
     "availablePlugins": "Available Plugins",
@@ -623,16 +808,30 @@
     "noMcps": "No MCP servers connected",
     "configureMcps": "Add servers in Settings → MCP",
     "configureMcpServers": "Configure...",
-    "channelCount": "{{count}} channles",
-    "activeChannels": "Active channles:",
+    "channelCount": "{{count}} channels",
+    "activeChannels": "Active channels:",
     "activeMcpServers": "Active MCP servers:",
     "mcpToolCount": "{{count}} tools",
+    "mcpToolCount_one": "{{count}} tool",
+    "mcpToolCount_other": "{{count}} tools",
     "mcpCount": "{{count}} MCP"
   },
   "userMessage": {
     "you": "You",
     "copied": "Copied",
     "edit": "Edit",
+    "skillLabel": "Skill",
+    "addSkill": "Add Skill",
+    "changeSkill": "Change Skill",
+    "removeSkill": "Remove Skill",
+    "selectSkill": "Select Skill",
+    "imageCopied": "Image copied",
+    "copyImageFailed": "Failed to copy image",
+    "imageAttachment": "Image attachment",
+    "copyImageShortcut": "Focus the image and press Ctrl/Cmd+C to copy it",
+    "copyImage": "Copy image",
+    "removeImage": "Remove image",
+    "imagePreview": "Image preview",
     "saveAndResend": "Save & Resend"
   },
   "assistantMessage": {
@@ -657,7 +856,7 @@
     "tps": "TPS",
     "regenerateReference": "Regenerate reference",
     "continueToolExecution": "Continue execution",
-    "continueToolExecutionHint": "The last run stopped during tool execution. Click to continue in this same message without creating a new AI message.",
+    "continueToolExecutionHint": "Continue from saved tool results in this same message without creating a new AI message.",
     "imageError": {
       "titleTimeout": "Image generation timed out",
       "descTimeout": "The request exceeded 10 minutes. Try simplifying the prompt, reducing image complexity, or retrying.",
@@ -735,9 +934,12 @@
   },
   "fileChange": {
     "created": "created",
+    "creating": "creating",
     "new": "new",
     "deleted": "deleted",
+    "deleting": "deleting",
     "edited": "edited",
+    "editing": "editing",
     "fileWillBeDeleted": "File will be deleted",
     "moreLines": "+{{count}} more lines",
     "unchangedLines": "··· {{count}} unchanged lines ···",
@@ -750,16 +952,27 @@
     "patchSummary": "{{hunks}} hunks · -{{deleted}} / +{{added}} lines",
     "lineCount": "{{count}} lines",
     "charCount": "{{count}} chars",
+    "compactLineCount": "{{value}} lines",
+    "compactCharCount": "{{value}} chars",
+    "previewOnly": "preview",
     "streaming": "streaming",
     "kept": "This file is kept.",
     "restored": "This file has been restored.",
     "rollbackConflictDefault": "This file has a rollback conflict.",
     "individualActions": "You can keep or revert this file individually.",
+    "undoFileConfirmTitle": "Undo this file change?",
+    "undoFileConfirmDesc": "This will revert the recorded change to \"{{path}}\". This action cannot be undone.",
+    "undoRunConfirmTitle": "Undo code changes?",
+    "undoRunConfirmDesc": "This will revert {{count}} pending code change(s). This action cannot be undone.",
+    "undoConfirmAction": "Undo",
     "moreFiles": "+{{count}} more",
     "bulkActionsHint": "You can handle files one by one below, or apply bulk actions here.",
     "conflictedHint": "Some files changed after the agent finished, so only safe files were reverted.",
     "runSummary": "{{files}} files changed · {{pending}} pending",
     "filesChanged": "{{count}} files changed",
+    "showFileList": "Show {{count}} changed files",
+    "hideFileList": "Hide file list",
+    "reviewButton": "Review",
     "openReview": "Review changes",
     "reviewPanelTitle": "Change review",
     "reviewPanelDescription": "Review the changed files from this run, switch between them, and confirm or undo each change.",

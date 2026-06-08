@@ -2,6 +2,255 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.113] - 2026-06-04
+
+### Added
+
+- Implemented WebDAV sync functionality with full UI integration for managing sync settings.
+- Added SyncPage component for configuring and monitoring WebDAV sync operations.
+- Introduced IPC channels for sync configuration, status queries, and conflict resolution.
+- Created sync type definitions for managing sync configurations and operations.
+- Enhanced SshTerminal to handle terminal resizing and notify remote sessions.
+- Added UI store management for opening and closing the sync page.
+- Implemented conflict resolution handling in the sync process.
+
+### Changed
+
+- Updated localization files for sync-related strings in both English and Chinese.
+
+## [0.9.112] - 2026-05-29
+
+### Added
+
+- Added context compression status card to surface current compression state more clearly in the UI.
+- Improved message merge logic so history is preserved when consolidating messages.
+
+## [0.9.111] - 2026-05-28
+
+### Added
+
+- Enhanced ModelSwitcher component with Popover dropdown for better model selection UX.
+- Added workspace directory change detection with automatic refresh and provider-based model grouping.
+- Implemented message write tracking and flush mechanism for chat sessions.
+- Added browser goal runtime support for agent sessions.
+
+### Fixed
+
+- Fixed sub-agent event handling for background sessions with session-scoped state lookup.
+- Improved code structure for better readability and maintainability.
+
+## [0.9.110] - 2026-05-27
+
+### Added
+
+- Unlocked Chat-mode tool selection so models can now use file, terminal, MCP, and other tools when available, while preserving approval flow constraints.
+- Added automatic default working directory creation for Chat sessions without a project context, preventing ambiguity in file-based tasks.
+- Improved manual context compression with more aggressive shrinking based on actual compressible message count and recent input token estimation.
+- Enhanced model switcher to display models grouped by provider for better readability and navigation in long lists.
+
+### Fixed
+
+- Fixed sub-agent event handling for background sessions by removing foreground session checks and using session-scoped state lookup.
+- Delegated sub-agent cleanup to session-aware state synchronization for more reliable background session management.
+
+## [0.9.109] - 2026-05-26
+
+### Added
+
+- Added goal runtime service support for blocked and usage-limited goal states so active goals can persist, resume, or pause based on blocker and usage conditions.
+- Added dedicated browser tool cards and browser tool name grouping so browser tool calls render consistently in assistant messages.
+- Added a Xiaomi coding preset and fast-route model selection support for separate main and fast model workflows.
+
+### Changed
+
+- Reworked goal persistence, schema migration, and event emission to support objective replacement, blocked audits, usage limits, and live elapsed-time tracking.
+- Improved browser handling with shared built-in storage cleanup, more resilient webview JSON parsing, and screenshot encoding that preserves the native image format.
+- Refined the chat composer, working-folder picker, sidebar and project navigation, and task calendar so project-scoped sessions and queued messages behave more predictably.
+- Updated OpenAI Responses websocket session scoping in the cron background runtime so agent runs use distinct connection keys.
+
+### Removed
+
+- Removed placeholder code-compatible `LSP` and worktree tool stubs from the code-compatible tool catalog.
+
+## [0.9.108] - 2026-05-25
+
+### Added
+
+- Added Soul marketplace page for discovering and browsing community souls.
+- Finalized marketplace install flow with end-to-end soul installation from marketplace.
+
+### Changed
+
+- Refactored working directory selector dialog with improved UX and streamlined layout.
+- Unified file and tool icon styles across chat cards and session panels for visual consistency.
+
+### Fixed
+
+- Added `Stage1BuildResult` wrapper in memory pipeline to preserve filter reasons and original content, ensuring filtered entries are recorded with accurate metadata instead of fallback values.
+
+### Removed
+
+- Removed WeChat UI send skill and its automation scripts.
+
+## [0.9.107] - 2026-05-24
+
+### Added
+
+- Added automatic memory summarization system with backend pipeline, frontend panel, and dynamic context-injection into agent prompts.
+
+## [0.9.106] - 2026-05-24
+
+### Added
+
+- Added automatic `sort_order` normalization before message reads so sessions with dirty sequence data are repaired in place only when anomalies are detected.
+
+### Fixed
+
+- Fixed message query ordering drift caused by gaps, duplicates, or out-of-order `sort_order` values in `messages` rows within the same session.
+- Added `created_at ASC` as a secondary ordering key across message queries and stopped `upsertMessage` conflict updates from overwriting recovered `sort_order` values.
+
+## [0.9.105] - 2026-05-24
+
+### Changed
+
+- Reworked the draw page image-generation flow with richer prompt optimization, style blending, and image-quality controls.
+- Improved OpenAI image provider routing and Responses compatibility so image requests carry the right generation settings across providers.
+- Expanded draw history, error reporting, and chat-mode prompt context so failed runs and optimized prompts surface more useful diagnostics.
+
+### Added
+
+- Added prompt-style presets and a user core suggestion field to help shape image prompts before generation.
+- Added richer error details for image-generation failures, including provider and request metadata when no image output is returned.
+
+### Fixed
+
+- Fixed image-generation handling for transparent-background and no-output cases across the draw workflow.
+
+## [0.9.104] - 2026-05-23
+
+### Changed
+
+- **Docs IA restructure:** Reorganized documentation from flat "Getting Started / Core Concepts / Features / Plugins / Providers / Architecture / Development" into task-oriented navigation: Start, Install, Channels, Agents, Capabilities, Skills, Models, Platforms, Ops, Reference, and Help. Added index pages and meta.json for each section, with redirects preserving all legacy URLs.
+- Rewrote docs landing page with streamlined layout, new `DocsComponents` and `CopyCommandButton` components, and improved Mermaid diagram rendering.
+- Refactored `chat-store` (441 lines changed) with enhanced session management and state flow.
+- Expanded `fs-tool` (402 lines changed) and `bash-tool` (128 lines changed) with richer file system and shell execution capabilities.
+- Enhanced `fs-handlers` (279 lines), `db-handlers` (102 lines), `ssh-handlers` (81 lines), and `shell-handlers` (28 lines) in the main process for more robust IPC.
+- Refactored `messages-dao` data access layer for improved message persistence.
+- Redesigned `GoalSessionControls` component with better goal session UX.
+- Enhanced `InputArea` with improved input handling and `SkillsMenu` with richer skill browsing.
+
+### Added
+
+- **Code-compatible tool** (`code-compatible-tool.ts`, 321 lines): New tool providing code-agent-compatible aliases for OpenCowork's tool system, enabling seamless interoperability.
+- **Tool input sanitizer** (`tool-input-sanitizer.ts`, 72 lines): Input validation and sanitization layer for all tool calls.
+- New `channels.ts` IPC channel definitions for extended renderer-main communication.
+- Enhanced `cron-tool`, `search-tool`, and `plan-tool` with additional capabilities.
+- Expanded `tool-types` with new tool interfaces and type definitions.
+- Docs application screenshot added to public assets.
+
+### Fixed
+
+- Updated i18n strings in English and Chinese chat locales for consistency.
+- Improved `dynamic-context` and `memory-files` agent runtime modules.
+- Enhanced `use-chat-actions` and `use-plugin-auto-reply` hooks for edge cases.
+
+## [0.9.103] - 2026-05-21
+
+### Fixed
+
+- Isolated built-in browser session storage to prevent contamination of the user's native browser profiles.
+- fix(cron): replaced string-concatenated output with chunk-based buffer decoding to avoid encoding truncation.
+- fix(weixin): added i18n error keys for QR code and login failure scenarios.
+- fix(todo): respected `teamToolsEnabled` setting in `hasActiveTeam` guard.
+
+### Added
+
+- feat(images): enhanced GIF fallback when no structured frames are available, with improved error branch handling.
+- feat(teams): added filtered task definition and disabled-state filtering for team tools.
+- feat(plugin): rewrote auto-reply flow with streaming text append, error tracing, full persistence, and replay support.
+- feat(chat): added session deduplication by ID (dedupeSessionsById) and image preview in InputArea.
+
+## [0.9.102] - 2026-05-21
+
+### Fixed
+
+- Protected real Chrome/Edge/Brave/Chromium profiles by keeping Electron's writable browser session data inside OpenCowork's isolated storage.
+- Clarified browser settings copy so selected browser profiles are used for identity emulation, not direct writable storage reuse.
+
+## [0.9.101] - 2026-05-21
+
+### Changed
+
+- Improved built-in browser emulation so an Edge data-source selection also reports Edge-like user-agent and client hints.
+- Passed the main-process browser emulation status into the webview so the embedded browser uses the resolved runtime browser identity.
+
+### Fixed
+
+- Fixed in-memory Monaco model URIs for absolute local paths so TypeScript diagnostics no longer request decoded double-slash source paths.
+
+## [0.9.100] - 2026-05-21
+
+### Changed
+
+- Bumped the application version for the next release cycle.
+- Added browser user-data source settings and profile detection support for built-in browser session reuse.
+- Persisted browser user-data source selection through settings migration and storage normalization.
+
+## [0.9.98] - 2026-05-21
+
+### Added
+
+- Added a Gemini 3.5 Flash preset to the RoutiN AI provider list.
+
+### Changed
+
+- Refreshed the tool catalog lifecycle so skills and sub-agents reload from IPC before requests and stay aligned after edits.
+- Improved OpenAI chat streaming so tool-call snapshots from either delta or message payloads keep tool-start and tool-delta events consistent.
+- Added streaming image-generation support with partial previews for OpenAI image flows and draw page preview state.
+- Polished chat tool cards and draw UI so skill calls, file changes, and image previews render more clearly.
+
+### Fixed
+
+- Fixed image-generation partial counts and media type handling so streamed previews and final images stay normalized.
+
+## [0.9.97] - 2026-05-19
+
+### Changed
+
+- Refreshed the SSH and theme settings UI, including SSH connection management, terminal status presentation, and theme preset handling.
+- Improved the chat change review flow with a cleaner review card layout and updated transcript rendering.
+
+### Fixed
+
+- Fixed inconsistent code-block styling in SSH support workspaces.
+
+## [0.9.96] - 2026-05-15
+
+### Changed
+
+- Reworked session-scoped agent runtime state so sub-agent panels, orchestration views, tool calls, background processes, and detached session surfaces stay tied to the correct active session.
+- Refined the sub-agent execution detail panel and sidebar layout with shared scoped selectors, localized sidebar labels, and cleaner runtime detail routing.
+- Improved live sub-agent transcripts with revision-aware rendering and live tool-call state mapping so streaming assistant text and tool results refresh in place.
+
+### Fixed
+
+- Fixed pending assistant placeholders so completed orchestration data does not keep a blank assistant row visible after the primary run has stopped.
+- Fixed streaming transcript handling for assistant messages that arrive before static transcript analysis includes them.
+- Marked unfinished thinking blocks complete and mirrored live tool-use blocks into sub-agent transcripts when tool-call events arrive.
+
+## [0.9.95] - 2026-05-14
+
+### Added
+
+- Added a runtime status panel in the session view that surfaces sub-agent execution summaries from the title-bar control without occupying the input area.
+- Added a standalone runtime todo list with collapse/expand handling and earlier-task indicators for long task histories.
+
+### Changed
+
+- Unified sub-agent run data aggregation for the runtime panel and sub-agent list so both views share filtering, summaries, failure details, and tool-state mapping.
+- Moved in-progress todo presentation out of embedded tool-call rendering and replaced the ping animation with a rotating progress indicator for calmer task updates.
+- Removed duplicated layout-side session workspace derivation so panel state is computed from the shared runtime data source.
+
 ## [0.9.94] - 2026-05-13
 
 ### Changed

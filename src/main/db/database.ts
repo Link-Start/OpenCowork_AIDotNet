@@ -37,6 +37,79 @@ function ensureColumn(
   database.exec(`ALTER TABLE "${safeTable}" ADD COLUMN "${safeColumn}" ${definition}`)
 }
 
+function tableDefinitionIncludes(
+  database: Database.Database,
+  tableName: string,
+  fragment: string
+): boolean {
+  try {
+    const row = database
+      .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?`)
+      .get(tableName) as { sql?: string | null } | undefined
+    return row?.sql?.includes(fragment) ?? false
+  } catch {
+    return false
+  }
+}
+
+function migrateSessionGoalsStatusSchema(database: Database.Database): void {
+  if (!tableDefinitionIncludes(database, 'session_goals', `'usage_limited'`)) {
+    database.exec(`
+      ALTER TABLE session_goals RENAME TO session_goals_legacy;
+
+      CREATE TABLE session_goals (
+        session_id TEXT PRIMARY KEY NOT NULL,
+        goal_id TEXT NOT NULL,
+        objective TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(
+          status IN (
+            'active',
+            'paused',
+            'blocked',
+            'usage_limited',
+            'budget_limited',
+            'complete'
+          )
+        ),
+        token_budget INTEGER,
+        tokens_used INTEGER NOT NULL DEFAULT 0,
+        time_used_seconds INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+      );
+
+      INSERT INTO session_goals (
+        session_id,
+        goal_id,
+        objective,
+        status,
+        token_budget,
+        tokens_used,
+        time_used_seconds,
+        created_at,
+        updated_at
+      )
+      SELECT
+        session_id,
+        goal_id,
+        objective,
+        status,
+        token_budget,
+        tokens_used,
+        time_used_seconds,
+        created_at,
+        updated_at
+      FROM session_goals_legacy;
+
+      DROP TABLE session_goals_legacy;
+
+      CREATE INDEX IF NOT EXISTS idx_session_goals_status
+        ON session_goals(status);
+    `)
+  }
+}
+
 function sanitizeProjectName(rawName: string): string {
   const cleaned = rawName
     .replace(/[<>:"/\\|?*]/g, ' ')
@@ -304,13 +377,219 @@ export function getDb(): Database.Database {
       ON messages(session_id, sort_order);
   `)
 
+  // --- Agent change journal ---
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS agent_change_sets (
+      run_id TEXT PRIMARY KEY,
+      session_id TEXT,
+      assistant_message_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS agent_file_changes (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      session_id TEXT,
+      tool_use_id TEXT,
+      tool_name TEXT,
+      file_path TEXT NOT NULL,
+      transport TEXT NOT NULL,
+      connection_id TEXT,
+      op TEXT NOT NULL,
+      status TEXT NOT NULL,
+      before_json TEXT NOT NULL,
+      after_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      accepted_at INTEGER,
+      reverted_at INTEGER,
+      conflict TEXT,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      FOREIGN KEY (run_id) REFERENCES agent_change_sets(run_id) ON DELETE CASCADE,
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_agent_change_sets_session
+      ON agent_change_sets(session_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_agent_file_changes_run
+      ON agent_file_changes(run_id, sort_order);
+    CREATE INDEX IF NOT EXISTS idx_agent_file_changes_session
+      ON agent_file_changes(session_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_agent_file_changes_tool_use
+      ON agent_file_changes(tool_use_id);
+  `)
+
+  // --- Memory automation audit log ---
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS memory_automation_entries (
+      id TEXT PRIMARY KEY,
+      scope TEXT NOT NULL,
+      root_scope TEXT,
+      memory_root_id TEXT,
+      job_id TEXT,
+      project_id TEXT,
+      target TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      content TEXT NOT NULL,
+      confidence REAL NOT NULL DEFAULT 0,
+      source_session_id TEXT,
+      target_path TEXT,
+      status TEXT NOT NULL,
+      filter_reason TEXT,
+      fingerprint TEXT NOT NULL,
+      evidence_json TEXT,
+      written_at INTEGER,
+      error TEXT,
+      before_content TEXT,
+      after_content TEXT,
+      appended_text TEXT,
+      ssh_connection_id TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      undone_at INTEGER
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_memory_automation_created
+      ON memory_automation_entries(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_memory_automation_target
+      ON memory_automation_entries(target, target_path, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_memory_automation_fingerprint
+      ON memory_automation_entries(fingerprint, target, target_path, status);
+    CREATE INDEX IF NOT EXISTS idx_memory_automation_session
+      ON memory_automation_entries(source_session_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS memory_automation_rollups (
+      scope TEXT NOT NULL,
+      target TEXT NOT NULL,
+      target_path TEXT NOT NULL,
+      source_date TEXT NOT NULL,
+      content_hash TEXT NOT NULL,
+      processed_at INTEGER NOT NULL,
+      PRIMARY KEY (scope, target_path, source_date, content_hash)
+    );
+
+    CREATE TABLE IF NOT EXISTS memory_roots (
+      id TEXT PRIMARY KEY,
+      scope TEXT NOT NULL CHECK(scope IN ('global', 'project')),
+      project_id TEXT,
+      working_folder TEXT,
+      ssh_connection_id TEXT,
+      root_path TEXT NOT NULL,
+      transport TEXT NOT NULL CHECK(transport IN ('local', 'ssh')),
+      owner_key TEXT NOT NULL UNIQUE,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_memory_roots_scope
+      ON memory_roots(scope, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_memory_roots_project
+      ON memory_roots(project_id, working_folder, ssh_connection_id);
+
+    CREATE TABLE IF NOT EXISTS memory_stage1_outputs (
+      id TEXT PRIMARY KEY,
+      memory_root_id TEXT NOT NULL,
+      scope TEXT NOT NULL CHECK(scope IN ('global', 'project')),
+      source_session_id TEXT NOT NULL,
+      source_updated_at INTEGER,
+      raw_memory TEXT NOT NULL,
+      rollout_summary TEXT NOT NULL,
+      rollout_slug TEXT NOT NULL,
+      fingerprint TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      usage_count INTEGER NOT NULL DEFAULT 0,
+      last_usage_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (memory_root_id) REFERENCES memory_roots(id) ON DELETE CASCADE
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_stage1_unique
+      ON memory_stage1_outputs(memory_root_id, source_session_id, fingerprint);
+    CREATE INDEX IF NOT EXISTS idx_memory_stage1_root_created
+      ON memory_stage1_outputs(memory_root_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_memory_stage1_session
+      ON memory_stage1_outputs(source_session_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS memory_jobs (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      status TEXT NOT NULL,
+      memory_root_id TEXT,
+      source_session_id TEXT,
+      lease_owner TEXT,
+      lease_expires_at INTEGER,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      error TEXT,
+      started_at INTEGER,
+      finished_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (memory_root_id) REFERENCES memory_roots(id) ON DELETE SET NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_memory_jobs_status
+      ON memory_jobs(status, kind, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_memory_jobs_root
+      ON memory_jobs(memory_root_id, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_memory_jobs_session
+      ON memory_jobs(source_session_id, updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS memory_citation_usage (
+      id TEXT PRIMARY KEY,
+      memory_root_id TEXT NOT NULL,
+      scope TEXT NOT NULL CHECK(scope IN ('global', 'project')),
+      source_session_id TEXT,
+      path TEXT NOT NULL,
+      line INTEGER,
+      citation_json TEXT,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (memory_root_id) REFERENCES memory_roots(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_memory_citation_usage_root
+      ON memory_citation_usage(memory_root_id, created_at DESC);
+  `)
+
+  const memoryAutomationColumns = [
+    { name: 'root_scope', type: 'TEXT' },
+    { name: 'memory_root_id', type: 'TEXT' },
+    { name: 'job_id', type: 'TEXT' },
+    { name: 'project_id', type: 'TEXT' },
+    { name: 'filter_reason', type: 'TEXT' },
+    { name: 'before_content', type: 'TEXT' },
+    { name: 'after_content', type: 'TEXT' },
+    { name: 'appended_text', type: 'TEXT' },
+    { name: 'ssh_connection_id', type: 'TEXT' },
+    { name: 'undone_at', type: 'INTEGER' }
+  ] as const
+  for (const column of memoryAutomationColumns) {
+    ensureColumn(db, 'memory_automation_entries', column.name, column.type)
+  }
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_memory_automation_root
+      ON memory_automation_entries(memory_root_id, created_at DESC);
+  `)
+
   // --- Session Goals table ---
   db.exec(`
     CREATE TABLE IF NOT EXISTS session_goals (
       session_id TEXT PRIMARY KEY NOT NULL,
       goal_id TEXT NOT NULL,
       objective TEXT NOT NULL,
-      status TEXT NOT NULL CHECK(status IN ('active', 'paused', 'budget_limited', 'complete')),
+      status TEXT NOT NULL CHECK(
+        status IN (
+          'active',
+          'paused',
+          'blocked',
+          'usage_limited',
+          'budget_limited',
+          'complete'
+        )
+      ),
       token_budget INTEGER,
       tokens_used INTEGER NOT NULL DEFAULT 0,
       time_used_seconds INTEGER NOT NULL DEFAULT 0,
@@ -339,6 +618,7 @@ export function getDb(): Database.Database {
     CREATE INDEX IF NOT EXISTS idx_session_goal_events_goal_created
       ON session_goal_events(goal_id, created_at DESC);
   `)
+  migrateSessionGoalsStatusSchema(db)
 
   // Migration: add icon column if missing
   try {
@@ -920,6 +1200,33 @@ export function getDb(): Database.Database {
       FOREIGN KEY (run_id) REFERENCES cron_runs(id) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_cron_run_logs_run ON cron_run_logs(run_id, sort_order);
+  `)
+
+  // --- Sync metadata ---
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sync_record_state (
+      provider_id TEXT NOT NULL,
+      domain TEXT NOT NULL,
+      record_id TEXT NOT NULL,
+      content_hash TEXT NOT NULL,
+      synced_at INTEGER NOT NULL,
+      PRIMARY KEY (provider_id, domain, record_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS sync_tombstones (
+      provider_id TEXT NOT NULL,
+      domain TEXT NOT NULL,
+      record_id TEXT NOT NULL,
+      deleted_at INTEGER NOT NULL,
+      origin_device_id TEXT NOT NULL,
+      PRIMARY KEY (provider_id, domain, record_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_sync_record_state_provider
+      ON sync_record_state(provider_id, domain);
+
+    CREATE INDEX IF NOT EXISTS idx_sync_tombstones_provider
+      ON sync_tombstones(provider_id, domain, deleted_at);
   `)
 
   return db

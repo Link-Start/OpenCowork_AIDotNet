@@ -9,9 +9,12 @@ import {
   MessageSquare,
   Settings2,
   Check,
-  Cable
+  Cable,
+  ClipboardList,
+  Target
 } from 'lucide-react'
 import { Button } from '@renderer/components/ui/button'
+import { Switch } from '@renderer/components/ui/switch'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -41,6 +44,13 @@ interface SkillsMenuProps {
   showChannels?: boolean
   triggerClassName?: string
   menuClassName?: string
+  showModeToggles?: boolean
+  planModeEnabled?: boolean
+  goalModeEnabled?: boolean
+  planModeDisabled?: boolean
+  goalModeDisabled?: boolean
+  onPlanModeChange?: (enabled: boolean) => void
+  onGoalModeChange?: (enabled: boolean) => void
 }
 
 export function SkillsMenu({
@@ -51,7 +61,14 @@ export function SkillsMenu({
   projectId,
   showChannels = true,
   triggerClassName,
-  menuClassName
+  menuClassName,
+  showModeToggles = true,
+  planModeEnabled = false,
+  goalModeEnabled = false,
+  planModeDisabled = false,
+  goalModeDisabled = false,
+  onPlanModeChange,
+  onGoalModeChange
 }: SkillsMenuProps): React.JSX.Element {
   const { t } = useTranslation('chat')
   const [open, setOpen] = React.useState(false)
@@ -93,6 +110,7 @@ export function SkillsMenu({
   )
 
   const openSettingsPage = useUIStore((s) => s.openSettingsPage)
+  const showModeSection = showModeToggles && Boolean(onPlanModeChange || onGoalModeChange)
 
   React.useEffect(() => {
     if (!open) return
@@ -153,8 +171,60 @@ export function SkillsMenu({
               }}
             >
               <Paperclip className="mr-2 size-4" />
-              <span>{t('skills.attachMedia', { defaultValue: 'Add photos and files' })}</span>
+              <span>{t('skills.attachMedia')}</span>
             </DropdownMenuItem>
+            <DropdownMenuSeparator />
+          </>
+        )}
+
+        {showModeSection && (
+          <>
+            <DropdownMenuGroup>
+              {onPlanModeChange && (
+                <DropdownMenuItem
+                  disabled={planModeDisabled}
+                  onSelect={(event) => {
+                    event.preventDefault()
+                    onPlanModeChange(!planModeEnabled)
+                  }}
+                  className="justify-between"
+                >
+                  <span className="flex min-w-0 items-center gap-2">
+                    <ClipboardList className="size-4" />
+                    <span>{t('input.planModeMenu', { defaultValue: 'Plan Mode' })}</span>
+                  </span>
+                  <Switch
+                    size="sm"
+                    checked={planModeEnabled}
+                    disabled={planModeDisabled}
+                    tabIndex={-1}
+                    className="pointer-events-none ml-3"
+                  />
+                </DropdownMenuItem>
+              )}
+              {onGoalModeChange && (
+                <DropdownMenuItem
+                  disabled={goalModeDisabled}
+                  onSelect={(event) => {
+                    event.preventDefault()
+                    onGoalModeChange(!goalModeEnabled)
+                  }}
+                  className="justify-between"
+                >
+                  <span className="flex min-w-0 items-center gap-2">
+                    <Target className="size-4" />
+                    <span>{t('input.pursueGoalMenu', { defaultValue: 'Pursue Goal' })}</span>
+                  </span>
+                  <Switch
+                    size="sm"
+                    checked={goalModeEnabled}
+                    disabled={goalModeDisabled}
+                    tabIndex={-1}
+                    className="pointer-events-none ml-3"
+                  />
+                </DropdownMenuItem>
+              )}
+            </DropdownMenuGroup>
             <DropdownMenuSeparator />
           </>
         )}
@@ -169,18 +239,16 @@ export function SkillsMenu({
               <DropdownMenuSubContent
                 className={cn('w-64 max-h-80 overflow-y-auto', menuClassName)}
               >
-                <DropdownMenuLabel>
-                  {t('skills.availableCommands', { defaultValue: 'Available commands' })}
-                </DropdownMenuLabel>
+                <DropdownMenuLabel>{t('skills.availableCommands')}</DropdownMenuLabel>
                 <DropdownMenuSeparator />
                 {commandsLoading ? (
                   <div className="flex items-center justify-center py-4 text-xs text-muted-foreground">
                     <Loader2 className="mr-1.5 size-3.5 animate-spin" />
-                    {t('skills.loadingCommands', { defaultValue: 'Loading commands...' })}
+                    {t('skills.loadingCommands')}
                   </div>
                 ) : commands.length === 0 ? (
                   <div className="px-2 py-4 text-center text-xs text-muted-foreground">
-                    <p>{t('skills.noCommands', { defaultValue: 'No commands found' })}</p>
+                    <p>{t('skills.noCommands')}</p>
                     <p className="mt-1 text-[10px] opacity-70">~/.open-cowork/commands/</p>
                   </div>
                 ) : (
@@ -261,7 +329,7 @@ export function SkillsMenu({
               <DropdownMenuSub>
                 <DropdownMenuSubTrigger>
                   <MessageSquare className="mr-2 size-4" />
-                  <span>{t('skills.channelsLabel', 'Channels')}</span>
+                  <span>{t('skills.channelsLabel')}</span>
                   {activeChannelIds.length > 0 && (
                     <span className="ml-auto text-[10px] text-muted-foreground">
                       {activeChannelIds.length}
@@ -272,15 +340,13 @@ export function SkillsMenu({
                   <DropdownMenuSubContent
                     className={cn('w-56 max-h-80 overflow-y-auto', menuClassName)}
                   >
-                    <DropdownMenuLabel>
-                      {t('skills.availableChannels', 'Available Channels')}
-                    </DropdownMenuLabel>
+                    <DropdownMenuLabel>{t('skills.availableChannels')}</DropdownMenuLabel>
                     <DropdownMenuSeparator />
                     {configuredChannels.length === 0 ? (
                       <div className="px-2 py-4 text-center text-xs text-muted-foreground">
-                        <p>{t('skills.noChannels', 'No channels configured')}</p>
+                        <p>{t('skills.noChannels')}</p>
                         <p className="mt-1 text-[10px] opacity-70">
-                          {t('skills.configureInSettings', 'Add channels in Settings -> Channels')}
+                          {t('skills.configureInSettings')}
                         </p>
                       </div>
                     ) : (
@@ -321,7 +387,7 @@ export function SkillsMenu({
                       className="text-xs"
                     >
                       <Settings2 className="mr-2 size-3.5" />
-                      {t('skills.configureChannels', 'Configure...')}
+                      {t('skills.configureChannels')}
                     </DropdownMenuItem>
                   </DropdownMenuSubContent>
                 </DropdownMenuPortal>
@@ -335,7 +401,7 @@ export function SkillsMenu({
           <DropdownMenuSub>
             <DropdownMenuSubTrigger>
               <Cable className="mr-2 size-4" />
-              <span>{t('skills.mcpLabel', 'MCP Servers')}</span>
+              <span>{t('skills.mcpLabel')}</span>
               {activeMcpIds.length > 0 && (
                 <span className="ml-auto text-[10px] text-muted-foreground">
                   {activeMcpIds.length}
@@ -346,16 +412,12 @@ export function SkillsMenu({
               <DropdownMenuSubContent
                 className={cn('w-56 max-h-80 overflow-y-auto', menuClassName)}
               >
-                <DropdownMenuLabel>
-                  {t('skills.availableMcps', 'Connected MCP Servers')}
-                </DropdownMenuLabel>
+                <DropdownMenuLabel>{t('skills.availableMcps')}</DropdownMenuLabel>
                 <DropdownMenuSeparator />
                 {connectedMcpServers.length === 0 ? (
                   <div className="px-2 py-4 text-center text-xs text-muted-foreground">
-                    <p>{t('skills.noMcps', 'No MCP servers connected')}</p>
-                    <p className="mt-1 text-[10px] opacity-70">
-                      {t('skills.configureMcps', 'Add servers in Settings -> MCP')}
-                    </p>
+                    <p>{t('skills.noMcps')}</p>
+                    <p className="mt-1 text-[10px] opacity-70">{t('skills.configureMcps')}</p>
                   </div>
                 ) : (
                   connectedMcpServers.map((server) => {
@@ -381,7 +443,7 @@ export function SkillsMenu({
                         </span>
                         <span className="flex-1 truncate text-xs">{server.name}</span>
                         <span className="text-[10px] text-muted-foreground">
-                          {toolCount} tool{toolCount !== 1 ? 's' : ''}
+                          {t('skills.mcpToolCount', { count: toolCount })}
                         </span>
                       </DropdownMenuItem>
                     )
@@ -396,7 +458,7 @@ export function SkillsMenu({
                   className="text-xs"
                 >
                   <Settings2 className="mr-2 size-3.5" />
-                  {t('skills.configureMcpServers', 'Configure...')}
+                  {t('skills.configureMcpServers')}
                 </DropdownMenuItem>
               </DropdownMenuSubContent>
             </DropdownMenuPortal>

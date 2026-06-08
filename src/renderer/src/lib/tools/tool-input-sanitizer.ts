@@ -55,6 +55,14 @@ function excerptAroundRange(text: string, start: number, end: number, maxChars: 
   return `${prefix}${slice}${suffix}`
 }
 
+function tailPreview(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text
+  const slice = text.slice(-maxChars)
+  const firstLineBreak = slice.indexOf('\n')
+  const body = firstLineBreak > 0 ? slice.slice(firstLineBreak + 1) : slice
+  return body ? `…\n${body}` : '…'
+}
+
 function buildEditPreviewPair(
   oldStr: string,
   newStr: string,
@@ -119,6 +127,72 @@ function summarizeLargeText(
   }
 }
 
+function compactMultiEditInputForHistory(input: Record<string, unknown>): Record<string, unknown> {
+  if (!Array.isArray(input.edits)) return input
+
+  const edits = input.edits.map((item, index) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return { index, invalid: true }
+    const edit = item as Record<string, unknown>
+    const oldStr = typeof edit.old_string === 'string' ? edit.old_string : ''
+    const newStr = typeof edit.new_string === 'string' ? edit.new_string : ''
+    const { oldPreview, newPreview } = buildEditPreviewPair(oldStr, newStr)
+    return {
+      index,
+      ...(edit.replace_all !== undefined ? { replace_all: edit.replace_all } : {}),
+      old_string_preview: oldPreview,
+      old_string_chars: oldStr.length,
+      old_string_hash: oldStr ? fnv1aHash(oldStr) : undefined,
+      new_string_preview: newPreview,
+      new_string_chars: newStr.length,
+      new_string_hash: newStr ? fnv1aHash(newStr) : undefined
+    }
+  })
+
+  return {
+    ...(input.file_path !== undefined ? { file_path: input.file_path } : {}),
+    ...(input.path !== undefined ? { path: input.path } : {}),
+    edits,
+    full_content_available_in_history: false
+  }
+}
+
+function compactNotebookEditInputForHistory(
+  input: Record<string, unknown>
+): Record<string, unknown> {
+  const source = typeof input.new_source === 'string' ? input.new_source : input.source
+  if (typeof source !== 'string') return input
+
+  const summary = summarizeLargeText(source, {
+    inlineLimit: EDIT_TOOL_HISTORY_INLINE_LIMIT,
+    omitFlag: 'source_omitted',
+    hashKey: 'source_hash',
+    byteLengthKey: 'source_bytes',
+    lineCountKey: 'source_lines',
+    headKey: 'source_preview',
+    tailKey: 'source_preview_tail'
+  })
+
+  if (!summary.source_omitted && source.length <= EDIT_TOOL_PREVIEW_CHARS) return input
+
+  return {
+    ...(input.notebook_path !== undefined ? { notebook_path: input.notebook_path } : {}),
+    ...(input.file_path !== undefined ? { file_path: input.file_path } : {}),
+    ...(input.cell_id !== undefined ? { cell_id: input.cell_id } : {}),
+    ...(input.cell_index !== undefined ? { cell_index: input.cell_index } : {}),
+    ...(input.mode !== undefined ? { mode: input.mode } : {}),
+    ...(input.cell_type !== undefined ? { cell_type: input.cell_type } : {}),
+    ...(summary.source_omitted
+      ? summary
+      : {
+          source_preview: source.slice(0, EDIT_TOOL_PREVIEW_CHARS),
+          source_chars: source.length,
+          source_lines: lineCount(source),
+          source_truncated: source.length > EDIT_TOOL_PREVIEW_CHARS
+        }),
+    full_content_available_in_history: false
+  }
+}
+
 export function compactStreamingToolInput(input: Record<string, unknown>): Record<string, unknown> {
   const hasEditPayload =
     typeof input.old_string === 'string' || typeof input.new_string === 'string'
@@ -137,24 +211,25 @@ export function compactStreamingToolInput(input: Record<string, unknown>): Recor
 
     const oldStr = typeof input.old_string === 'string' ? input.old_string : ''
     const newStr = typeof input.new_string === 'string' ? input.new_string : ''
-    const { oldPreview, newPreview } = buildEditPreviewPair(oldStr, newStr)
 
     if (typeof input.old_string === 'string') {
-      compact.old_string_preview = oldPreview
+      compact.old_string_preview = tailPreview(oldStr, EDIT_TOOL_PREVIEW_CHARS)
       compact.old_string_chars = oldStr.length
+      compact.old_string_lines = lineCount(oldStr)
       if (oldStr.length > EDIT_TOOL_PREVIEW_CHARS) compact.old_string_truncated = true
     }
 
     if (typeof input.new_string === 'string') {
-      compact.new_string_preview = newPreview
+      compact.new_string_preview = tailPreview(newStr, EDIT_TOOL_PREVIEW_CHARS)
       compact.new_string_chars = newStr.length
+      compact.new_string_lines = lineCount(newStr)
       if (newStr.length > EDIT_TOOL_PREVIEW_CHARS) compact.new_string_truncated = true
     }
   }
 
   if (hasWritePayload) {
     const content = String(input.content)
-    compact.content_preview = content.slice(0, WRITE_TOOL_PREVIEW_CHARS)
+    compact.content_preview = tailPreview(content, WRITE_TOOL_PREVIEW_CHARS)
     compact.content_lines = content.length === 0 ? 0 : lineCount(content)
     compact.content_chars = content.length
     if (content.length > WRITE_TOOL_PREVIEW_CHARS) compact.content_truncated = true
@@ -245,6 +320,14 @@ export function summarizeToolInputForHistory(
       ...newSummary,
       full_content_available_in_history: false
     }
+  }
+
+  if (toolName === 'MultiEdit') {
+    return compactMultiEditInputForHistory(input)
+  }
+
+  if (toolName === 'NotebookEdit') {
+    return compactNotebookEditInputForHistory(input)
   }
 
   return input

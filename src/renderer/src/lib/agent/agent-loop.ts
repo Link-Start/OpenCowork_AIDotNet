@@ -144,10 +144,17 @@ export async function* runAgentLoop(
             // Keep loop-local history mutable even if external stores freeze shared arrays.
             conversationMessages = [...compressedMessages]
             fullCompressionApplied = true
+            const boundaryMessage = conversationMessages.find(
+              (message) => message.role === 'system' && message.meta?.compactBoundary
+            )
+            const summarized =
+              boundaryMessage?.meta?.compactBoundary?.messagesSummarized ??
+              Math.max(0, originalCount - (conversationMessages.length - 2))
             yield {
               type: 'context_compressed',
               originalCount,
               newCount: conversationMessages.length,
+              keptMessageCount: summarized,
               messages: [...conversationMessages]
             }
             lastInputTokens = 0

@@ -1,10 +1,12 @@
 import {
   CalendarDays,
+  CloudSync,
   FolderOpen,
   Image,
   MessageSquare,
   Monitor,
   Settings,
+  Sparkles,
   Wand2
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -20,6 +22,8 @@ const navItems: { value: NavItem | 'ssh'; icon: React.ReactNode; labelKey: strin
   { value: 'tasks', icon: <CalendarDays className="size-5" />, labelKey: 'navRail.tasks' },
   { value: 'resources', icon: <FolderOpen className="size-5" />, labelKey: 'navRail.resources' },
   { value: 'skills', icon: <Wand2 className="size-5" />, labelKey: 'navRail.skills' },
+  { value: 'souls', icon: <Sparkles className="size-5" />, labelKey: 'navRail.souls' },
+  { value: 'sync', icon: <CloudSync className="size-5" />, labelKey: 'navRail.sync' },
   { value: 'draw', icon: <Image className="size-5" />, labelKey: 'navRail.draw' },
   { value: 'ssh', icon: <Monitor className="size-5" />, labelKey: 'navRail.ssh' }
 ]
@@ -30,6 +34,8 @@ export function NavRail(): React.JSX.Element {
   const setActiveNavItem = useUIStore((s) => s.setActiveNavItem)
   const leftSidebarOpen = useUIStore((s) => s.leftSidebarOpen)
   const skillsPageOpen = useUIStore((s) => s.skillsPageOpen)
+  const soulsPageOpen = useUIStore((s) => s.soulsPageOpen)
+  const syncPageOpen = useUIStore((s) => s.syncPageOpen)
   const resourcesPageOpen = useUIStore((s) => s.resourcesPageOpen)
   const drawPageOpen = useUIStore((s) => s.drawPageOpen)
   const translatePageOpen = useUIStore((s) => s.translatePageOpen)
@@ -42,6 +48,14 @@ export function NavRail(): React.JSX.Element {
     }
     if (item === 'skills') {
       useUIStore.getState().openSkillsPage()
+      return
+    }
+    if (item === 'souls') {
+      useUIStore.getState().openSoulsPage()
+      return
+    }
+    if (item === 'sync') {
+      useUIStore.getState().openSyncPage()
       return
     }
     if (item === 'resources') {
@@ -64,6 +78,8 @@ export function NavRail(): React.JSX.Element {
     const ui = useUIStore.getState()
     if (ui.settingsPageOpen) ui.closeSettingsPage()
     if (ui.skillsPageOpen) ui.closeSkillsPage()
+    if (ui.soulsPageOpen) ui.closeSoulsPage()
+    if (ui.syncPageOpen) ui.closeSyncPage()
     if (ui.resourcesPageOpen) ui.closeResourcesPage()
     if (ui.drawPageOpen) ui.closeDrawPage()
     if (ui.translatePageOpen) ui.closeTranslatePage()
@@ -93,11 +109,20 @@ export function NavRail(): React.JSX.Element {
                   (item.value === 'tasks' && tasksPageOpen) ||
                     (item.value === 'resources' && resourcesPageOpen) ||
                     (item.value === 'skills' && skillsPageOpen) ||
+                    (item.value === 'souls' && soulsPageOpen) ||
+                    (item.value === 'sync' && syncPageOpen) ||
                     (item.value === 'draw' && drawPageOpen) ||
                     (item.value === 'translate' && translatePageOpen) ||
-                    (!['tasks', 'resources', 'skills', 'draw', 'translate', 'ssh'].includes(
-                      item.value
-                    ) &&
+                    (![
+                      'tasks',
+                      'resources',
+                      'skills',
+                      'souls',
+                      'sync',
+                      'draw',
+                      'translate',
+                      'ssh'
+                    ].includes(item.value) &&
                       activeNavItem === item.value &&
                       leftSidebarOpen)
                     ? 'bg-primary/10 text-primary shadow-sm'

@@ -689,10 +689,16 @@ function mapToStreamEvent(raw: Record<string, unknown>): AgentStreamEvent | null
       const messages = Array.isArray(raw.messages)
         ? raw.messages.map((m) => mapMessage(m)).filter((m): m is MessageWire => m !== null)
         : undefined
+      const keptMessageCountRaw = raw.keptMessageCount
+      const keptMessageCount =
+        typeof keptMessageCountRaw === 'number' && Number.isFinite(keptMessageCountRaw)
+          ? keptMessageCountRaw
+          : undefined
       return {
         type: 'context_compressed',
         originalCount: num(raw.originalCount),
         newCount: num(raw.newCount ?? raw.compressedCount),
+        ...(keptMessageCount !== undefined ? { keptMessageCount } : {}),
         ...(messages && messages.length > 0 ? { messages } : {})
       }
     }

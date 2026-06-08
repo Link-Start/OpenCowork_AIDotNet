@@ -91,6 +91,7 @@ const modeIcons: Record<SessionMode, React.ReactNode> = {
   code: <Code2 className="size-4" />,
   acp: <ShieldCheck className="size-4" />
 }
+const sessionModeOptions: readonly SessionMode[] = ['chat', 'clarify', 'cowork', 'code', 'acp']
 
 interface SessionListItem {
   id: string
@@ -198,7 +199,6 @@ export function SessionListPanel(): React.JSX.Element {
     [activeSessionId, sessions]
   )
   const deleteSession = useChatStore((s) => s.deleteSession)
-  const setActiveSession = useChatStore((s) => s.setActiveSession)
   const setActiveProject = useChatStore((s) => s.setActiveProject)
   const createProject = useChatStore((s) => s.createProject)
   const renameProject = useChatStore((s) => s.renameProject)
@@ -217,8 +217,13 @@ export function SessionListPanel(): React.JSX.Element {
   const updateSettings = useSettingsStore((s) => s.updateSettings)
   const providers = useProviderStore((s) => s.providers)
   const runningSessions = useAgentStore((s) => s.runningSessions)
-  const blockedCountsBySession = useBackgroundSessionStore((s) => s.blockedCountsBySession)
-  const unreadCountsBySession = useBackgroundSessionStore((s) => s.unreadCountsBySession)
+  const waitingReplySessionIdsSig = useBackgroundSessionStore((s) => {
+    const ids = new Set<string>()
+    for (const item of s.inboxItems) {
+      if (item.type === 'ask_user') ids.add(item.sessionId)
+    }
+    return [...ids].sort().join('\u0000')
+  })
   const runningSubAgentSessionIdsSig = useAgentStore((s) => s.runningSubAgentSessionIdsSig)
   const runningBackgroundSessionIdsSig = useAgentStore((s) =>
     Object.values(s.backgroundProcesses)
@@ -292,6 +297,10 @@ export function SessionListPanel(): React.JSX.Element {
     () =>
       new Set(runningBackgroundSessionIdsSig ? runningBackgroundSessionIdsSig.split('\u0000') : []),
     [runningBackgroundSessionIdsSig]
+  )
+  const waitingReplySessionIds = useMemo(
+    () => new Set(waitingReplySessionIdsSig ? waitingReplySessionIdsSig.split('\u0000') : []),
+    [waitingReplySessionIdsSig]
   )
   const streamingSessionIds = useMemo(
     () => new Set(streamingSessionIdsSig ? streamingSessionIdsSig.split('\u0000') : []),
@@ -518,8 +527,8 @@ export function SessionListPanel(): React.JSX.Element {
   ])
 
   const handleNewSession = (): void => {
-    setActiveSession(null)
     const uiStore = useUIStore.getState()
+    setActiveProject(null)
     uiStore.setMode('chat')
     uiStore.navigateToHome()
   }
@@ -1106,18 +1115,9 @@ export function SessionListPanel(): React.JSX.Element {
               {runningSessions[session.id] === 'completed' && (
                 <CheckCircle2 className="size-3.5 text-emerald-500" />
               )}
-              {(blockedCountsBySession[session.id] ?? 0) > 0 && (
-                <span className="rounded-full border border-amber-500/20 bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-medium text-amber-600 dark:text-amber-400">
-                  {(blockedCountsBySession[session.id] ?? 0) > 99
-                    ? '99+'
-                    : blockedCountsBySession[session.id]}
-                </span>
-              )}
-              {(unreadCountsBySession[session.id] ?? 0) > 0 && (
-                <span className="rounded-full border border-sky-500/20 bg-sky-500/10 px-1.5 py-0.5 text-[9px] font-medium text-sky-600 dark:text-sky-400">
-                  {(unreadCountsBySession[session.id] ?? 0) > 99
-                    ? '99+'
-                    : unreadCountsBySession[session.id]}
+              {waitingReplySessionIds.has(session.id) && (
+                <span className="whitespace-nowrap rounded-full border border-amber-500/20 bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-medium text-amber-600 dark:text-amber-400">
+                  {t('sidebar.waitingReply', { defaultValue: 'Waiting reply' })}
                 </span>
               )}
               {getPendingSessionMessageCountForSession(session.id) > 0 && (
@@ -1238,19 +1238,21 @@ export function SessionListPanel(): React.JSX.Element {
             {t('sidebar.switchMode')}
           </ContextMenuSubTrigger>
           <ContextMenuSubContent>
-            {(['chat', 'clarify', 'cowork', 'code', 'acp'] as const).map((m) => (
-              <ContextMenuItem
-                key={m}
-                disabled={session.mode === m}
-                onClick={() => {
-                  updateSessionMode(session.id, m)
-                  toast.success(t('sidebar_toast.switchedMode', { mode: m }))
-                }}
-              >
-                {modeIcons[m]}
-                <span className="capitalize">{t(`sidebar.mode.${m}`)}</span>
-              </ContextMenuItem>
-            ))}
+            {sessionModeOptions
+              .filter((mode) => !session.projectId || mode !== 'chat')
+              .map((m) => (
+                <ContextMenuItem
+                  key={m}
+                  disabled={session.mode === m}
+                  onClick={() => {
+                    updateSessionMode(session.id, m)
+                    toast.success(t('sidebar_toast.switchedMode', { mode: m }))
+                  }}
+                >
+                  {modeIcons[m]}
+                  <span className="capitalize">{t(`sidebar.mode.${m}`)}</span>
+                </ContextMenuItem>
+              ))}
           </ContextMenuSubContent>
         </ContextMenuSub>
         <ContextMenuSeparator />
@@ -1316,9 +1318,7 @@ export function SessionListPanel(): React.JSX.Element {
             <button
               className={cn(
                 'relative mb-1 flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs font-medium transition-colors',
-                isActiveProject
-                  ? 'text-foreground'
-                  : 'text-muted-foreground hover:text-foreground'
+                isActiveProject ? 'text-foreground' : 'text-muted-foreground hover:text-foreground'
               )}
               onClick={() => setActiveProject(group.project.id)}
               title={group.project.name}
@@ -1345,10 +1345,10 @@ export function SessionListPanel(): React.JSX.Element {
               {group.project.sshConnectionId ? (
                 <span
                   className="inline-flex shrink-0 items-center gap-0.5 rounded border border-sky-500/30 bg-sky-500/10 px-1 py-px text-[9px] font-semibold leading-none text-sky-600 dark:text-sky-300"
-                  title="SSH project"
+                  title={t('sidebar.sshProject')}
                 >
                   <Server className="size-2.5" />
-                  SSH
+                  {t('sidebar.sshLabel')}
                 </span>
               ) : null}
               {group.project.pinned && (
@@ -1655,7 +1655,8 @@ export function SessionListPanel(): React.JSX.Element {
                 {deleteTarget?.queueCount ? (
                   <p>
                     {t('sidebar.deleteQueuedMessagesNotice', {
-                      defaultValue: 'This session has {{count}} queued messages that will also be deleted.',
+                      defaultValue:
+                        'This session has {{count}} queued messages that will also be deleted.',
                       count: deleteTarget.queueCount
                     })}
                   </p>
@@ -1663,7 +1664,8 @@ export function SessionListPanel(): React.JSX.Element {
                 {deleteTargetRunningInfo?.hasRunning && (
                   <p className="font-medium text-destructive">
                     {t('sidebar.deleteRunningNotice', {
-                      defaultValue: 'This session has running tasks that will be stopped before deletion.'
+                      defaultValue:
+                        'This session has running tasks that will be stopped before deletion.'
                     })}
                   </p>
                 )}
@@ -1781,6 +1783,8 @@ export function SessionListPanel(): React.JSX.Element {
         }}
         workingFolder={folderPickerProject?.workingFolder ?? undefined}
         sshConnectionId={folderPickerProject?.sshConnectionId ?? null}
+        projectName={folderPickerTarget?.type === 'create' ? t('sidebar.newProject') : undefined}
+        createMode={folderPickerTarget?.type === 'create'}
         onSelectLocalFolder={async (folderPath) => {
           if (folderPickerTarget?.type === 'create') {
             await handleCreateProjectWithDirectory(folderPath, null)

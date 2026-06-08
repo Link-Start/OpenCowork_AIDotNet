@@ -405,9 +405,39 @@ const cronListHandler: ToolHandler = {
 
 // ── Registration ─────────────────────────────────────────────────
 
+const cronCreateHandler: ToolHandler = {
+  ...cronAddHandler,
+  definition: {
+    ...cronAddHandler.definition,
+    name: 'CronCreate',
+    description: 'Code-agent-compatible alias for CronAdd. Schedule a background agent task.'
+  }
+}
+
+const cronDeleteHandler: ToolHandler = {
+  definition: {
+    name: 'CronDelete',
+    description: 'Code-agent-compatible alias for CronRemove. Delete a scheduled cron job by ID.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Cron job ID' },
+        jobId: { type: 'string', description: 'Cron job ID' }
+      }
+    }
+  },
+  execute: async (input, ctx) => {
+    const jobId = String(input.id ?? input.jobId ?? '')
+    return cronRemoveHandler.execute({ jobId }, ctx)
+  },
+  requiresApproval: () => false
+}
+
 export function registerCronTools(): void {
   toolRegistry.register(cronAddHandler)
+  toolRegistry.register(cronCreateHandler)
   toolRegistry.register(cronUpdateHandler)
   toolRegistry.register(cronRemoveHandler)
+  toolRegistry.register(cronDeleteHandler)
   toolRegistry.register(cronListHandler)
 }

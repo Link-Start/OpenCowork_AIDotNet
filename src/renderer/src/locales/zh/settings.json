@@ -5,6 +5,7 @@
     "poweredBy": "Powered by OpenCowork",
     "groups": {
       "foundation": "基础",
+      "system": "系统",
       "ai": "AI 能力",
       "extensions": "扩展与集成",
       "about": "关于"
@@ -19,34 +20,40 @@
     "dark": "深色",
     "system": "跟随系统",
     "themePreset": {
-      "title": "主题预设",
-      "desc": "选择一套内置配色。会全局作用到应用界面、SSH 工作区和终端。",
-      "globalHint": "全局生效",
-      "current": "当前",
+      "title": "界面配色",
+      "desc": "主界面、SSH 主机库和 SFTP 会跟随该配色；SSH 终端可选择同系列终端配色。",
+      "terminalTitle": "SSH 终端配色",
+      "terminalDesc": "为连接态标题栏、终端背景和状态面板选择配套配色。",
+      "terminalPreview": "$ ssh user@host",
+      "terminalConnectedPreview": "已连接 · 22/tcp",
+      "matchApp": "跟随界面配色",
+      "matched": "已跟随",
+      "globalHint": "界面",
+      "current": "使用中",
       "presets": {
         "mulberry": {
-          "label": "Shadcn 默认",
-          "desc": "中性的黑白灰默认风格，深色保持干净对比，浅色则是白底配浅灰层级。"
+          "label": "黑曜灰",
+          "desc": "黑白灰高对比配色，主机库清爽，终端保持克制和清晰。"
         },
         "studio": {
-          "label": "Studio 蓝调",
-          "desc": "冷静的蓝灰工作台，适合长时间编码和主机管理。"
+          "label": "远航蓝",
+          "desc": "蓝灰工作台配色，适合长时间编码、会话管理和主机维护。"
         },
         "graphite": {
-          "label": "Graphite 石墨",
-          "desc": "更克制的中性色界面，强调对比和专业感。"
+          "label": "石墨工具",
+          "desc": "中性石墨配色，减少干扰，突出专业工具的层级和边界。"
         },
         "ocean": {
-          "label": "Ocean 深海",
-          "desc": "青蓝层次更强，终端和状态面板会更有纵深感。"
+          "label": "深海青",
+          "desc": "青蓝纵深配色，让终端、状态面板和文件区更有空间感。"
         },
         "forest": {
-          "label": "Forest 松林",
-          "desc": "偏柔和的绿色系，适合持续盯着终端和日志。"
+          "label": "松林绿",
+          "desc": "柔和绿色配色，适合持续盯着终端、日志和远端任务。"
         },
         "dawn": {
-          "label": "Dawn 暖曦",
-          "desc": "暖铜橙色系，在浅色模式下更有温度和层次。"
+          "label": "暖曦橙",
+          "desc": "暖铜橙配色，浅色更有温度，深色更沉稳。"
         }
       }
     },
@@ -170,6 +177,117 @@
       "noSessions": "没有可用的会话"
     }
   },
+  "sync": {
+    "title": "同步",
+    "subtitle": "通过 WebDAV 进行 OpenCowork 数据记录级同步。",
+    "loading": "正在加载同步设置...",
+    "provider": {
+      "title": "同步提供商",
+      "subtitle": "v1 暂时支持 WebDAV。"
+    },
+    "form": {
+      "displayName": "显示名称",
+      "serverUrl": "服务器地址",
+      "username": "用户名",
+      "password": "密码 / 应用密码",
+      "remoteDir": "远端目录",
+      "interval": "自动同步间隔（分钟）",
+      "retention": "远端备份保留数量",
+      "autoSync": "自动同步",
+      "autoSyncDesc": "按配置的间隔自动运行。"
+    },
+    "actions": {
+      "test": "测试",
+      "save": "保存",
+      "pull": "仅拉取",
+      "push": "仅上传",
+      "syncNow": "立即同步"
+    },
+    "status": {
+      "title": "状态",
+      "device": "设备：{{deviceId}}",
+      "lastRun": "最近同步",
+      "remoteUpdated": "远端更新时间",
+      "downloaded": "已下载",
+      "conflicts": "冲突",
+      "success": "数据已同步。"
+    },
+    "confirm": {
+      "pushTitle": "将本地数据上传到 WebDAV？",
+      "pullTitle": "将远端数据拉取到此设备？",
+      "pushDesc": "会先创建远端备份，然后覆盖远端同步状态。",
+      "pullDesc": "远端记录会被应用到此设备。",
+      "confirm": "继续"
+    },
+    "conflicts": {
+      "title": "冲突",
+      "subtitle": "为每条记录选择保留本地还是使用远端。",
+      "apply": "应用选择",
+      "local": "本地",
+      "remote": "远端"
+    },
+    "toast": {
+      "loadFailed": "加载同步设置失败：{{error}}",
+      "saved": "同步设置已保存",
+      "saveFailed": "保存同步设置失败：{{error}}",
+      "testSuccess": "WebDAV 连接正常",
+      "testFailed": "连接失败",
+      "success": "同步完成",
+      "conflict": "同步需要处理冲突",
+      "chooseAll": "请为每个冲突选择处理方式"
+    }
+  },
+  "system": {
+    "title": "系统设置",
+    "subtitle": "Shell 运行时、代理与系统级执行偏好",
+    "platform": "当前系统：{{platform}}",
+    "shell": {
+      "endpoint": {
+        "title": "Shell 执行端",
+        "desc": "选择 OpenCowork 在 Bash 工具调用中使用哪个 shell。可选项会根据当前操作系统过滤。",
+        "selectLabel": "可用 Shell",
+        "options": {
+          "auto": {
+            "label": "自动（系统默认）",
+            "desc": "使用应用默认解析：macOS/Linux 优先 SHELL/zsh/bash/sh，Windows 使用系统命令 shell。"
+          },
+          "zsh": {
+            "label": "zsh（/bin/zsh）",
+            "desc": "前台和后台 Bash 工具执行都使用 zsh。"
+          },
+          "bash": {
+            "label": "bash（/bin/bash）",
+            "desc": "前台和后台 Bash 工具执行都使用 bash。"
+          },
+          "sh": {
+            "label": "sh（/bin/sh）",
+            "desc": "前台和后台 Bash 工具执行都使用 POSIX sh。"
+          },
+          "powershell": {
+            "label": "Windows PowerShell",
+            "desc": "在 Windows 上前台和后台 Bash 工具执行都使用 powershell.exe。"
+          },
+          "pwsh": {
+            "label": "PowerShell 7",
+            "desc": "在 Windows 上前台和后台 Bash 工具执行都使用 pwsh.exe。"
+          },
+          "cmd": {
+            "label": "命令提示符",
+            "desc": "在 Windows 上前台和后台 Bash 工具执行都使用 cmd.exe。"
+          },
+          "custom": {
+            "label": "自定义可执行文件",
+            "desc": "使用自定义 shell 可执行文件路径或命令名。"
+          }
+        }
+      },
+      "customPath": "自定义 Shell 可执行文件",
+      "customPlaceholderPosix": "/opt/homebrew/bin/zsh",
+      "customPlaceholderWindows": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+      "resolvedShell": "当前解析：{{shell}}",
+      "resolvedAuto": "当前解析：自动，将在执行时选择"
+    }
+  },
   "memory": {
     "title": "全局人格与记忆",
     "subtitle": "管理 ~/.open-cowork 下的 SOUL.md、USER.md、MEMORY.md 和每日记忆文件",
@@ -200,6 +318,89 @@
       "user": "记录你的长期偏好、协作方式和背景。",
       "memory": "沉淀跨项目长期记忆与稳定决策。",
       "daily": "记录今天的短期上下文，后续可整理进 MEMORY.md。"
+    },
+    "auto": {
+      "title": "自动记忆",
+      "subtitle": "自动从已完成的主会话中提炼安全、去重后的记忆。",
+      "enabled": "已启用",
+      "refresh": "刷新",
+      "summaryBudget": "摘要预算 Token",
+      "runSession": "执行本会话",
+      "runRollup": "执行每日提升",
+      "dailyRollupEnabled": "在合适时将昨天的 daily memory 提升为长期 memory",
+      "roots": "根目录",
+      "noRoot": "暂无根目录",
+      "jobs": "任务",
+      "noJobs": "暂无管线任务",
+      "scopeMode": "作用域模式",
+      "hybrid": "混合",
+      "hybridHint": "全局加当前项目；冲突时项目记忆优先。",
+      "empty": "暂无自动记忆记录。",
+      "noTargetPath": "没有目标路径",
+      "undo": "撤销",
+      "loadFailed": "加载自动记忆记录失败",
+      "sessionRunComplete": "自动记忆执行完成",
+      "sessionRunFailed": "自动记忆执行失败",
+      "rollupComplete": "每日提升完成",
+      "rollupFailed": "每日提升失败",
+      "undoComplete": "已撤销记忆写入",
+      "undoFailed": "撤销记忆写入失败",
+      "status": {
+        "written": "已写入",
+        "filtered": "已过滤",
+        "skipped": "已跳过",
+        "error": "错误",
+        "undone": "已撤销"
+      },
+      "kind": {
+        "user_preference": "用户偏好",
+        "workflow_habit": "工作习惯",
+        "project_decision": "项目决策",
+        "recurring_error": "重复错误",
+        "follow_up": "后续跟进",
+        "daily_context": "每日上下文"
+      },
+      "target": {
+        "global_user": "全局 USER.md",
+        "global_memory": "全局 MEMORY.md",
+        "project_user": "项目 USER.md",
+        "project_memory": "项目 MEMORY.md",
+        "global_daily": "全局每日记忆",
+        "project_daily": "项目每日记忆",
+        "summary_cache": "摘要缓存"
+      },
+      "filterReason": {
+        "disabled": "已禁用",
+        "unsupported_scope": "作用域不支持",
+        "missing_provider": "缺少 provider",
+        "unsupported_provider": "provider 不支持",
+        "invalid_json": "JSON 无效",
+        "no_candidates": "没有候选项",
+        "low_confidence": "置信度过低",
+        "secret": "包含敏感密钥",
+        "private_identity": "包含私密身份信息",
+        "temporary_chatter": "临时闲聊",
+        "duplicate": "重复内容",
+        "missing_target": "缺少目标",
+        "unsafe_target": "目标不安全",
+        "write_error": "写入失败",
+        "rollup_already_processed": "已被 rollup 提升",
+        "summary_not_needed": "无需生成摘要",
+        "undo_conflict": "撤销冲突"
+      },
+      "jobKind": {
+        "stage1": "第一阶段提取",
+        "phase2": "第二阶段合并",
+        "daily_rollup": "每日提升"
+      },
+      "jobStatus": {
+        "pending": "等待中",
+        "running": "运行中",
+        "succeeded": "成功",
+        "succeeded_no_output": "无输出",
+        "skipped": "已跳过",
+        "failed": "失败"
+      }
     }
   },
   "analytics": {
@@ -218,6 +419,7 @@
     "outputTokens": "输出 Token",
     "cacheCreationTokens": "缓存创建 Token",
     "cacheReadTokens": "缓存命中 Token",
+    "cacheHitRate": "缓存命中率",
     "costUsd": "消费 (USD)",
     "avgTtft": "平均首 Token",
     "avgTotal": "平均总耗时",
@@ -361,6 +563,21 @@
       "clearingCookies": "清理中...",
       "cookiesCleared": "浏览器 Cookie 已清理",
       "cookiesClearFailed": "清理浏览器 Cookie 失败",
+      "userDataReuse": "模拟本机浏览器 Profile",
+      "userDataReuseDesc": "默认开启。内置浏览器会使用所选浏览器的身份，同时将 OpenCowork 存储保持在隔离目录，避免写入本机浏览器数据。",
+      "userDataSource": "浏览器数据来源",
+      "userDataSourceDesc": "选择 OpenCowork 优先尝试复用哪一个已安装浏览器的 Profile。",
+      "sources": {
+        "auto": "自动检测",
+        "chrome": "Google Chrome",
+        "edge": "Microsoft Edge",
+        "brave": "Brave",
+        "chromium": "Chromium"
+      },
+      "activeProfile": "检测到的来源 Profile：{{browserName}} / {{profileName}} — {{path}}",
+      "profileFallback": "未检测到所选来源的 Profile，当前使用 OpenCowork 自己的浏览器身份。",
+      "isolatedStorage": "隔离存储目录：{{path}}",
+      "restartRequired": "重启 OpenCowork 后，此浏览器 Profile 模式才会完全生效。",
       "blockedDomains": "禁止访问域名",
       "blockedDomainsDesc": "命中的域名及其子域名会被拒绝导航。",
       "allowedDomains": "允许访问域名",
@@ -615,10 +832,14 @@
     "modelManagementHint": "服务商下的模型会优先继承这里的默认参数；服务商内的后续修改只影响当前副本。",
     "modelManagementDuplicate": "模型 ID 已存在：{{id}}",
     "modelManagementDeleteConfirm": "删除全局模型「{{name}}」？后续不会再自动补回。",
+    "modelManagementPresetProvider": "预置",
+    "modelManagementCustomProvider": "自定义",
+    "modelManagementDefaultsApplied": "已复用模型管理参数：{{name}}",
+    "allModelProviders": "全部服务商",
     "enableAllModels": "全部启用",
     "disableAllModels": "全部禁用",
     "searchModels": "搜索模型...",
-    "searchManagedModels": "搜索全局模型...",
+    "searchManagedModels": "搜索模型/服务商...",
     "searchProviders": "搜索服务商...",
     "noManagedModels": "暂无全局模型",
     "noMatchResults": "无匹配结果",
@@ -700,7 +921,6 @@
     },
     "promptCache": "Prompt 缓存（Responses）",
     "systemPromptCache": "System 缓存（Anthropic）",
-
     "capabilities": "能力",
     "supportsVision": "支持视觉（图片输入）",
     "supportsFunctionCall": "支持函数调用",
@@ -747,7 +967,7 @@
     "oauthTabManual": "手动导入",
     "copyAccountJson": "复制账户 JSON",
     "copyAccountJsonSuccess": "已复制到剪贴板",
-    "copyAccountJsonNoToken": "未登录，无法复制",
+    "copyAccountJsonNoToken": "请先完成登录",
     "copyAccountJsonFailed": "复制失败",
     "openLink": "打开链接",
     "oauthVerificationUrl": "验证地址",
@@ -783,16 +1003,6 @@
     "copilotChatDisabled": "未启用",
     "premiumRequestMultiplier": "Premium 倍率",
     "availablePlans": "可用计划",
-    "oauthTabConnect": "OAuth 授权",
-    "oauthTabManual": "手动导入",
-    "fetchQuota": "刷新配额",
-    "fetchingQuota": "刷新中...",
-    "quotaFetched": "配额已更新",
-    "quotaFetchFailed": "获取配额失败",
-    "copyAccountJson": "复制账户 JSON",
-    "copyAccountJsonSuccess": "已复制到剪贴板",
-    "copyAccountJsonNoToken": "请先完成登录",
-    "copyAccountJsonFailed": "复制失败",
     "channelLogin": "渠道商登录",
     "channelConnected": "已连接",
     "channelNotConnected": "未连接",
@@ -828,7 +1038,7 @@
     "channelRequired": "请先完成渠道商验证"
   },
   "channel": {
-    "title": "聊天频道",
+    "title": "频道",
     "subtitle": "配置和管理聊天频道",
     "search": "搜索频道...",
     "addChannel": "添加频道",
@@ -837,11 +1047,11 @@
     "addPluginDesc": "选择要添加的频道提供商。",
     "added": "频道已添加",
     "removed": "频道已移除",
-    "botName": "机器人名称",
+    "botName": "频道名称",
     "systemPrompt": "系统提示词",
     "model": "回复模型",
     "modelDefault": "使用全局默认",
-    "modelHint": "频道自动回复所用模型。保留默认将使用当前全局模型。",
+    "modelHint": "频道自动回复所使用的模型。保留默认值将使用当前全局模型。",
     "features": "功能",
     "autoReply": "自动回复",
     "autoReplyDesc": "收到消息后自动调用 Agent 回复",
@@ -867,7 +1077,7 @@
     "remove": "移除",
     "noChannels": "未配置频道",
     "noPlugins": "未配置频道",
-    "selectToConfig": "选择一个频道开始配置",
+    "selectToConfig": "选择一个频道进行配置",
     "security": "安全与权限",
     "allowReadHome": "读取主目录",
     "allowReadHomeDesc": "允许读取主目录 (~) 下的文件",
@@ -877,40 +1087,38 @@
     "allowShell": "Shell 执行",
     "allowShellDesc": "允许执行终端命令（高风险）",
     "allowWriteOutside": "写入工作目录外",
-    "allowWriteOutsideDesc": "允许在频道目录之外写入文件",
+    "allowWriteOutsideDesc": "允许在频道目录之外写入文件。",
     "allowSubAgents": "子代理工具",
     "allowSubAgentsDesc": "允许使用 Task 等子代理工具",
     "custom": "自定义",
     "wsUrl": "WS 中继地址",
     "feishu": {
-      "appId": "飞书 App ID",
-      "appSecret": "飞书 App Secret"
+      "appId": "App ID",
+      "appSecret": "App Secret"
     },
     "dingtalk": {
-      "appKey": "钉钉 App Key",
-      "appSecret": "钉钉 App Secret",
-      "cardTemplateId": "钉钉卡片模板 ID"
+      "appKey": "App Key",
+      "appSecret": "App Secret",
+      "cardTemplateId": "卡片模板 ID"
     },
     "wecom": {
-      "corpId": "企业微信 Corp ID",
-      "secret": "企业微信 Secret",
-      "agentId": "企业微信 Agent ID"
+      "corpId": "企业 ID",
+      "secret": "Secret",
+      "agentId": "Agent ID"
     },
     "qq": {
-      "appId": "QQ App ID",
-      "clientSecret": "QQ Client Secret",
-      "useSandbox": "QQ 沙箱开关",
-      "markdownSupport": "QQ Markdown 开关"
+      "appId": "App ID",
+      "clientSecret": "Client Secret"
     },
     "telegram": {
-      "botToken": "Telegram Bot Token"
+      "botToken": "Bot Token"
     },
     "discord": {
-      "botToken": "Discord Bot Token"
+      "botToken": "Bot Token"
     },
     "whatsapp": {
-      "phoneNumberId": "WhatsApp Phone Number ID",
-      "accessToken": "WhatsApp Access Token"
+      "phoneNumberId": "Phone Number ID",
+      "accessToken": "Access Token"
     },
     "weixin": {
       "baseUrl": "微信网关地址",
@@ -924,13 +1132,16 @@
       "bindingDesc": "通过扫码获取 token，并启用长轮询收发消息。",
       "bind": "绑定微信",
       "rebind": "重新绑定",
-      "refreshQr": "刷新二维码",
       "bindingInProgress": "绑定中...",
       "baseUrlMissing": "请先填写微信网关地址",
       "loginStarting": "正在生成二维码...",
       "scanHint": "请使用微信扫码确认",
       "loginSuccess": "微信绑定成功",
-      "loginFailed": "微信绑定失败"
+      "loginFailed": "微信绑定失败",
+      "refreshQr": "刷新二维码",
+      "qrCodeFailed": "获取二维码失败",
+      "qrAlt": "微信二维码",
+      "sessionLabel": "会话"
     },
     "toolsDesc": {
       "PluginSendMessage": "通过频道发送消息",
@@ -952,53 +1163,25 @@
       "FeishuBitableUpdateRecords": "更新数据表记录",
       "FeishuBitableDeleteRecords": "删除数据表记录"
     },
-    "feishu": {
-      "appId": "App ID",
-      "appSecret": "App Secret"
-    },
-    "dingtalk": {
-      "appKey": "App Key",
-      "appSecret": "App Secret",
-      "cardTemplateId": "卡片模板 ID"
-    },
-    "wecom": {
-      "corpId": "企业 ID",
-      "secret": "Secret",
-      "agentId": "Agent ID"
-    },
-    "telegram": {
-      "botToken": "Bot Token"
-    },
-    "discord": {
-      "botToken": "Bot Token"
-    },
-    "whatsapp": {
-      "phoneNumberId": "Phone Number ID",
-      "accessToken": "Access Token"
-    },
-    "qq": {
-      "appId": "App ID",
-      "clientSecret": "Client Secret"
-    },
-    "weixin": {
-      "baseUrl": "微信网关地址",
-      "routeTag": "SKRouteTag",
-      "token": "微信 Token",
-      "accountId": "微信账号 ID",
-      "userId": "微信用户 ID",
-      "binding": "微信绑定",
-      "bound": "已绑定官方微信账号",
-      "unbound": "未绑定官方微信账号",
-      "bindingDesc": "通过扫码获取 token，并启用长轮询收发消息。",
-      "bind": "绑定微信",
-      "rebind": "重新绑定",
-      "bindingInProgress": "绑定中...",
-      "baseUrlMissing": "请先填写微信网关地址",
-      "loginStarting": "正在生成二维码...",
-      "scanHint": "请使用微信扫码确认",
-      "loginSuccess": "微信绑定成功",
-      "loginFailed": "微信绑定失败"
-    }
+    "platforms": "平台",
+    "categoryChina": "中国",
+    "categoryInternational": "国际",
+    "plugin": "插件",
+    "botNameDesc": "用于在项目中识别这个聊天频道。",
+    "platform": "平台",
+    "replyModelShort": "模型",
+    "autoSaveHint": "修改后自动保存",
+    "autoSaveFooter": "频道配置会自动保存，并在项目内立即生效。",
+    "advanced": "高级设置",
+    "advancedDesc": "展开可配置回复策略、工具能力和权限边界。",
+    "advancedHint": "可折叠",
+    "featuresDesc": "自动回复、流式回复和自动启动策略。",
+    "toolsPanelDesc": "控制该频道可用的专属工具。",
+    "securityDesc": "限制频道的读写范围、命令执行和子代理能力。",
+    "bound": "已绑定",
+    "boundCurrentProject": "已绑定到当前项目",
+    "unboundProject": "未绑定项目",
+    "noProjectChannels": "当前项目没有可配置的频道"
   },
   "mcp": {
     "title": "MCP 服务器",
@@ -1082,6 +1265,14 @@
     "testFailed": "连接失败：{{error}}",
     "configSummary": "配置摘要",
     "notSet": "未设置"
+  },
+  "soulmarket": {
+    "title": "SOUL 市场",
+    "desc": "使用共享的 Skills 市场 API 密钥浏览 OpenCoWork SOUL。",
+    "apiKey": "API 密钥",
+    "getApiKey": "获取 API 密钥",
+    "openDocs": "打开文档",
+    "refresh": "刷新市场"
   },
   "websearch": {
     "title": "联网搜索",

@@ -34,12 +34,15 @@ export interface DrawGifInputSnapshot {
 export interface DrawRunMeta {
   providerId?: string
   modelId?: string
+  requestType?: string
+  baseUrl?: string
   gif?: DrawGifInputSnapshot
 }
 
 export interface DrawRunError {
   code: ImageErrorCode
   message: string
+  details?: string
 }
 
 export interface DrawRun {
@@ -53,6 +56,8 @@ export interface DrawRun {
   isGenerating: boolean
   images: DrawRunImage[]
   error: DrawRunError | null
+  previewImage?: DrawRunImage
+  previewImageIndex?: number
 }
 
 interface DrawRunRow {

@@ -10,7 +10,7 @@ export interface ToolContext {
   signal: AbortSignal
   ipc: IPCClient
   /** Files read during this run, keyed by normalized resolved path. */
-  readFileHistory?: Map<string, number>
+  readFileHistory?: Map<string, FileReadSnapshot>
   /** Per-run inline tool handlers that should shadow the global registry. */
   inlineToolHandlers?: Record<string, ToolHandler>
   /** The tool_use block id currently being executed (set by agent-loop) */
@@ -30,13 +30,20 @@ export interface ToolContext {
   pluginSenderName?: string
   /** Mutable shared state bag — survives { ...toolCtx } spread copies in agent-loop.
    *  Used for per-run flags like deliveryUsed that must persist across tool calls. */
-  sharedState?: { deliveryUsed?: boolean }
+  sharedState?: { deliveryUsed?: boolean; bashCwd?: string }
   /** Channel security permissions for tool approval checks. */
   channelPermissions?: ChannelPermissions
   /** Channel working home dir for path-based access control */
   channelHomedir?: string
   /** Per-run local tool handlers that should not be exposed globally */
   localToolHandlers?: Record<string, ToolHandler>
+}
+
+export interface FileReadSnapshot {
+  exists: boolean
+  type?: 'file' | 'directory' | 'other' | null
+  size?: number | null
+  mtimeMs?: number | null
 }
 
 export interface IPCClient {

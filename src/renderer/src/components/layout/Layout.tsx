@@ -39,6 +39,16 @@ const SkillsPage = lazy(async () => {
   return { default: mod.SkillsPage }
 })
 
+const SoulsPage = lazy(async () => {
+  const mod = await import('@renderer/components/souls/SoulsPage')
+  return { default: mod.SoulsPage }
+})
+
+const SyncPage = lazy(async () => {
+  const mod = await import('@renderer/components/sync/SyncPage')
+  return { default: mod.SyncPage }
+})
+
 const ResourcesPage = lazy(async () => {
   const mod = await import('@renderer/components/resources/ResourcesPage')
   return { default: mod.ResourcesPage }
@@ -152,7 +162,7 @@ export function Layout({ updateInfo, onOpenUpdateDialog }: LayoutProps): React.J
   const handleCreateChatSession = useCallback((): void => {
     const store = useChatStore.getState()
     const uiStore = useUIStore.getState()
-    store.setActiveSession(null)
+    store.setActiveProject(null)
     uiStore.setMode('chat')
     uiStore.navigateToHome()
   }, [])
@@ -253,6 +263,8 @@ export function Layout({ updateInfo, onOpenUpdateDialog }: LayoutProps): React.J
   const conversationGuideOpen = useUIStore((s) => s.conversationGuideOpen)
   const setConversationGuideOpen = useUIStore((s) => s.setConversationGuideOpen)
   const skillsPageOpen = useUIStore((s) => s.skillsPageOpen)
+  const soulsPageOpen = useUIStore((s) => s.soulsPageOpen)
+  const syncPageOpen = useUIStore((s) => s.syncPageOpen)
   const resourcesPageOpen = useUIStore((s) => s.resourcesPageOpen)
   const drawPageOpen = useUIStore((s) => s.drawPageOpen)
   const translatePageOpen = useUIStore((s) => s.translatePageOpen)
@@ -267,6 +279,12 @@ export function Layout({ updateInfo, onOpenUpdateDialog }: LayoutProps): React.J
     }
     if (skillsPageOpen) {
       return { title: t('navRail.skills', { defaultValue: 'Tools' }), subtitle: null }
+    }
+    if (soulsPageOpen) {
+      return { title: t('navRail.souls', { defaultValue: 'SOUL' }), subtitle: null }
+    }
+    if (syncPageOpen) {
+      return { title: t('navRail.sync', { defaultValue: 'Sync' }), subtitle: null }
     }
     if (settingsPageOpen) {
       return { title: t('navRail.settings', { defaultValue: 'Settings' }), subtitle: null }
@@ -293,7 +311,7 @@ export function Layout({ updateInfo, onOpenUpdateDialog }: LayoutProps): React.J
     }
     if (chatView === 'channels') {
       return {
-        title: t('projectHome.openChannels', { defaultValue: 'Channel' }),
+        title: t('sidebar.projectChannels', { defaultValue: 'Channels' }),
         subtitle: null,
         tooltip: activeProjectWorkingFolder
       }
@@ -326,6 +344,8 @@ export function Layout({ updateInfo, onOpenUpdateDialog }: LayoutProps): React.J
     resourcesPageOpen,
     settingsPageOpen,
     skillsPageOpen,
+    soulsPageOpen,
+    syncPageOpen,
     t,
     tasksPageOpen,
     translatePageOpen
@@ -663,6 +683,24 @@ export function Layout({ updateInfo, onOpenUpdateDialog }: LayoutProps): React.J
                 >
                   <Suspense fallback={<LazyPageFallback />}>
                     <SkillsPage />
+                  </Suspense>
+                </PageTransition>
+              ) : soulsPageOpen ? (
+                <PageTransition
+                  key="souls-page"
+                  className="flex-1 min-w-0 bg-background overflow-hidden"
+                >
+                  <Suspense fallback={<LazyPageFallback />}>
+                    <SoulsPage />
+                  </Suspense>
+                </PageTransition>
+              ) : syncPageOpen ? (
+                <PageTransition
+                  key="sync-page"
+                  className="flex-1 min-w-0 bg-background overflow-hidden"
+                >
+                  <Suspense fallback={<LazyPageFallback />}>
+                    <SyncPage />
                   </Suspense>
                 </PageTransition>
               ) : settingsPageOpen ? (

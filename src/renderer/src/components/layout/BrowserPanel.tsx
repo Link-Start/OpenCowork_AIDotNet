@@ -2,9 +2,21 @@ import { useEffect, useRef, useState, useCallback } from 'react'
 import { ArrowLeft, ArrowRight, RefreshCw, Square, Globe, AlertCircle } from 'lucide-react'
 import { Button } from '@renderer/components/ui/button'
 import { useUIStore } from '@renderer/stores/ui-store'
+import { useSettingsStore } from '@renderer/stores/settings-store'
 import { getBrowserAccessDecision } from '@renderer/lib/app-plugin/browser-access'
+import { ipcClient } from '@renderer/lib/ipc/ipc-client'
+import { IPC } from '@renderer/lib/ipc/channels'
+import {
+  describeWebviewOperationError,
+  isPromiseLike,
+  isWebviewConnected,
+  type MaybePromise
+} from '@renderer/lib/browser/webview-helpers'
 import { useTranslation } from 'react-i18next'
-import { BUILTIN_BROWSER_PARTITION } from '../../../../shared/browser-plugin'
+import {
+  BUILTIN_BROWSER_PARTITION,
+  stripElectronFromUserAgent
+} from '../../../../shared/browser-plugin'
 
 export function BrowserPanel({
   sessionId = null,
@@ -27,14 +39,84 @@ export function BrowserPanel({
   const errorInfo = useUIStore((s) => s.getBrowserState(sessionId, projectId).errorInfo)
   const setBrowserErrorInfo = useUIStore((s) => s.setBrowserErrorInfo)
   const setBrowserWebviewRef = useUIStore((s) => s.setBrowserWebviewRef)
+  const browserUserDataReuseEnabled = useSettingsStore((s) => s.browserUserDataReuseEnabled)
 
   const [inputUrl, setInputUrl] = useState(storedUrl)
   const [committedUrl, setCommittedUrl] = useState(storedUrl)
+  const [runtimeBrowserUserDataReuseEnabled, setRuntimeBrowserUserDataReuseEnabled] = useState(
+    browserUserDataReuseEnabled
+  )
+  const [runtimeBrowserUserAgent, setRuntimeBrowserUserAgent] = useState<string | undefined>(
+    browserUserDataReuseEnabled ? stripElectronFromUserAgent(navigator.userAgent) : undefined
+  )
   const webviewRef = useRef<Electron.WebviewTag | null>(null)
-  const webviewSessionProps: Pick<React.ComponentProps<'webview'>, 'partition' | 'allowpopups'> = {
-    partition: BUILTIN_BROWSER_PARTITION,
-    allowpopups: true
+  const initialBrowserUserDataReuseEnabledRef = useRef(browserUserDataReuseEnabled)
+  const webviewUserAgent = runtimeBrowserUserDataReuseEnabled ? runtimeBrowserUserAgent : undefined
+  const webviewSessionProps: Pick<
+    React.ComponentProps<'webview'>,
+    'partition' | 'allowpopups' | 'plugins' | 'useragent'
+  > = {
+    ...(runtimeBrowserUserDataReuseEnabled ? {} : { partition: BUILTIN_BROWSER_PARTITION }),
+    allowpopups: true,
+    plugins: runtimeBrowserUserDataReuseEnabled,
+    ...(webviewUserAgent ? { useragent: webviewUserAgent } : {})
   }
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function loadRuntimeBrowserMode(): Promise<void> {
+      try {
+        const result = (await ipcClient.invoke(IPC.BROWSER_EMULATION_STATUS)) as
+          | { success: true; status: { reuseEnabled: boolean; userAgent: string } }
+          | { success: false; error?: string }
+        if (!cancelled && result.success) {
+          setRuntimeBrowserUserDataReuseEnabled(result.status.reuseEnabled)
+          setRuntimeBrowserUserAgent(result.status.userAgent)
+        }
+      } catch {
+        if (!cancelled) {
+          setRuntimeBrowserUserDataReuseEnabled(initialBrowserUserDataReuseEnabledRef.current)
+          setRuntimeBrowserUserAgent(stripElectronFromUserAgent(navigator.userAgent))
+        }
+      }
+    }
+
+    void loadRuntimeBrowserMode()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const handleWebviewOperationError = useCallback(
+    (action: string, error: unknown): void => {
+      console.warn('[BrowserPanel] Webview operation failed:', {
+        action,
+        message: describeWebviewOperationError(action, error)
+      })
+      setBrowserLoading(false, sessionId, projectId)
+      setBrowserCanGoBack(false, sessionId, projectId)
+      setBrowserCanGoForward(false, sessionId, projectId)
+    },
+    [projectId, sessionId, setBrowserCanGoBack, setBrowserCanGoForward, setBrowserLoading]
+  )
+
+  const runWebviewCommand = useCallback(
+    (action: string, command: (webview: Electron.WebviewTag) => MaybePromise<void>): void => {
+      const wv = webviewRef.current
+      if (!isWebviewConnected(wv)) return
+
+      try {
+        const result = command(wv)
+        if (isPromiseLike(result)) {
+          void Promise.resolve(result).catch((error) => handleWebviewOperationError(action, error))
+        }
+      } catch (error) {
+        handleWebviewOperationError(action, error)
+      }
+    },
+    [handleWebviewOperationError]
+  )
 
   useEffect(() => {
     setBrowserWebviewRef(webviewRef, sessionId, projectId)
@@ -63,7 +145,7 @@ export function BrowserPanel({
       setBrowserErrorInfo(
         {
           code: -10,
-          desc: reason ?? 'Blocked by browser plugin domain rules',
+          desc: reason ?? t('browser.blockedByRules'),
           url
         },
         sessionId,
@@ -71,7 +153,7 @@ export function BrowserPanel({
       )
       setBrowserLoading(false, sessionId, projectId)
     },
-    [projectId, sessionId, setBrowserErrorInfo, setBrowserLoading]
+    [projectId, sessionId, setBrowserErrorInfo, setBrowserLoading, t]
   )
 
   const canNavigateTo = useCallback(
@@ -94,11 +176,22 @@ export function BrowserPanel({
       setBrowserUrl(normalized, sessionId, projectId)
       setBrowserErrorInfo(null, sessionId, projectId)
       const wv = webviewRef.current
-      if (wv) {
-        wv.src = normalized
+      if (isWebviewConnected(wv)) {
+        try {
+          wv.src = normalized
+        } catch (error) {
+          handleWebviewOperationError('navigate', error)
+        }
       }
     },
-    [canNavigateTo, projectId, sessionId, setBrowserUrl, setBrowserErrorInfo]
+    [
+      canNavigateTo,
+      handleWebviewOperationError,
+      projectId,
+      sessionId,
+      setBrowserErrorInfo,
+      setBrowserUrl
+    ]
   )
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>): void => {
@@ -107,14 +200,25 @@ export function BrowserPanel({
 
   const updateNavState = useCallback(() => {
     const wv = webviewRef.current
-    if (!wv) return
-    setBrowserCanGoBack(wv.canGoBack(), sessionId, projectId)
-    setBrowserCanGoForward(wv.canGoForward(), sessionId, projectId)
-  }, [projectId, sessionId, setBrowserCanGoBack, setBrowserCanGoForward])
+    if (!isWebviewConnected(wv)) return
+
+    try {
+      setBrowserCanGoBack(wv.canGoBack(), sessionId, projectId)
+      setBrowserCanGoForward(wv.canGoForward(), sessionId, projectId)
+    } catch (error) {
+      handleWebviewOperationError('read navigation state', error)
+    }
+  }, [
+    handleWebviewOperationError,
+    projectId,
+    sessionId,
+    setBrowserCanGoBack,
+    setBrowserCanGoForward
+  ])
 
   useEffect(() => {
     const wv = webviewRef.current
-    if (!wv) return
+    if (!isWebviewConnected(wv)) return
 
     const onStartLoading = (): void => {
       setBrowserLoading(true, sessionId, projectId)
@@ -202,9 +306,9 @@ export function BrowserPanel({
           variant="ghost"
           size="icon"
           className="size-6"
-          onClick={() => webviewRef.current?.goBack()}
+          onClick={() => runWebviewCommand('go back', (wv) => wv.goBack())}
           disabled={!canGoBack}
-          title="Back"
+          title={t('browser.back')}
         >
           <ArrowLeft className="size-3.5" />
         </Button>
@@ -212,9 +316,9 @@ export function BrowserPanel({
           variant="ghost"
           size="icon"
           className="size-6"
-          onClick={() => webviewRef.current?.goForward()}
+          onClick={() => runWebviewCommand('go forward', (wv) => wv.goForward())}
           disabled={!canGoForward}
-          title="Forward"
+          title={t('browser.forward')}
         >
           <ArrowRight className="size-3.5" />
         </Button>
@@ -223,8 +327,8 @@ export function BrowserPanel({
             variant="ghost"
             size="icon"
             className="size-6"
-            onClick={() => webviewRef.current?.stop()}
-            title="Stop"
+            onClick={() => runWebviewCommand('stop loading', (wv) => wv.stop())}
+            title={t('browser.stop')}
           >
             <Square className="size-3" />
           </Button>
@@ -233,8 +337,8 @@ export function BrowserPanel({
             variant="ghost"
             size="icon"
             className="size-6"
-            onClick={() => webviewRef.current?.reload()}
-            title="Refresh"
+            onClick={() => runWebviewCommand('refresh', (wv) => wv.reload())}
+            title={t('browser.refresh')}
           >
             <RefreshCw className="size-3.5" />
           </Button>
@@ -247,7 +351,7 @@ export function BrowserPanel({
             value={inputUrl}
             onChange={(e) => setInputUrl(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Enter URL..."
+            placeholder={t('browser.urlPlaceholder')}
             spellCheck={false}
           />
         </div>
@@ -258,7 +362,7 @@ export function BrowserPanel({
           className="h-6 px-2 text-[11px]"
           onClick={() => navigate(inputUrl)}
         >
-          Go
+          {t('browser.go')}
         </Button>
       </div>
 
@@ -273,6 +377,7 @@ export function BrowserPanel({
       <div className="relative min-h-0 flex-1">
         {committedUrl && (
           <webview
+            key={runtimeBrowserUserDataReuseEnabled ? 'user-browser-profile' : 'opencowork-profile'}
             ref={webviewRef as React.Ref<Electron.WebviewTag>}
             src={committedUrl}
             className="size-full"
@@ -293,7 +398,7 @@ export function BrowserPanel({
                 size="sm"
                 onClick={() => {
                   setBrowserErrorInfo(null, sessionId, projectId)
-                  webviewRef.current?.reload()
+                  runWebviewCommand('retry load', (wv) => wv.reload())
                 }}
               >
                 {t('rightPanel.browserRetry')}

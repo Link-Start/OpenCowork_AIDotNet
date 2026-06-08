@@ -13,6 +13,11 @@ import {
   LEFT_SIDEBAR_DEFAULT_WIDTH,
   clampLeftSidebarWidth
 } from '@renderer/components/layout/right-panel-defs'
+import {
+  DEFAULT_BROWSER_USER_DATA_SOURCE,
+  normalizeBrowserUserDataSource,
+  type BrowserUserDataSource
+} from '../../../shared/browser-plugin'
 
 export interface ModelBinding {
   providerId: string
@@ -31,11 +36,23 @@ export type PromptRecommendationModelBindings = Record<
 >
 
 export type MainModelSelectionMode = 'auto' | 'manual'
+export type MemoryAutomationWritePolicy = 'auto'
+export type MemoryScopeMode = 'hybrid'
 export type ClarifyPlanModeAutoSwitchTarget = 'off' | 'code' | 'acp'
 export type ProjectDefaultDirectoryMode = 'last-used' | 'custom'
 export type FileDiffViewMode = 'split' | 'inline'
 export type LiveOutputAnimationStyle = 'agile' | 'elegant'
+export type ShellExecutionEndpoint =
+  | 'auto'
+  | 'zsh'
+  | 'bash'
+  | 'sh'
+  | 'powershell'
+  | 'pwsh'
+  | 'cmd'
+  | 'custom'
 export const DEFAULT_THEME_MODE = 'dark' as const
+export const DEFAULT_SHELL_EXECUTION_ENDPOINT: ShellExecutionEndpoint = 'auto'
 const LEGACY_DEFAULT_THEME_MODE = 'system' as const
 const LEGACY_DEFAULT_APP_THEME_PRESET: AppThemePreset = 'studio'
 const LEGACY_DEFAULT_SSH_TERMINAL_THEME_PRESET: SshTerminalThemePreset = 'graphite'
@@ -124,6 +141,52 @@ export function clampMaxParallelToolCalls(value: number): number {
   )
 }
 
+export function normalizeShellExecutionEndpoint(value: unknown): ShellExecutionEndpoint {
+  if (
+    value === 'auto' ||
+    value === 'zsh' ||
+    value === 'bash' ||
+    value === 'sh' ||
+    value === 'powershell' ||
+    value === 'pwsh' ||
+    value === 'cmd' ||
+    value === 'custom'
+  ) {
+    return value
+  }
+  return DEFAULT_SHELL_EXECUTION_ENDPOINT
+}
+
+export function resolveShellExecutable({
+  endpoint,
+  customShellExecutable,
+  platform
+}: {
+  endpoint: ShellExecutionEndpoint
+  customShellExecutable?: string | null
+  platform?: string | null
+}): string | undefined {
+  const normalizedEndpoint = normalizeShellExecutionEndpoint(endpoint)
+  if (normalizedEndpoint === 'auto') return undefined
+  if (normalizedEndpoint === 'custom') {
+    const custom = customShellExecutable?.trim()
+    return custom || undefined
+  }
+
+  const normalizedPlatform = platform?.trim().toLowerCase()
+  if (normalizedPlatform === 'win32') {
+    if (normalizedEndpoint === 'powershell') return 'powershell.exe'
+    if (normalizedEndpoint === 'pwsh') return 'pwsh.exe'
+    if (normalizedEndpoint === 'cmd') return 'cmd.exe'
+    return undefined
+  }
+
+  if (normalizedEndpoint === 'zsh') return '/bin/zsh'
+  if (normalizedEndpoint === 'bash') return '/bin/bash'
+  if (normalizedEndpoint === 'sh') return '/bin/sh'
+  return undefined
+}
+
 export function getReasoningEffortKey(
   providerId?: string | null,
   modelId?: string | null
@@ -180,15 +243,33 @@ interface SettingsStore {
   reasoningEffortByModel: Record<string, ReasoningEffortLevel>
   teamToolsEnabled: boolean
   builtinBrowserEnabled: boolean
+  browserUserDataReuseEnabled: boolean
+  browserUserDataSource: BrowserUserDataSource
   contextCompressionEnabled: boolean
   editorWorkspaceEnabled: boolean
   editorRemoteLanguageServiceEnabled: boolean
   maxParallelToolCalls: number
   toolResultFormat: 'toon' | 'json'
   fileDiffViewMode: FileDiffViewMode
+  shellExecutionEndpoint: ShellExecutionEndpoint
+  customShellExecutable: string
   userName: string
   userAvatar: string
   conversationGuideSeen: boolean
+  memoryAutomationEnabled: boolean
+  memoryAutomationWritePolicy: MemoryAutomationWritePolicy
+  memoryAutomationMainSessionsOnly: boolean
+  memoryAutomationSummaryBudgetTokens: number
+  memoryAutomationDailyRollupEnabled: boolean
+  memoryUseMemories: boolean
+  memoryGenerateMemories: boolean
+  memoryScopeMode: MemoryScopeMode
+  memoryMaxRolloutsPerStartup: number
+  memoryMinRolloutIdleHours: number
+  memoryMaxRawMemoriesForConsolidation: number
+  memoryMaxUnusedDays: number
+  memorySummaryBudgetTokens: number
+  memoryDailyRollupEnabled: boolean
 
   // Appearance Settings
   backgroundColor: string
@@ -271,15 +352,33 @@ export const useSettingsStore = create<SettingsStore>()(
       reasoningEffortByModel: {},
       teamToolsEnabled: false,
       builtinBrowserEnabled: true,
+      browserUserDataReuseEnabled: true,
+      browserUserDataSource: DEFAULT_BROWSER_USER_DATA_SOURCE,
       contextCompressionEnabled: true,
       editorWorkspaceEnabled: false,
       editorRemoteLanguageServiceEnabled: false,
       maxParallelToolCalls: DEFAULT_MAX_PARALLEL_TOOL_CALLS,
       toolResultFormat: 'toon',
       fileDiffViewMode: 'split',
+      shellExecutionEndpoint: DEFAULT_SHELL_EXECUTION_ENDPOINT,
+      customShellExecutable: '',
       userName: '',
       userAvatar: '',
       conversationGuideSeen: false,
+      memoryAutomationEnabled: true,
+      memoryAutomationWritePolicy: 'auto',
+      memoryAutomationMainSessionsOnly: true,
+      memoryAutomationSummaryBudgetTokens: 12_000,
+      memoryAutomationDailyRollupEnabled: true,
+      memoryUseMemories: true,
+      memoryGenerateMemories: true,
+      memoryScopeMode: 'hybrid',
+      memoryMaxRolloutsPerStartup: 8,
+      memoryMinRolloutIdleHours: 0,
+      memoryMaxRawMemoriesForConsolidation: 500,
+      memoryMaxUnusedDays: 180,
+      memorySummaryBudgetTokens: 12_000,
+      memoryDailyRollupEnabled: true,
 
       // Appearance Settings
       backgroundColor: '',
@@ -342,7 +441,7 @@ export const useSettingsStore = create<SettingsStore>()(
     }),
     {
       name: 'opencowork-settings',
-      version: 19,
+      version: 22,
       storage: createJSONStorage(() => ipcStorage),
       migrate: (persisted: unknown, version: number) => {
         const state = persisted as Record<string, unknown>
@@ -429,7 +528,6 @@ export const useSettingsStore = create<SettingsStore>()(
         if (!isAppThemePreset(state.themePreset)) {
           state.themePreset = DEFAULT_APP_THEME_PRESET
         } else if (
-          state.themePreset !== DEFAULT_APP_THEME_PRESET ||
           (version < 17 && matchesLegacyThemeDefaults) ||
           (version < 18 && matchesV17ThemeDefaults) ||
           (version < 19 && matchesV18ThemeDefaults)
@@ -439,7 +537,6 @@ export const useSettingsStore = create<SettingsStore>()(
         if (!isAppThemePreset(state.sshTerminalThemePreset)) {
           state.sshTerminalThemePreset = DEFAULT_SSH_TERMINAL_THEME_PRESET
         } else if (
-          state.sshTerminalThemePreset !== DEFAULT_SSH_TERMINAL_THEME_PRESET ||
           (version < 17 && matchesLegacyThemeDefaults) ||
           (version < 18 && matchesV17ThemeDefaults) ||
           (version < 19 && matchesV18ThemeDefaults)
@@ -502,8 +599,72 @@ export const useSettingsStore = create<SettingsStore>()(
         if (state.fileDiffViewMode === undefined) {
           state.fileDiffViewMode = 'split'
         }
+        if (state.browserUserDataReuseEnabled === undefined) {
+          state.browserUserDataReuseEnabled = true
+        }
+        state.browserUserDataSource = normalizeBrowserUserDataSource(state.browserUserDataSource)
+        state.shellExecutionEndpoint = normalizeShellExecutionEndpoint(state.shellExecutionEndpoint)
+        if (typeof state.customShellExecutable !== 'string') {
+          state.customShellExecutable = ''
+        }
         if (state.conversationGuideSeen === undefined) {
           state.conversationGuideSeen = false
+        }
+        if (state.memoryAutomationEnabled === undefined) {
+          state.memoryAutomationEnabled = true
+        }
+        state.memoryAutomationWritePolicy = 'auto'
+        if (state.memoryAutomationMainSessionsOnly === undefined) {
+          state.memoryAutomationMainSessionsOnly = true
+        }
+        if (
+          state.memoryAutomationSummaryBudgetTokens === undefined ||
+          typeof state.memoryAutomationSummaryBudgetTokens !== 'number'
+        ) {
+          state.memoryAutomationSummaryBudgetTokens = 12_000
+        }
+        if (state.memoryAutomationDailyRollupEnabled === undefined) {
+          state.memoryAutomationDailyRollupEnabled = true
+        }
+        if (state.memoryUseMemories === undefined) {
+          state.memoryUseMemories = true
+        }
+        if (state.memoryGenerateMemories === undefined) {
+          state.memoryGenerateMemories = state.memoryAutomationEnabled
+        }
+        state.memoryScopeMode = 'hybrid'
+        if (
+          state.memoryMaxRolloutsPerStartup === undefined ||
+          typeof state.memoryMaxRolloutsPerStartup !== 'number'
+        ) {
+          state.memoryMaxRolloutsPerStartup = 8
+        }
+        if (
+          state.memoryMinRolloutIdleHours === undefined ||
+          typeof state.memoryMinRolloutIdleHours !== 'number'
+        ) {
+          state.memoryMinRolloutIdleHours = 0
+        }
+        if (
+          state.memoryMaxRawMemoriesForConsolidation === undefined ||
+          typeof state.memoryMaxRawMemoriesForConsolidation !== 'number'
+        ) {
+          state.memoryMaxRawMemoriesForConsolidation = 500
+        }
+        if (
+          state.memoryMaxUnusedDays === undefined ||
+          typeof state.memoryMaxUnusedDays !== 'number'
+        ) {
+          state.memoryMaxUnusedDays = 180
+        }
+        if (
+          state.memorySummaryBudgetTokens === undefined ||
+          typeof state.memorySummaryBudgetTokens !== 'number'
+        ) {
+          state.memorySummaryBudgetTokens = state.memoryAutomationSummaryBudgetTokens
+        }
+        if (state.memoryDailyRollupEnabled === undefined) {
+          state.memoryDailyRollupEnabled = state.memoryAutomationDailyRollupEnabled
         }
         return state as unknown as SettingsStore
       },
@@ -535,9 +696,25 @@ export const useSettingsStore = create<SettingsStore>()(
         maxParallelToolCalls: clampMaxParallelToolCalls(state.maxParallelToolCalls),
         toolResultFormat: state.toolResultFormat,
         fileDiffViewMode: state.fileDiffViewMode,
+        shellExecutionEndpoint: normalizeShellExecutionEndpoint(state.shellExecutionEndpoint),
+        customShellExecutable: state.customShellExecutable,
         userName: state.userName,
         userAvatar: state.userAvatar,
         conversationGuideSeen: state.conversationGuideSeen,
+        memoryAutomationEnabled: state.memoryAutomationEnabled,
+        memoryAutomationWritePolicy: 'auto' as const,
+        memoryAutomationMainSessionsOnly: state.memoryAutomationMainSessionsOnly,
+        memoryAutomationSummaryBudgetTokens: state.memoryAutomationSummaryBudgetTokens,
+        memoryAutomationDailyRollupEnabled: state.memoryAutomationDailyRollupEnabled,
+        memoryUseMemories: state.memoryUseMemories,
+        memoryGenerateMemories: state.memoryGenerateMemories,
+        memoryScopeMode: 'hybrid' as const,
+        memoryMaxRolloutsPerStartup: state.memoryMaxRolloutsPerStartup,
+        memoryMinRolloutIdleHours: state.memoryMinRolloutIdleHours,
+        memoryMaxRawMemoriesForConsolidation: state.memoryMaxRawMemoriesForConsolidation,
+        memoryMaxUnusedDays: state.memoryMaxUnusedDays,
+        memorySummaryBudgetTokens: state.memorySummaryBudgetTokens,
+        memoryDailyRollupEnabled: state.memoryDailyRollupEnabled,
         // Appearance Settings
         backgroundColor: state.backgroundColor,
         fontFamily: state.fontFamily,
@@ -566,7 +743,9 @@ export const useSettingsStore = create<SettingsStore>()(
         projectDefaultDirectory: state.projectDefaultDirectory,
         lastProjectDirectory: state.lastProjectDirectory,
         recentWorkingTargets: state.recentWorkingTargets,
-        builtinBrowserEnabled: state.builtinBrowserEnabled
+        builtinBrowserEnabled: state.builtinBrowserEnabled,
+        browserUserDataReuseEnabled: state.browserUserDataReuseEnabled,
+        browserUserDataSource: normalizeBrowserUserDataSource(state.browserUserDataSource)
         // NOTE: apiKey is intentionally excluded from localStorage persistence.
         // In production, it should be stored securely in the main process.
       })

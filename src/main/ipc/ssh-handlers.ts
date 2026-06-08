@@ -232,8 +232,9 @@ type TransferCounters = {
 
 type SearchLimitReason = 'max_results' | 'max_output_bytes' | 'timeout' | 'max_depth' | null
 type GrepMatchKind = 'match' | 'context'
-type GrepOutputMode = 'matches' | 'files_with_matches' | 'count'
+type GrepOutputMode = 'matches' | 'files_with_matches' | 'files_without_matches' | 'count'
 type GrepPathStyle = 'relative' | 'absolute'
+type SearchEngine = 'remote_rg' | 'remote_grep'
 
 const DEFAULT_SSH_GLOB_LIMIT = 100
 const DEFAULT_SSH_GREP_LIMIT = 20
@@ -272,6 +273,7 @@ const SSH_SEARCH_IGNORE_DIRS = [
 
 type SearchMeta = {
   backend: 'ssh'
+  engine?: SearchEngine
   searchRoot: string
   pathStyle: 'absolute' | 'relative_to_search_root'
   truncated: boolean
@@ -316,6 +318,7 @@ type SshGrepOptions = {
   pattern: string
   include?: string
   exclude?: string
+  typeFilters: string[]
   caseSensitive: boolean
   smartCase: boolean
   literal: boolean
@@ -331,6 +334,7 @@ type SshGrepOptions = {
   followSymlinks: boolean
   outputMode: GrepOutputMode
   pathStyle: GrepPathStyle
+  multiline: boolean
 }
 
 function createSshSearchMeta(args: {
@@ -342,6 +346,7 @@ function createSshSearchMeta(args: {
   truncated?: boolean
   timedOut?: boolean
   limitReason?: SearchLimitReason
+  engine?: SearchEngine
   warnings?: string[]
   maxDepth?: number | null
   pathStyle?: 'absolute' | 'relative_to_search_root'
@@ -354,6 +359,7 @@ function createSshSearchMeta(args: {
 }): SearchMeta {
   return {
     backend: 'ssh',
+    engine: args.engine,
     searchRoot: args.searchRoot,
     pathStyle: args.pathStyle ?? 'absolute',
     truncated: args.truncated === true,
@@ -433,6 +439,8 @@ function appendSshRipgrepSearchFlags(cmd: string, options: SshGrepOptions): stri
     if (options.afterContext > 0) next += ` --after-context ${options.afterContext}`
   } else if (options.outputMode === 'files_with_matches') {
     next += ' --files-with-matches'
+  } else if (options.outputMode === 'files_without_matches') {
+    next += ' --files-without-match'
   } else {
     next += ' --count'
   }
@@ -443,9 +451,14 @@ function appendSshRipgrepSearchFlags(cmd: string, options: SshGrepOptions): stri
   if (options.line) next += ' --line-regexp'
   if (options.invertMatch) next += ' --invert-match'
   if (options.hidden) next += ' --hidden'
-  if (!options.respectGitignore) next += ' --no-ignore'
+  if (options.respectGitignore) next += ' --no-require-git'
+  else next += ' --no-ignore'
   if (options.followSymlinks) next += ' --follow'
   if (options.maxDepth !== null) next += ` --max-depth ${options.maxDepth}`
+  if (options.multiline) next += ' --multiline --multiline-dotall'
+  for (const typeFilter of options.typeFilters) {
+    next += ` --type ${shellEscape(typeFilter)}`
+  }
   return next
 }
 
@@ -483,11 +496,15 @@ function normalizeSshBoolean(value: unknown, fallback: boolean): boolean {
 }
 
 function normalizeSshOutputMode(value: unknown): GrepOutputMode {
-  return value === 'files_with_matches' || value === 'count' ? value : 'matches'
+  if (value === 'content' || value === 'matches') return 'matches'
+  return value === 'files_with_matches' || value === 'files_without_matches' || value === 'count'
+    ? value
+    : 'files_with_matches'
 }
 
-function parseSshGlobPatterns(value?: string): string[] {
-  return (value ?? '')
+function parseSshGlobPatterns(value?: unknown): string[] {
+  if (Array.isArray(value)) return value.flatMap((item) => parseSshGlobPatterns(item))
+  return (typeof value === 'string' ? value : '')
     .split(',')
     .map((pattern) => pattern.trim())
     .filter(Boolean)
@@ -499,6 +516,8 @@ function normalizeSshPathStyle(value: unknown): GrepPathStyle {
 
 function normalizeSshGrepOptions(args: {
   pattern?: unknown
+  glob?: unknown
+  type?: unknown
   include?: unknown
   exclude?: unknown
   caseSensitive?: unknown
@@ -511,13 +530,17 @@ function normalizeSshGrepOptions(args: {
   beforeContext?: unknown
   afterContext?: unknown
   maxResults?: unknown
+  head_limit?: unknown
+  headLimit?: unknown
   limit?: unknown
   maxDepth?: unknown
   hidden?: unknown
   respectGitignore?: unknown
   followSymlinks?: unknown
   outputMode?: unknown
+  output_mode?: unknown
   pathStyle?: unknown
+  multiline?: unknown
 }): SshGrepOptions {
   const pattern = String(args.pattern ?? '')
   const smartCase = normalizeSshBoolean(args.smartCase, false)
@@ -528,13 +551,18 @@ function normalizeSshGrepOptions(args: {
       ? /[A-Z]/.test(pattern)
       : false
   const context = clampSshContext(args.context)
-  const include = typeof args.include === 'string' ? args.include.trim() : undefined
+  const includePatterns = [
+    ...parseSshGlobPatterns(args.include),
+    ...parseSshGlobPatterns(args.glob)
+  ]
+  const include = includePatterns.join(',') || undefined
   const exclude = typeof args.exclude === 'string' ? args.exclude.trim() : undefined
 
   return {
     pattern,
     include: include || undefined,
     exclude: exclude || undefined,
+    typeFilters: parseSshGlobPatterns(args.type).map((item) => item.replace(/^--?type=/, '')),
     caseSensitive,
     smartCase,
     literal: normalizeSshBoolean(args.literal, false),
@@ -543,13 +571,17 @@ function normalizeSshGrepOptions(args: {
     invertMatch: normalizeSshBoolean(args.invertMatch, false),
     beforeContext: args.beforeContext === undefined ? context : clampSshContext(args.beforeContext),
     afterContext: args.afterContext === undefined ? context : clampSshContext(args.afterContext),
-    maxResults: clampSshSearchLimit(args.maxResults ?? args.limit, DEFAULT_SSH_GREP_LIMIT),
+    maxResults: clampSshSearchLimit(
+      args.head_limit ?? args.headLimit ?? args.maxResults ?? args.limit,
+      DEFAULT_SSH_GREP_LIMIT
+    ),
     maxDepth: clampSshOptionalNumber(args.maxDepth, MAX_SSH_GREP_DEPTH),
     hidden: normalizeSshBoolean(args.hidden, true),
     respectGitignore: normalizeSshBoolean(args.respectGitignore, true),
     followSymlinks: normalizeSshBoolean(args.followSymlinks, false),
-    outputMode: normalizeSshOutputMode(args.outputMode),
-    pathStyle: normalizeSshPathStyle(args.pathStyle)
+    outputMode: normalizeSshOutputMode(args.output_mode ?? args.outputMode),
+    pathStyle: normalizeSshPathStyle(args.pathStyle),
+    multiline: normalizeSshBoolean(args.multiline, false)
   }
 }
 
@@ -576,6 +608,7 @@ function createSshGrepResult(args: {
   truncated?: boolean
   timedOut?: boolean
   limitReason?: SearchLimitReason
+  engine?: SearchEngine
   warnings?: string[]
   maxDepth?: number | null
   options?: SshGrepOptions
@@ -594,6 +627,7 @@ function createSshGrepResult(args: {
       truncated: args.truncated,
       timedOut: args.timedOut,
       limitReason: args.limitReason,
+      engine: args.engine,
       warnings: args.warnings,
       maxDepth: options?.maxDepth ?? args.maxDepth,
       pathStyle: options?.pathStyle === 'relative' ? 'relative_to_search_root' : 'absolute',
@@ -1533,7 +1567,7 @@ function ensureSshConfigWatcher(): void {
   sshConfigWatcherAttached = true
   startSshConfigWatcher()
   onSshConfigChange(() => {
-    broadcastToRenderer('ssh:config:changed', {})
+    safeSendToAllWindows('ssh:config:changed', {})
   })
 }
 
@@ -1635,9 +1669,12 @@ function formatLayeredError(
       return `Jump host connection failed: ${raw}`
     }
     if (layered.stage === 'target_auth') {
-      if (fallbackAuthType === 'password') return 'Target host password authentication failed, please check your password.'
-      if (fallbackAuthType === 'privateKey') return 'Target host private key authentication failed, please check key or passphrase.'
-      if (fallbackAuthType === 'agent') return 'Target host SSH Agent authentication failed, please check Agent status.'
+      if (fallbackAuthType === 'password')
+        return 'Target host password authentication failed, please check your password.'
+      if (fallbackAuthType === 'privateKey')
+        return 'Target host private key authentication failed, please check key or passphrase.'
+      if (fallbackAuthType === 'agent')
+        return 'Target host SSH Agent authentication failed, please check Agent status.'
       return `Target host authentication failed: ${raw}`
     }
     if (layered.stage === 'target_connect') {
@@ -1653,9 +1690,12 @@ function formatLayeredError(
   if (message.includes('ENOTFOUND') || message.includes('getaddrinfo'))
     return 'Host not resolvable, please check hostname or IP.'
   if (isAuthFailureMessage(message)) {
-    if (fallbackAuthType === 'password') return 'Password authentication failed, please check password.'
-    if (fallbackAuthType === 'privateKey') return 'Private key authentication failed, please check key file and passphrase.'
-    if (fallbackAuthType === 'agent') return 'SSH Agent authentication failed, please check Agent availability.'
+    if (fallbackAuthType === 'password')
+      return 'Password authentication failed, please check password.'
+    if (fallbackAuthType === 'privateKey')
+      return 'Private key authentication failed, please check key file and passphrase.'
+    if (fallbackAuthType === 'agent')
+      return 'SSH Agent authentication failed, please check Agent availability.'
   }
   return message
 }
@@ -3371,6 +3411,28 @@ export function registerSshHandlers(): void {
   // ── SFTP: Write file ──
 
   ipcMain.handle(
+    'ssh:fs:stat-path',
+    async (_event, args: { connectionId: string; path: string }) => {
+      try {
+        return await withFileSession(args.connectionId, async (session) => {
+          const sftp = await getSftp(session)
+          const resolvedPath = await resolveSftpPath(session, args.path)
+          const stat = await sftpStat(sftp, resolvedPath)
+          if (!stat) return { exists: false, type: null, size: null, mtimeMs: null }
+          return {
+            exists: true,
+            type: stat.isFile() ? 'file' : stat.isDirectory() ? 'directory' : 'other',
+            size: stat.size,
+            mtimeMs: stat.mtime ? stat.mtime * 1000 : null
+          }
+        })
+      } catch (err) {
+        return { error: String(err) }
+      }
+    }
+  )
+
+  ipcMain.handle(
     'ssh:fs:write-file',
     async (
       _event,
@@ -3387,10 +3449,15 @@ export function registerSshHandlers(): void {
         await withFileSession(args.connectionId, async (session) => {
           const sftp = await getSftp(session)
           const resolvedPath = await resolveSftpPath(session, args.path)
-          const before =
-            typeof args.beforeContent === 'string'
-              ? buildFileSnapshot(true, args.beforeContent)
-              : await readSshTextSnapshot(args.connectionId, resolvedPath)
+          const before = await readSshTextSnapshot(args.connectionId, resolvedPath)
+          if (
+            typeof args.beforeContent === 'string' &&
+            before.hash !== buildFileSnapshot(true, args.beforeContent).hash
+          ) {
+            throw new Error(
+              'File changed since it was read. Read the file again before editing or writing.'
+            )
+          }
           op = before.exists ? 'modify' : 'create'
 
           // Ensure parent directory exists
@@ -3868,6 +3935,8 @@ export function registerSshHandlers(): void {
       args: {
         connectionId: string
         pattern: string
+        glob?: unknown
+        type?: unknown
         path?: string
         include?: string
         exclude?: string
@@ -3881,13 +3950,17 @@ export function registerSshHandlers(): void {
         beforeContext?: number
         afterContext?: number
         maxResults?: number
+        head_limit?: number
+        headLimit?: number
         limit?: number
         maxDepth?: number
         hidden?: boolean
         respectGitignore?: boolean
         followSymlinks?: boolean
         outputMode?: GrepOutputMode
+        output_mode?: string
         pathStyle?: GrepPathStyle
+        multiline?: boolean
       }
     ) => {
       try {
@@ -3942,7 +4015,10 @@ export function registerSshHandlers(): void {
             for (const rawLine of rawLines) {
               if (!rawLine.trim()) continue
               if (options.outputMode !== 'matches') {
-                if (options.outputMode === 'files_with_matches') {
+                if (
+                  options.outputMode === 'files_with_matches' ||
+                  options.outputMode === 'files_without_matches'
+                ) {
                   matches.push({
                     path: formatSshGrepPath(cwd, rawLine.trim(), options)
                   })
@@ -4004,6 +4080,7 @@ export function registerSshHandlers(): void {
                 ...(truncated ? ['SSH grep result truncated by remote limit'] : []),
                 ...(parseFailed ? ['Some SSH grep result lines could not be parsed'] : [])
               ],
+              engine: 'remote_rg',
               options
             })
           }
@@ -4047,6 +4124,7 @@ export function registerSshHandlers(): void {
           if (options.beforeContext > 0) cmd += ` -B ${options.beforeContext}`
           if (options.afterContext > 0) cmd += ` -A ${options.afterContext}`
           if (options.outputMode === 'files_with_matches') cmd += ` -l`
+          if (options.outputMode === 'files_without_matches') cmd += ` -L`
           if (options.outputMode === 'count') cmd += ` -c`
           cmd = appendSshGrepExcludeDirs(cmd)
           for (const includePattern of parseSshGlobPatterns(options.include)) {
@@ -4076,7 +4154,10 @@ export function registerSshHandlers(): void {
           const rawLines = result.stdout.split('\n').filter(Boolean)
           const matches: SshGrepResult['matches'] = []
           for (const rawLine of rawLines) {
-            if (options.outputMode === 'files_with_matches') {
+            if (
+              options.outputMode === 'files_with_matches' ||
+              options.outputMode === 'files_without_matches'
+            ) {
               matches.push({ path: formatSshGrepPath(cwd, rawLine.trim(), options) })
               continue
             }
@@ -4111,6 +4192,7 @@ export function registerSshHandlers(): void {
               ...grepWarnings,
               ...(rawLines.length >= limit ? ['SSH grep result truncated by remote limit'] : [])
             ],
+            engine: 'remote_grep',
             options
           })
         })

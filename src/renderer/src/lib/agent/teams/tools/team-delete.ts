@@ -3,6 +3,7 @@ import { encodeStructuredToolResult, encodeToolError } from '../../../tools/tool
 import { teamEvents } from '../events'
 import { useTeamStore } from '../../../../stores/team-store'
 import { useAgentStore } from '../../../../stores/agent-store'
+import { useSettingsStore } from '../../../../stores/settings-store'
 import { abortAllTeammates } from '../teammate-runner'
 import { removeTeamLimiter } from '../../sub-agents/create-tool'
 import { deleteTeamRuntime } from '../runtime-client'
@@ -20,6 +21,10 @@ export const teamDeleteTool: ToolHandler = {
     }
   },
   execute: async () => {
+    if (!useSettingsStore.getState().teamToolsEnabled) {
+      return encodeToolError('Team Tools are disabled in Settings.')
+    }
+
     const team = useTeamStore.getState().activeTeam
     if (!team) {
       return encodeToolError('No active team to delete')

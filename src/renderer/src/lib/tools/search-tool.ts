@@ -7,13 +7,21 @@ import type { ToolHandler } from './tool-types'
 type SearchLimitReason = 'max_results' | 'max_output_bytes' | 'timeout' | 'max_depth' | null
 
 type SearchBackend = 'local' | 'ssh' | 'cron'
+type SearchEngine =
+  | 'git_grep'
+  | 'sidecar'
+  | 'ripgrep'
+  | 'node_fallback'
+  | 'remote_rg'
+  | 'remote_grep'
 
 type SearchPathStyle = 'absolute' | 'relative_to_search_root'
 type GrepMatchKind = 'match' | 'context'
-type GrepOutputMode = 'matches' | 'files_with_matches' | 'count'
+type GrepOutputMode = 'matches' | 'files_with_matches' | 'files_without_matches' | 'count'
 
 type SearchMeta = {
   backend: SearchBackend
+  engine?: SearchEngine
   searchRoot?: string
   pathStyle: SearchPathStyle
   truncated: boolean
@@ -49,6 +57,7 @@ type GrepToolResult = {
   matches: Array<{
     path: string
     line?: number
+    column?: number
     text?: string
     kind?: GrepMatchKind
     count?: number
@@ -58,9 +67,9 @@ type GrepToolResult = {
   error?: string
 }
 
-const PROMPT_SEARCH_MAX_MATCHES = 20
+const PROMPT_SEARCH_MAX_MATCHES = 100
 const PROMPT_SEARCH_FETCH_LIMIT = PROMPT_SEARCH_MAX_MATCHES + 1
-const PROMPT_SEARCH_MAX_OUTPUT_BYTES = 8 * 1024
+const PROMPT_SEARCH_MAX_OUTPUT_BYTES = 64 * 1024
 const PROMPT_GREP_MAX_LINE_LENGTH = 160
 const PROMPT_GREP_MAX_MATCHES = 200
 const PROMPT_GREP_MAX_OUTPUT_BYTES = 64 * 1024
@@ -96,13 +105,28 @@ function normalizeLimitReason(value: unknown): SearchLimitReason {
     : null
 }
 
+function normalizeSearchEngine(value: unknown): SearchEngine | undefined {
+  if (value === 'node') return 'node_fallback'
+  return value === 'git_grep' ||
+    value === 'sidecar' ||
+    value === 'ripgrep' ||
+    value === 'node_fallback' ||
+    value === 'remote_rg' ||
+    value === 'remote_grep'
+    ? value
+    : undefined
+}
+
 function normalizeWarnings(value: unknown): string[] {
   if (!Array.isArray(value)) return []
   return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
 }
 
 function normalizeGrepOutputMode(value: unknown): GrepOutputMode {
-  return value === 'files_with_matches' || value === 'count' ? value : 'matches'
+  if (value === 'content' || value === 'matches') return 'matches'
+  return value === 'files_with_matches' || value === 'files_without_matches' || value === 'count'
+    ? value
+    : 'files_with_matches'
 }
 
 function normalizeOptionalNumber(value: unknown): number | undefined {
@@ -136,6 +160,7 @@ function normalizeGrepPathValue(
 
 function createBaseMeta(args: {
   backend: SearchBackend
+  engine?: SearchEngine
   pattern: string
   include?: string | null
   exclude?: string | null
@@ -160,6 +185,7 @@ function createBaseMeta(args: {
 }): SearchMeta {
   return {
     backend: args.backend,
+    engine: args.engine,
     searchRoot: args.searchRoot,
     pathStyle: args.pathStyle ?? 'absolute',
     truncated: args.truncated === true,
@@ -225,6 +251,7 @@ function normalizeGlobResult(
       rawMeta?.backend === 'ssh' || rawMeta?.backend === 'cron' || rawMeta?.backend === 'local'
         ? rawMeta.backend
         : options.backend,
+    engine: normalizeSearchEngine(rawMeta?.engine),
     pattern: typeof rawMeta?.pattern === 'string' ? rawMeta.pattern : options.pattern,
     searchRoot: typeof rawMeta?.searchRoot === 'string' ? rawMeta.searchRoot : options.searchRoot,
     pathStyle:
@@ -337,6 +364,7 @@ function limitGrepResultForPrompt(result: GrepToolResult): GrepToolResult {
       estimatePromptBytes({
         file: normalizedItem.path,
         line: normalizedItem.line,
+        column: normalizedItem.column,
         text: normalizedItem.text,
         kind: normalizedItem.kind,
         count: normalizedItem.count
@@ -366,7 +394,13 @@ function limitGrepResultForPrompt(result: GrepToolResult): GrepToolResult {
 }
 
 function shouldUseCompactSearchPayload(meta: SearchMeta, error?: string): boolean {
-  return !error && !meta.truncated && !meta.timedOut && (meta.warnings?.length ?? 0) === 0
+  return (
+    !error &&
+    !meta.engine &&
+    !meta.truncated &&
+    !meta.timedOut &&
+    (meta.warnings?.length ?? 0) === 0
+  )
 }
 
 function formatGlobResultForPrompt(result: GlobToolResult): Record<string, unknown> | unknown[] {
@@ -381,6 +415,7 @@ function formatGlobResultForPrompt(result: GlobToolResult): Record<string, unkno
     truncated: limitedResult.meta.truncated,
     timedOut: limitedResult.meta.timedOut,
     limitReason: limitedResult.meta.limitReason,
+    engine: limitedResult.meta.engine,
     warnings: limitedResult.meta.warnings,
     error: limitedResult.error
   }
@@ -390,10 +425,17 @@ function formatGrepLine(
   item: GrepToolResult['matches'][number],
   outputMode: GrepOutputMode
 ): string {
-  if (outputMode === 'files_with_matches') return item.path
+  if (outputMode === 'files_with_matches' || outputMode === 'files_without_matches') {
+    return item.path
+  }
   if (outputMode === 'count') return `${item.path}:${item.count ?? 0}`
   if (typeof item.line !== 'number') return item.path
   const separator = item.kind === 'context' ? '-' : ':'
+  if (typeof item.column === 'number' && item.kind !== 'context') {
+    return `${item.path}${separator}${item.line}${separator}${item.column}${separator}${
+      item.text ?? ''
+    }`
+  }
   return `${item.path}${separator}${item.line}${separator}${item.text ?? ''}`
 }
 
@@ -415,6 +457,7 @@ function formatGrepResultForPrompt(result: GrepToolResult): string | Record<stri
     matches: limitedResult.matches.map((item) => ({
       file: item.path,
       line: item.line,
+      column: item.column,
       text: item.text,
       kind: item.kind,
       count: item.count
@@ -422,6 +465,7 @@ function formatGrepResultForPrompt(result: GrepToolResult): string | Record<stri
     truncated: limitedResult.meta.truncated,
     timedOut: limitedResult.meta.timedOut,
     limitReason: limitedResult.meta.limitReason,
+    engine: limitedResult.meta.engine,
     warnings: limitedResult.meta.warnings,
     error: limitedResult.error
   }
@@ -438,6 +482,7 @@ function normalizeGrepMatchItem(
   return {
     path,
     line: typeof item.line === 'number' ? item.line : undefined,
+    column: typeof item.column === 'number' ? item.column : undefined,
     text: typeof item.text === 'string' ? item.text : '',
     kind: item.kind === 'context' ? 'context' : 'match',
     count: typeof item.count === 'number' ? item.count : undefined
@@ -488,6 +533,7 @@ function normalizeGrepResult(
       rawMeta?.backend === 'ssh' || rawMeta?.backend === 'cron' || rawMeta?.backend === 'local'
         ? rawMeta.backend
         : options.backend,
+    engine: normalizeSearchEngine(rawMeta?.engine ?? raw.engine),
     pattern: typeof rawMeta?.pattern === 'string' ? rawMeta.pattern : options.pattern,
     include: typeof rawMeta?.include === 'string' ? rawMeta.include : options.include,
     exclude: typeof rawMeta?.exclude === 'string' ? rawMeta.exclude : options.exclude,
@@ -539,7 +585,8 @@ function normalizeGrepResult(
 const globHandler: ToolHandler = {
   definition: {
     name: 'Glob',
-    description: 'Fast file pattern matching tool (returns at most 20 matches)',
+    description:
+      'Find files by glob pattern. Returns up to 100 paths sorted by modification time. Does not respect .gitignore unless respectGitignore=true.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -547,7 +594,11 @@ const globHandler: ToolHandler = {
         path: {
           type: 'string',
           description: 'Optional search directory (absolute or relative to the working folder)'
-        }
+        },
+        hidden: { type: 'boolean', description: 'Include hidden files and directories' },
+        respectGitignore: { type: 'boolean', description: 'Respect .gitignore files' },
+        followSymlinks: { type: 'boolean', description: 'Follow symbolic links' },
+        maxDepth: { type: 'number', description: 'Maximum directory depth to search' }
       },
       required: ['pattern']
     }
@@ -560,7 +611,11 @@ const globHandler: ToolHandler = {
         connectionId: ctx.sshConnectionId,
         pattern: input.pattern,
         path: resolvedPath,
-        limit: PROMPT_SEARCH_FETCH_LIMIT
+        limit: PROMPT_SEARCH_FETCH_LIMIT,
+        hidden: input.hidden,
+        respectGitignore: input.respectGitignore,
+        followSymlinks: input.followSymlinks,
+        maxDepth: input.maxDepth
       })
       return encodeStructuredToolResult(
         formatGlobResultForPrompt(
@@ -575,7 +630,11 @@ const globHandler: ToolHandler = {
     const result = await ctx.ipc.invoke(IPC.FS_GLOB, {
       pattern: input.pattern,
       path: resolvedPath,
-      limit: PROMPT_SEARCH_FETCH_LIMIT
+      limit: PROMPT_SEARCH_FETCH_LIMIT,
+      hidden: input.hidden,
+      respectGitignore: input.respectGitignore,
+      followSymlinks: input.followSymlinks,
+      maxDepth: input.maxDepth
     })
     return encodeStructuredToolResult(
       formatGlobResultForPrompt(
@@ -594,47 +653,121 @@ const grepHandler: ToolHandler = {
   definition: {
     name: 'Grep',
     description:
-      'Search file contents with ripgrep-style options. Defaults to grep-like file:line:text output.',
+      'Search file contents using ripgrep-style regex. Defaults to files_with_matches. Use output_mode="content" for file:line:text output.',
     inputSchema: {
       type: 'object',
       properties: {
         pattern: { type: 'string', description: 'Regex pattern to search for' },
+        glob: {
+          type: 'string',
+          description: 'Code-agent-style file glob filter, e.g. **/*.tsx'
+        },
+        type: {
+          type: 'string',
+          description: 'Ripgrep file type filter, e.g. py, rust, ts'
+        },
+        patterns: {
+          type: 'array',
+          items: {
+            anyOf: [
+              { type: 'string' },
+              {
+                type: 'object',
+                properties: {
+                  pattern: { type: 'string' },
+                  not: { type: 'boolean' }
+                },
+                required: ['pattern']
+              }
+            ]
+          },
+          description: 'Multiple patterns. Strings are positive patterns; objects may set not=true.'
+        },
         path: {
           type: 'string',
           description: 'Directory to search in (absolute or relative to the working folder)'
+        },
+        pathspecs: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Git pathspecs to include or exclude, e.g. :(glob)src/**/*.ts'
         },
         include: {
           type: 'string',
           description: 'Comma-separated file globs to include, e.g. *.ts,*.tsx'
         },
         exclude: { type: 'string', description: 'Comma-separated file globs to exclude' },
+        patternMode: {
+          type: 'string',
+          enum: ['fixed', 'basic', 'extended', 'perl'],
+          description: 'Pattern dialect. Default uses ripgrep/Rust regex syntax.'
+        },
+        patternOperator: {
+          type: 'string',
+          enum: ['or', 'and'],
+          description: 'How multiple positive patterns are combined. Default or.'
+        },
+        notPatterns: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Negative patterns, like git grep --not -e pattern'
+        },
+        allMatch: {
+          type: 'boolean',
+          description:
+            'Only return files that match every positive pattern, like git grep --all-match'
+        },
         caseSensitive: { type: 'boolean', description: 'Use case-sensitive matching' },
+        ignoreCase: { type: 'boolean', description: 'Use case-insensitive matching' },
         smartCase: {
           type: 'boolean',
           description: 'Case-sensitive only when the pattern has uppercase'
         },
         literal: { type: 'boolean', description: 'Treat pattern as a literal string' },
+        fixedStrings: { type: 'boolean', description: 'Alias for patternMode=fixed' },
+        extendedRegexp: { type: 'boolean', description: 'Alias for patternMode=extended' },
+        basicRegexp: { type: 'boolean', description: 'Alias for patternMode=basic' },
+        perlRegexp: { type: 'boolean', description: 'Alias for patternMode=perl' },
         word: { type: 'boolean', description: 'Match whole words only' },
         line: { type: 'boolean', description: 'Match whole lines only' },
         invertMatch: { type: 'boolean', description: 'Return non-matching lines' },
+        onlyMatching: { type: 'boolean', description: 'Return only the matching text spans' },
+        column: { type: 'boolean', description: 'Include first-match column numbers' },
         context: {
           type: 'number',
           description: 'Number of context lines before and after each match'
         },
         beforeContext: { type: 'number', description: 'Number of context lines before each match' },
         afterContext: { type: 'number', description: 'Number of context lines after each match' },
-        maxResults: { type: 'number', description: 'Maximum result rows to return (default 20)' },
+        maxCount: { type: 'number', description: 'Maximum matches per file, like git grep -m' },
+        head_limit: {
+          type: 'number',
+          description: 'Code-agent-style maximum output rows to return'
+        },
+        maxResults: { type: 'number', description: 'Maximum result rows to return' },
         maxOutputBytes: { type: 'number', description: 'Maximum encoded result size' },
         maxLineLength: { type: 'number', description: 'Maximum text length per result line' },
         maxDepth: { type: 'number', description: 'Maximum directory depth to search' },
         hidden: { type: 'boolean', description: 'Include hidden files and directories' },
         respectGitignore: { type: 'boolean', description: 'Respect .gitignore files' },
+        excludeStandard: { type: 'boolean', description: 'Use git grep --exclude-standard' },
         followSymlinks: { type: 'boolean', description: 'Follow symbolic links' },
+        untracked: { type: 'boolean', description: 'Search untracked files in Git worktrees' },
+        cached: { type: 'boolean', description: 'Search the Git index instead of the worktree' },
+        noIndex: { type: 'boolean', description: 'Use git grep --no-index style directory search' },
+        text: { type: 'boolean', description: 'Process binary files as text' },
+        textconv: { type: 'boolean', description: 'Use Git textconv filters when available' },
+        threads: { type: 'number', description: 'Worker threads for git grep' },
+        multiline: { type: 'boolean', description: 'Allow matches across line boundaries' },
+        output_mode: {
+          type: 'string',
+          enum: ['files_with_matches', 'content', 'count'],
+          description: 'Code-agent output mode. Default files_with_matches.'
+        },
         outputMode: {
           type: 'string',
-          enum: ['matches', 'files_with_matches', 'count'],
-          description:
-            'matches returns file:line:text, files_with_matches returns paths, count returns file:count'
+          enum: ['matches', 'content', 'files_with_matches', 'files_without_matches', 'count'],
+          description: 'Legacy output mode. matches/content returns file:line:text.'
         },
         pathStyle: {
           type: 'string',
@@ -650,25 +783,51 @@ const grepHandler: ToolHandler = {
     const backend: SearchBackend = ctx.sshConnectionId ? 'ssh' : 'local'
     const grepRequest = {
       pattern: input.pattern,
+      patterns: input.patterns,
       path: resolvedPath,
+      glob: input.glob,
+      type: input.type,
+      pathspecs: input.pathspecs,
       include: input.include,
       exclude: input.exclude,
+      patternMode: input.patternMode,
+      patternOperator: input.patternOperator,
+      notPatterns: input.notPatterns,
+      allMatch: input.allMatch,
       caseSensitive: input.caseSensitive,
+      ignoreCase: input.ignoreCase,
       smartCase: input.smartCase,
       literal: input.literal,
+      fixedStrings: input.fixedStrings,
+      extendedRegexp: input.extendedRegexp,
+      basicRegexp: input.basicRegexp,
+      perlRegexp: input.perlRegexp,
       word: input.word,
       line: input.line,
       invertMatch: input.invertMatch,
+      onlyMatching: input.onlyMatching,
+      column: input.column,
       context: input.context,
       beforeContext: input.beforeContext,
       afterContext: input.afterContext,
+      maxCount: input.maxCount,
+      head_limit: input.head_limit,
       maxResults: input.maxResults,
       maxOutputBytes: input.maxOutputBytes,
       maxLineLength: input.maxLineLength,
       maxDepth: input.maxDepth,
       hidden: input.hidden,
       respectGitignore: input.respectGitignore,
+      excludeStandard: input.excludeStandard,
       followSymlinks: input.followSymlinks,
+      untracked: input.untracked,
+      cached: input.cached,
+      noIndex: input.noIndex,
+      text: input.text,
+      textconv: input.textconv,
+      threads: input.threads,
+      multiline: input.multiline,
+      output_mode: input.output_mode,
       outputMode: input.outputMode,
       pathStyle: input.pathStyle
     }

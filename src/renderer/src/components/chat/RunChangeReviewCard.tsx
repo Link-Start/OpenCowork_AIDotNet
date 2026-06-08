@@ -1,6 +1,7 @@
 import * as React from 'react'
 import { ChevronDown, ChevronUp, ExternalLink, Loader2, RotateCcw } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+import { confirm } from '@renderer/components/ui/confirm-dialog'
 import { MONO_FONT } from '@renderer/lib/constants'
 import type { AgentRunChangeSet } from '@renderer/stores/agent-store'
 import { useAgentStore } from '@renderer/stores/agent-store'
@@ -26,6 +27,8 @@ interface RunChangeReviewCardProps {
   runId: string
   changeSet: AgentRunChangeSet
 }
+
+const DEFAULT_EXPANDED_FILE_LIMIT = 4
 
 function isErrorResult(value: unknown): value is { error: string } {
   return !!value && typeof value === 'object' && 'error' in value && typeof value.error === 'string'
@@ -135,21 +138,49 @@ export function RunChangeReviewCard({
   changeSet
 }: RunChangeReviewCardProps): React.JSX.Element | null {
   const { t } = useTranslation(['chat', 'common'])
-  const rollbackRunChanges = useAgentStore((state) => state.rollbackRunChanges)
+  const undoRunChanges = useAgentStore((state) => state.undoRunChanges)
   const openDetailPanel = useUIStore((state) => state.openDetailPanel)
   const [expandedChangeId, setExpandedChangeId] = React.useState<string | null>(null)
-  const [isRollingBack, setIsRollingBack] = React.useState(false)
+  const [isUndoing, setIsUndoing] = React.useState(false)
   const aggregatedChanges = React.useMemo(
     () => aggregateDisplayableRunFileChanges(changeSet.changes),
     [changeSet.changes]
   )
+  const shouldCollapseFileListByDefault = aggregatedChanges.length > DEFAULT_EXPANDED_FILE_LIMIT
+  const [fileListState, setFileListState] = React.useState(() => ({
+    runId,
+    changeCount: aggregatedChanges.length,
+    collapsed: shouldCollapseFileListByDefault,
+    touched: false
+  }))
   const summariesByChangeId = useAggregatedChangeSummaries(aggregatedChanges)
+  const canCollapseFileList = aggregatedChanges.length > DEFAULT_EXPANDED_FILE_LIMIT
+  const fileListCollapsed =
+    canCollapseFileList &&
+    (fileListState.runId === runId ? fileListState.collapsed : shouldCollapseFileListByDefault)
 
   React.useEffect(() => {
     setExpandedChangeId((current) =>
       current && aggregatedChanges.some((change) => change.id === current) ? current : null
     )
   }, [aggregatedChanges])
+
+  React.useEffect(() => {
+    setFileListState((current) => {
+      if (
+        current.runId === runId &&
+        (current.touched || current.changeCount === aggregatedChanges.length)
+      ) {
+        return current
+      }
+      return {
+        runId,
+        changeCount: aggregatedChanges.length,
+        collapsed: shouldCollapseFileListByDefault,
+        touched: false
+      }
+    })
+  }, [aggregatedChanges.length, runId, shouldCollapseFileListByDefault])
 
   const summary = React.useMemo(
     () =>
@@ -167,10 +198,7 @@ export function RunChangeReviewCard({
   )
 
   const pendingCount = React.useMemo(
-    () =>
-      aggregatedChanges.filter(
-        (change) => change.status === 'open' || change.status === 'conflicted'
-      ).length,
+    () => aggregatedChanges.filter((change) => change.status === 'open').length,
     [aggregatedChanges]
   )
   const actionable = pendingCount > 0
@@ -179,12 +207,19 @@ export function RunChangeReviewCard({
     return null
   }
 
-  const handleRollback = async (): Promise<void> => {
-    setIsRollingBack(true)
+  const handleUndo = async (): Promise<void> => {
+    const confirmed = await confirm({
+      title: t('fileChange.undoRunConfirmTitle'),
+      description: t('fileChange.undoRunConfirmDesc', { count: pendingCount }),
+      confirmLabel: t('fileChange.undoConfirmAction'),
+      variant: 'destructive'
+    })
+    if (!confirmed) return
+    setIsUndoing(true)
     try {
-      await rollbackRunChanges(runId)
+      await undoRunChanges(runId)
     } finally {
-      setIsRollingBack(false)
+      setIsUndoing(false)
     }
   }
 
@@ -214,10 +249,10 @@ export function RunChangeReviewCard({
         <button
           type="button"
           className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
-          onClick={() => void handleRollback()}
-          disabled={!actionable || isRollingBack}
+          onClick={() => void handleUndo()}
+          disabled={!actionable || isUndoing}
         >
-          {isRollingBack ? (
+          {isUndoing ? (
             <Loader2 className="size-3 animate-spin" />
           ) : (
             <RotateCcw className="size-3.5" />
@@ -226,68 +261,97 @@ export function RunChangeReviewCard({
         </button>
       </div>
 
-      <div className="border-t border-border/60">
-        {aggregatedChanges.map((change) => {
-          const stats = summariesByChangeId[change.id] ?? { added: 0, deleted: 0 }
-          const expanded = expandedChangeId === change.id
+      {canCollapseFileList && (
+        <button
+          type="button"
+          className="flex w-full items-center justify-between gap-2 border-t border-border/60 px-3 py-2 text-left text-[11px] text-muted-foreground transition-colors hover:bg-muted/30 hover:text-foreground"
+          onClick={() =>
+            setFileListState({
+              runId,
+              changeCount: aggregatedChanges.length,
+              collapsed: !fileListCollapsed,
+              touched: true
+            })
+          }
+          aria-expanded={!fileListCollapsed}
+        >
+          <span>
+            {fileListCollapsed
+              ? t('fileChange.showFileList', { count: aggregatedChanges.length })
+              : t('fileChange.hideFileList', { count: aggregatedChanges.length })}
+          </span>
+          {fileListCollapsed ? (
+            <ChevronDown className="size-3.5 shrink-0" />
+          ) : (
+            <ChevronUp className="size-3.5 shrink-0" />
+          )}
+        </button>
+      )}
 
-          return (
-            <div key={change.id} className="border-b border-border/60 last:border-b-0">
-              <div className="flex items-stretch">
-                <button
-                  type="button"
-                  onClick={() =>
-                    setExpandedChangeId((current) => (current === change.id ? null : change.id))
-                  }
-                  className="group flex min-w-0 flex-1 items-center gap-2.5 px-3 py-2 text-left transition-colors hover:bg-muted/30"
-                  title={change.filePath}
-                >
-                  <span
-                    className="min-w-0 flex-1 truncate text-[11px] text-foreground/90 transition-colors group-hover:text-foreground"
-                    style={{ fontFamily: MONO_FONT }}
-                  >
-                    {change.filePath}
-                  </span>
-                  <div className="flex shrink-0 items-center gap-1.5 text-[10px] font-medium">
-                    <span className="text-emerald-600 dark:text-emerald-300">+{stats.added}</span>
-                    <span className="text-red-600 dark:text-red-300">-{stats.deleted}</span>
-                  </div>
-                </button>
+      {!fileListCollapsed && (
+        <div className="border-t border-border/60">
+          {aggregatedChanges.map((change) => {
+            const stats = summariesByChangeId[change.id] ?? { added: 0, deleted: 0 }
+            const expanded = expandedChangeId === change.id
 
-                <div className="flex shrink-0 items-center gap-0.5 px-2">
-                  {expanded ? (
-                    <button
-                      type="button"
-                      className="rounded p-1 text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
-                      onClick={() => handleOpenReviewForChange(change.lastChangeId)}
-                      title={t('fileChange.openReview', { defaultValue: 'Open review' })}
-                      aria-label={t('fileChange.openReview', { defaultValue: 'Open review' })}
-                    >
-                      <ExternalLink className="size-3" />
-                    </button>
-                  ) : null}
+            return (
+              <div key={change.id} className="border-b border-border/60 last:border-b-0">
+                <div className="flex items-stretch">
                   <button
                     type="button"
-                    className="rounded p-1 text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
                     onClick={() =>
                       setExpandedChangeId((current) => (current === change.id ? null : change.id))
                     }
-                    aria-label={expanded ? 'Collapse change' : 'Expand change'}
+                    className="group flex min-w-0 flex-1 items-center gap-2.5 px-3 py-2 text-left transition-colors hover:bg-muted/30"
+                    title={change.filePath}
                   >
-                    {expanded ? (
-                      <ChevronUp className="size-3" />
-                    ) : (
-                      <ChevronDown className="size-3" />
-                    )}
+                    <span
+                      className="min-w-0 flex-1 truncate text-[11px] text-foreground/90 transition-colors group-hover:text-foreground"
+                      style={{ fontFamily: MONO_FONT }}
+                    >
+                      {change.filePath}
+                    </span>
+                    <div className="flex shrink-0 items-center gap-1.5 text-[10px] font-medium">
+                      <span className="text-emerald-600 dark:text-emerald-300">+{stats.added}</span>
+                      <span className="text-red-600 dark:text-red-300">-{stats.deleted}</span>
+                    </div>
                   </button>
-                </div>
-              </div>
 
-              {expanded ? <InlineChangePreview change={change} /> : null}
-            </div>
-          )
-        })}
-      </div>
+                  <div className="flex shrink-0 items-center gap-0.5 px-2">
+                    {expanded ? (
+                      <button
+                        type="button"
+                        className="rounded p-1 text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+                        onClick={() => handleOpenReviewForChange(change.lastChangeId)}
+                        title={t('fileChange.openReview', { defaultValue: 'Open review' })}
+                        aria-label={t('fileChange.openReview', { defaultValue: 'Open review' })}
+                      >
+                        <ExternalLink className="size-3" />
+                      </button>
+                    ) : null}
+                    <button
+                      type="button"
+                      className="rounded p-1 text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+                      onClick={() =>
+                        setExpandedChangeId((current) => (current === change.id ? null : change.id))
+                      }
+                      aria-label={expanded ? 'Collapse change' : 'Expand change'}
+                    >
+                      {expanded ? (
+                        <ChevronUp className="size-3" />
+                      ) : (
+                        <ChevronDown className="size-3" />
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                {expanded ? <InlineChangePreview change={change} /> : null}
+              </div>
+            )
+          })}
+        </div>
+      )}
     </div>
   )
 }

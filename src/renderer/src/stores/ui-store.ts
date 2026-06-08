@@ -16,7 +16,16 @@ import { useChatStore } from '@renderer/stores/chat-store'
 
 export type AppMode = 'chat' | 'clarify' | 'cowork' | 'code' | 'acp'
 
-export type NavItem = 'chat' | 'channels' | 'resources' | 'skills' | 'draw' | 'translate' | 'tasks'
+export type NavItem =
+  | 'chat'
+  | 'channels'
+  | 'resources'
+  | 'skills'
+  | 'souls'
+  | 'sync'
+  | 'draw'
+  | 'translate'
+  | 'tasks'
 
 export type ChatView = 'home' | 'project' | 'archive' | 'channels' | 'git' | 'session'
 
@@ -33,7 +42,13 @@ export type LegacyRightPanelTab =
   | 'team'
   | 'acp'
 export type RightPanelSection = 'execution' | 'resources' | 'collaboration' | 'monitoring'
-export type RightPanelTabKind = 'review' | 'preview' | 'browser' | 'subagent' | 'terminal'
+export type RightPanelTabKind =
+  | 'context'
+  | 'review'
+  | 'preview'
+  | 'browser'
+  | 'subagent'
+  | 'terminal'
 
 export interface RightPanelTabInstance {
   id: string
@@ -141,6 +156,7 @@ export interface BrowserPanelSessionState {
 
 export type SettingsTab =
   | 'general'
+  | 'system'
   | 'memory'
   | 'analytics'
   | 'migration'
@@ -163,6 +179,17 @@ export type DetailPanelContent =
   | { type: 'report'; title: string; data: unknown }
 
 const RIGHT_PANEL_REVIEW_TAB_ID = 'review'
+const RIGHT_PANEL_CONTEXT_TAB_ID = 'context'
+
+function createContextTab(): RightPanelTabInstance {
+  return {
+    id: RIGHT_PANEL_CONTEXT_TAB_ID,
+    kind: 'context',
+    title: 'Context',
+    closable: false,
+    createdAt: 0
+  }
+}
 
 function createReviewTab(initialChangeId?: string | null): RightPanelTabInstance {
   return {
@@ -180,29 +207,43 @@ function ensureReviewTab(
   initialChangeId?: string | null
 ): RightPanelTabInstance[] {
   const safeTabs = tabs ?? []
-  const existing = safeTabs.find((tab) => tab.id === RIGHT_PANEL_REVIEW_TAB_ID)
+  const withContext = safeTabs.some((tab) => tab.id === RIGHT_PANEL_CONTEXT_TAB_ID)
+    ? safeTabs
+    : [createContextTab(), ...safeTabs]
+  const baseTabs = withContext.map((tab) =>
+    tab.id === RIGHT_PANEL_CONTEXT_TAB_ID ? { ...tab, closable: false } : tab
+  )
+  const existing = baseTabs.find((tab) => tab.id === RIGHT_PANEL_REVIEW_TAB_ID)
   if (existing) {
-    return safeTabs.map((tab) =>
+    return baseTabs.map((tab) =>
       tab.id === RIGHT_PANEL_REVIEW_TAB_ID
         ? {
             ...tab,
+            closable: false,
             initialChangeId: initialChangeId !== undefined ? initialChangeId : tab.initialChangeId
           }
         : tab
     )
   }
-  return [createReviewTab(initialChangeId), ...safeTabs]
+  const contextIndex = baseTabs.findIndex((tab) => tab.id === RIGHT_PANEL_CONTEXT_TAB_ID)
+  const reviewTab = createReviewTab(initialChangeId)
+  if (contextIndex >= 0) {
+    return [...baseTabs.slice(0, contextIndex + 1), reviewTab, ...baseTabs.slice(contextIndex + 1)]
+  }
+  return [createContextTab(), reviewTab, ...baseTabs]
 }
 
 function getDefaultRightPanelTabs(): RightPanelTabInstance[] {
-  return [createReviewTab()]
+  return [createContextTab(), createReviewTab()]
 }
 
 function keepGlobalRightPanelTabs(
   tabs: RightPanelTabInstance[] | null | undefined
 ): RightPanelTabInstance[] {
   return ensureReviewTab(
-    (tabs ?? []).filter((tab) => tab.kind === 'review' || tab.kind === 'browser'),
+    (tabs ?? []).filter(
+      (tab) => tab.kind === 'context' || tab.kind === 'review' || tab.kind === 'browser'
+    ),
     null
   )
 }
@@ -236,6 +277,9 @@ interface UIStore {
   rightPanelOpen: boolean
   toggleRightPanel: () => void
   setRightPanelOpen: (open: boolean) => void
+  runtimeStatusPanelOpen: boolean
+  toggleRuntimeStatusPanel: () => void
+  setRuntimeStatusPanelOpen: (open: boolean) => void
   workingFolderSheetOpen: boolean
   toggleWorkingFolderSheet: () => void
   setWorkingFolderSheetOpen: (open: boolean) => void
@@ -259,7 +303,8 @@ interface UIStore {
   ensureSubAgentTab: (
     toolUseId?: string | null,
     inlineText?: string | null,
-    title?: string | null
+    title?: string | null,
+    sessionId?: string | null
   ) => void
   ensureTerminalTab: (processId: string, title?: string | null) => void
   closeRightPanelTab: (tabId: string) => void
@@ -279,6 +324,12 @@ interface UIStore {
   skillsPageOpen: boolean
   openSkillsPage: () => void
   closeSkillsPage: () => void
+  soulsPageOpen: boolean
+  openSoulsPage: () => void
+  closeSoulsPage: () => void
+  syncPageOpen: boolean
+  openSyncPage: () => void
+  closeSyncPage: () => void
   resourcesPageOpen: boolean
   openResourcesPage: () => void
   closeResourcesPage: () => void
@@ -355,7 +406,7 @@ interface UIStore {
   openOrchestrationPanel: (runId?: string | null, memberId?: string | null) => void
   openOrchestrationMember: (runId: string, memberId?: string | null) => void
   closeOrchestrationPanel: () => void
-  openSubAgentsPanel: (toolUseId?: string | null) => void
+  openSubAgentsPanel: (toolUseId?: string | null, sessionId?: string | null) => void
   browserStatesBySession: Record<string, BrowserPanelSessionState | undefined>
   getBrowserState: (
     sessionId?: string | null,
@@ -411,7 +462,8 @@ interface UIStore {
   openSubAgentExecutionDetail: (
     toolUseId: string,
     inlineText?: string | null,
-    title?: string | null
+    title?: string | null,
+    sessionId?: string | null
   ) => void
   closeSubAgentExecutionDetail: () => void
   selectedSubAgentToolUseId: string | null
@@ -560,6 +612,8 @@ function updateBrowserStateForSession(
 const CHAT_SURFACE_NAV_RESET = {
   settingsPageOpen: false,
   skillsPageOpen: false,
+  soulsPageOpen: false,
+  syncPageOpen: false,
   resourcesPageOpen: false,
   translatePageOpen: false,
   drawPageOpen: false,
@@ -809,6 +863,10 @@ export const useUIStore = create<UIStore>()(
             rightPanelActiveTabId: RIGHT_PANEL_REVIEW_TAB_ID
           }
         }),
+      runtimeStatusPanelOpen: true,
+      toggleRuntimeStatusPanel: () =>
+        set((state) => ({ runtimeStatusPanelOpen: !state.runtimeStatusPanelOpen })),
+      setRuntimeStatusPanelOpen: (open) => set({ runtimeStatusPanelOpen: open }),
       workingFolderSheetOpen: false,
       toggleWorkingFolderSheet: () =>
         set((state) => ({ workingFolderSheetOpen: !state.workingFolderSheetOpen })),
@@ -840,6 +898,15 @@ export const useUIStore = create<UIStore>()(
       setRightPanelTab: (tab) => {
         if (tab === 'browser') {
           get().ensureBrowserTab()
+          return
+        }
+        if (tab === 'context') {
+          set((state) => ({
+            rightPanelTabs: ensureReviewTab(state.rightPanelTabs),
+            rightPanelActiveTabId: RIGHT_PANEL_CONTEXT_TAB_ID,
+            rightPanelTab: 'context',
+            rightPanelOpen: true
+          }))
           return
         }
         if (tab === 'subagents') {
@@ -922,15 +989,19 @@ export const useUIStore = create<UIStore>()(
             )
           }
         }),
-      ensureSubAgentTab: (toolUseId, inlineText, title) =>
+      ensureSubAgentTab: (toolUseId, inlineText, title, requestedSessionId) =>
         set((state) => {
           const tabId = toolUseId ? `subagent:${toolUseId}` : 'subagent:overview'
           const sessionId =
-            state.activeScopedSessionId ?? useChatStore.getState().activeSessionId ?? null
+            normalizeScopeId(requestedSessionId) ??
+            state.activeScopedSessionId ??
+            useChatStore.getState().activeSessionId ??
+            null
           const existing = state.rightPanelTabs.find((tab) => tab.id === tabId)
           const tab: RightPanelTabInstance = existing
             ? {
                 ...existing,
+                sessionId: sessionId ?? existing.sessionId ?? null,
                 title: title?.trim() || existing.title,
                 inlineText: inlineText?.trim() ? inlineText : existing.inlineText
               }
@@ -967,18 +1038,26 @@ export const useUIStore = create<UIStore>()(
           const sessionId =
             state.activeScopedSessionId ?? useChatStore.getState().activeSessionId ?? null
           const existing = state.rightPanelTabs.find((tab) => tab.id === tabId)
-          const tab: RightPanelTabInstance = existing ?? {
-            id: tabId,
-            kind: 'terminal',
-            title: title?.trim() || 'Terminal',
-            closable: true,
-            sessionId,
-            processId,
-            createdAt: Date.now()
-          }
-          const rightPanelTabs = existing
-            ? ensureReviewTab(state.rightPanelTabs)
-            : ensureReviewTab([...state.rightPanelTabs, tab])
+          const tab: RightPanelTabInstance = existing
+            ? {
+                ...existing,
+                sessionId: sessionId ?? existing.sessionId ?? null,
+                title: title?.trim() || existing.title
+              }
+            : {
+                id: tabId,
+                kind: 'terminal',
+                title: title?.trim() || 'Terminal',
+                closable: true,
+                sessionId,
+                processId,
+                createdAt: Date.now()
+              }
+          const rightPanelTabs = ensureReviewTab(
+            existing
+              ? state.rightPanelTabs.map((item) => (item.id === tabId ? tab : item))
+              : [...state.rightPanelTabs, tab]
+          )
           return {
             rightPanelTabs,
             rightPanelActiveTabId: tabId,
@@ -1046,6 +1125,8 @@ export const useUIStore = create<UIStore>()(
           settingsPageOpen: true,
           settingsTab: tab ?? 'general',
           skillsPageOpen: false,
+          soulsPageOpen: false,
+          syncPageOpen: false,
           resourcesPageOpen: false,
           translatePageOpen: false,
           drawPageOpen: false,
@@ -1059,12 +1140,42 @@ export const useUIStore = create<UIStore>()(
           activeNavItem: 'skills',
           skillsPageOpen: true,
           settingsPageOpen: false,
+          soulsPageOpen: false,
+          syncPageOpen: false,
           resourcesPageOpen: false,
           translatePageOpen: false,
           drawPageOpen: false,
           tasksPageOpen: false
         }),
       closeSkillsPage: () => set({ skillsPageOpen: false }),
+      soulsPageOpen: false,
+      openSoulsPage: () =>
+        set({
+          activeNavItem: 'souls',
+          soulsPageOpen: true,
+          settingsPageOpen: false,
+          skillsPageOpen: false,
+          syncPageOpen: false,
+          resourcesPageOpen: false,
+          translatePageOpen: false,
+          drawPageOpen: false,
+          tasksPageOpen: false
+        }),
+      closeSoulsPage: () => set({ soulsPageOpen: false }),
+      syncPageOpen: false,
+      openSyncPage: () =>
+        set({
+          activeNavItem: 'sync',
+          syncPageOpen: true,
+          settingsPageOpen: false,
+          skillsPageOpen: false,
+          soulsPageOpen: false,
+          resourcesPageOpen: false,
+          translatePageOpen: false,
+          drawPageOpen: false,
+          tasksPageOpen: false
+        }),
+      closeSyncPage: () => set({ syncPageOpen: false }),
       resourcesPageOpen: false,
       openResourcesPage: () =>
         set({
@@ -1072,6 +1183,8 @@ export const useUIStore = create<UIStore>()(
           resourcesPageOpen: true,
           settingsPageOpen: false,
           skillsPageOpen: false,
+          soulsPageOpen: false,
+          syncPageOpen: false,
           translatePageOpen: false,
           drawPageOpen: false,
           tasksPageOpen: false
@@ -1084,6 +1197,8 @@ export const useUIStore = create<UIStore>()(
           translatePageOpen: true,
           settingsPageOpen: false,
           skillsPageOpen: false,
+          soulsPageOpen: false,
+          syncPageOpen: false,
           resourcesPageOpen: false,
           drawPageOpen: false,
           tasksPageOpen: false
@@ -1096,6 +1211,8 @@ export const useUIStore = create<UIStore>()(
           drawPageOpen: true,
           settingsPageOpen: false,
           skillsPageOpen: false,
+          soulsPageOpen: false,
+          syncPageOpen: false,
           resourcesPageOpen: false,
           translatePageOpen: false,
           tasksPageOpen: false
@@ -1108,6 +1225,8 @@ export const useUIStore = create<UIStore>()(
           tasksPageOpen: true,
           settingsPageOpen: false,
           skillsPageOpen: false,
+          soulsPageOpen: false,
+          syncPageOpen: false,
           resourcesPageOpen: false,
           translatePageOpen: false,
           drawPageOpen: false
@@ -1468,7 +1587,8 @@ export const useUIStore = create<UIStore>()(
           selectedOrchestrationRunId: null,
           selectedOrchestrationMemberId: null
         }),
-      openSubAgentsPanel: (toolUseId) => get().ensureSubAgentTab(toolUseId ?? null),
+      openSubAgentsPanel: (toolUseId, sessionId) =>
+        get().ensureSubAgentTab(toolUseId ?? null, null, null, sessionId),
       browserStatesBySession: {},
       getBrowserState: (sessionId, projectId) => {
         const state = get()
@@ -1526,8 +1646,8 @@ export const useUIStore = create<UIStore>()(
       subAgentExecutionDetailOpen: false,
       subAgentExecutionDetailToolUseId: null,
       subAgentExecutionDetailInlineText: null,
-      openSubAgentExecutionDetail: (toolUseId, inlineText, title) =>
-        get().ensureSubAgentTab(toolUseId, inlineText ?? null, title ?? null),
+      openSubAgentExecutionDetail: (toolUseId, inlineText, title, sessionId) =>
+        get().ensureSubAgentTab(toolUseId, inlineText ?? null, title ?? null, sessionId),
       closeSubAgentExecutionDetail: () =>
         set({
           subAgentExecutionDetailOpen: false,
@@ -1674,6 +1794,7 @@ export const useUIStore = create<UIStore>()(
         leftSidebarOpen: state.leftSidebarOpen,
         leftSidebarWidth: clampLeftSidebarWidth(state.leftSidebarWidth),
         rightPanelOpen: state.rightPanelOpen,
+        runtimeStatusPanelOpen: state.runtimeStatusPanelOpen,
         rightPanelWidth: clampRightPanelWidth(state.rightPanelWidth),
         workingFolderSheetOpen: state.workingFolderSheetOpen,
         workingFolderPanelWidth: clampWorkingFolderPanelWidth(state.workingFolderPanelWidth),
@@ -1694,6 +1815,10 @@ export const useUIStore = create<UIStore>()(
             state.leftSidebarWidth ?? current.leftSidebarWidth
           ),
           rightPanelWidth: clampRightPanelWidth(state.rightPanelWidth ?? current.rightPanelWidth),
+          runtimeStatusPanelOpen:
+            typeof state.runtimeStatusPanelOpen === 'boolean'
+              ? state.runtimeStatusPanelOpen
+              : current.runtimeStatusPanelOpen,
           rightPanelTabs: getDefaultRightPanelTabs(),
           rightPanelActiveTabId: RIGHT_PANEL_REVIEW_TAB_ID,
           rightPanelTab: 'preview',

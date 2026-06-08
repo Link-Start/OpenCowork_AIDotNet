@@ -8,6 +8,8 @@ import type {
 import { runInteractiveAgentLoop } from '../cron/cron-agent-background'
 import type { AgentStreamEnvelope } from '../../shared/agent-stream-protocol'
 import { AdaptiveEventBatcher } from './adaptive-event-batcher'
+import { getGoalRuntimeService } from '../goals/goal-runtime'
+import { emitGoalContinueRequested } from '../goals/goal-sync'
 
 type EventHandler = (envelope: AgentStreamEnvelope) => void
 type RequestHandler = (id: number | string, method: string, params: unknown) => Promise<unknown>
@@ -28,6 +30,9 @@ interface JsAgentRunRequest {
   pluginSenderName?: string
   sshConnectionId?: string
   captureFinalMessages?: boolean
+  compression?: AgentLoopConfig['contextCompression']
+  planMode?: boolean
+  goalRunSource?: 'user_turn' | 'continue'
 }
 
 type RuntimeMessage = Parameters<typeof runInteractiveAgentLoop>[0][number]
@@ -110,6 +115,26 @@ function normalizeRendererToolResult(value: unknown): RendererToolResult {
   }
 }
 
+function normalizeCompressionConfig(
+  value: JsAgentRunRequest['compression']
+): AgentLoopConfig['contextCompression'] | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const contextLength = Number(value.contextLength)
+  if (!Number.isFinite(contextLength) || contextLength <= 0) return undefined
+  const threshold = Number(value.threshold)
+  return {
+    enabled: value.enabled !== false,
+    contextLength: Math.floor(contextLength),
+    threshold: Number.isFinite(threshold) ? threshold : 0.8,
+    ...(Number.isFinite(Number(value.preCompressThreshold))
+      ? { preCompressThreshold: Number(value.preCompressThreshold) }
+      : {}),
+    ...(Number.isFinite(Number(value.reservedOutputBudget))
+      ? { reservedOutputBudget: Number(value.reservedOutputBudget) }
+      : {})
+  }
+}
+
 export class JsAgentRuntimeManager {
   private running = false
   private onRequestFromSidecar: RequestHandler | null = null
@@ -130,6 +155,10 @@ export class JsAgentRuntimeManager {
 
   get isRunning(): boolean {
     return this.running
+  }
+
+  hasActiveRuns(): boolean {
+    return this.activeRuns.size > 0
   }
 
   async start(): Promise<boolean> {
@@ -236,6 +265,8 @@ export class JsAgentRuntimeManager {
       }
     }
 
+    const contextCompression = normalizeCompressionConfig(params.compression)
+    const goalRuntime = getGoalRuntimeService()
     const loopConfig: AgentLoopConfig = {
       maxIterations:
         typeof params.maxIterations === 'number' && Number.isFinite(params.maxIterations)
@@ -247,6 +278,7 @@ export class JsAgentRuntimeManager {
       forceApproval: params.forceApproval === true,
       messageQueue,
       captureFinalMessages: params.captureFinalMessages === true,
+      ...(contextCompression ? { contextCompression } : {}),
       onApprovalNeeded: async (toolCall) => {
         return await this.requestUserApproval(runId, params.sessionId, toolCall)
       }
@@ -256,11 +288,22 @@ export class JsAgentRuntimeManager {
 
     const runPromise = (async () => {
       try {
-        const messages = Array.isArray(params.messages)
+        const initialMessages = Array.isArray(params.messages)
           ? (params.messages as Parameters<typeof runInteractiveAgentLoop>[0])
           : []
+        const messages = goalRuntime.prepareRun({
+          runId,
+          sessionId,
+          planMode: params.planMode === true,
+          source: params.goalRunSource,
+          messages: initialMessages,
+          enqueueMessages: (messagesToQueue) => {
+            messageQueue.pushMany(messagesToQueue as RuntimeMessage[])
+          }
+        }) as Parameters<typeof runInteractiveAgentLoop>[0]
         let eventsSinceYield = 0
         for await (const event of runInteractiveAgentLoop(messages, loopConfig, toolCtx)) {
+          await goalRuntime.observeEvent(runId, event)
           this.emitAgentEvent(runId, sessionId, event)
           eventsSinceYield++
           if (eventsSinceYield >= 20) {
@@ -270,6 +313,10 @@ export class JsAgentRuntimeManager {
         }
       } catch (error) {
         const normalized = error instanceof Error ? error : new Error(String(error))
+        await goalRuntime.observeEvent(runId, {
+          type: 'error',
+          error: normalized
+        })
         this.emitAgentEvent(runId, sessionId, {
           type: 'error',
           error: {
@@ -280,14 +327,25 @@ export class JsAgentRuntimeManager {
           details: normalized.message,
           stackTrace: normalized.stack
         })
+        await goalRuntime.observeEvent(runId, {
+          type: 'loop_end',
+          reason: controller.signal.aborted ? 'aborted' : 'error'
+        })
         this.emitAgentEvent(runId, sessionId, {
           type: 'loop_end',
           reason: controller.signal.aborted ? 'aborted' : 'error'
         })
       } finally {
+        const finalize = await goalRuntime.finalizeRun(runId)
         this.eventBatcher.flush(runId)
         this.eventBatcher.cleanupRun(runId)
         this.activeRuns.delete(runId)
+        if (finalize.requestContinue && finalize.sessionId) {
+          emitGoalContinueRequested({
+            sessionId: finalize.sessionId,
+            reason: 'goal-auto-continue'
+          })
+        }
       }
     })()
 

@@ -1,4 +1,4 @@
-import type { AgentRunFileChange } from '@renderer/stores/agent-store'
+import type { AgentRunChangeSet, AgentRunFileChange } from '@renderer/stores/agent-store'
 import type { DiffViewerChunk, DiffViewerLine } from './CodeDiffViewer'
 
 export interface AggregatedFileChange {
@@ -15,9 +15,7 @@ export interface AggregatedFileChange {
   before: AgentRunFileChange['before']
   after: AgentRunFileChange['after']
   createdAt: number
-  acceptedAt?: number
   revertedAt?: number
-  conflict?: string
   sourceChanges: AgentRunFileChange[]
   sourceIds: string[]
   firstChangeId: string
@@ -147,9 +145,7 @@ function changeGroupKey(
 
 function aggregateStatus(changes: AgentRunFileChange[]): AgentRunFileChange['status'] {
   if (changes.some((change) => change.status === 'open')) return 'open'
-  if (changes.some((change) => change.status === 'conflicted')) return 'conflicted'
-  if (changes.every((change) => change.status === 'reverted')) return 'reverted'
-  return 'accepted'
+  return 'reverted'
 }
 
 export function aggregateRunFileChanges(changes: AgentRunFileChange[]): AggregatedFileChange[] {
@@ -174,9 +170,7 @@ export function aggregateRunFileChanges(changes: AgentRunFileChange[]): Aggregat
         before: change.before,
         after: change.after,
         createdAt: change.createdAt,
-        acceptedAt: change.acceptedAt,
         revertedAt: change.revertedAt,
-        conflict: change.conflict,
         sourceChanges: [change],
         sourceIds: [change.id],
         firstChangeId: change.id,
@@ -190,9 +184,7 @@ export function aggregateRunFileChanges(changes: AgentRunFileChange[]): Aggregat
     existing.toolUseId = change.toolUseId ?? existing.toolUseId
     existing.toolName = change.toolName ?? existing.toolName
     existing.after = change.after
-    existing.acceptedAt = change.acceptedAt ?? existing.acceptedAt
     existing.revertedAt = change.revertedAt ?? existing.revertedAt
-    existing.conflict = change.conflict ?? existing.conflict
     existing.sourceChanges.push(change)
     existing.sourceIds.push(change.id)
     existing.lastChangeId = change.id
@@ -211,6 +203,26 @@ export function aggregateDisplayableRunFileChanges(
   return aggregateRunFileChanges(changes).filter((change) => hasDisplayableTrackedChange(change))
 }
 
+export function latestDisplayableRunChangeSet(
+  changeSets: readonly AgentRunChangeSet[]
+): AgentRunChangeSet | null {
+  let latest: AgentRunChangeSet | null = null
+
+  for (const changeSet of changeSets) {
+    if (aggregateDisplayableRunFileChanges(changeSet.changes).length === 0) continue
+
+    if (
+      !latest ||
+      changeSet.createdAt > latest.createdAt ||
+      (changeSet.createdAt === latest.createdAt && changeSet.updatedAt > latest.updatedAt)
+    ) {
+      latest = changeSet
+    }
+  }
+
+  return latest
+}
+
 export function matchesAggregatedChangeId(
   change: AggregatedFileChange,
   changeId?: string | null
@@ -220,9 +232,7 @@ export function matchesAggregatedChangeId(
 }
 
 export function actionableSourceChanges(change: AggregatedFileChange): AgentRunFileChange[] {
-  return change.sourceChanges.filter(
-    (entry) => entry.status === 'open' || entry.status === 'conflicted'
-  )
+  return change.sourceChanges.filter((entry) => entry.status === 'open')
 }
 
 export type DiffLine = DiffViewerLine

@@ -5,10 +5,6 @@ import {
   Send,
   FolderOpen,
   AlertTriangle,
-  CircleHelp,
-  Briefcase,
-  Code2,
-  ShieldCheck,
   FileUp,
   FileCode2,
   Sparkles,
@@ -18,12 +14,17 @@ import {
   ClipboardList,
   Globe,
   Wand2,
-  ChevronDown,
-  ChevronRight,
-  Pencil,
+  CornerDownRight,
+  Ellipsis,
   Command
 } from 'lucide-react'
 import { Button } from '@renderer/components/ui/button'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger
+} from '@renderer/components/ui/dropdown-menu'
 import { Textarea } from '@renderer/components/ui/textarea'
 import { Spinner } from '@renderer/components/ui/spinner'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@renderer/components/ui/tooltip'
@@ -81,6 +82,9 @@ import { FileAwareEditor, type FileAwareEditorHandle } from './FileAwareEditor'
 import { listCommands, type CommandCatalogItem } from '@renderer/lib/commands/command-loader'
 import { useMcpStore } from '@renderer/stores/mcp-store'
 import { usePlanStore } from '@renderer/stores/plan-store'
+import { useGoalStore } from '@renderer/stores/goal-store'
+import { useSkillsStore } from '@renderer/stores/skills-store'
+import { validateGoalObjective } from '@renderer/lib/agent/goal-context'
 import {
   clearPendingSessionMessages,
   dispatchNextQueuedMessageForSession,
@@ -112,13 +116,8 @@ import {
   DialogHeader,
   DialogTitle
 } from '@renderer/components/ui/dialog'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger
-} from '@renderer/components/ui/dropdown-menu'
 import { ipcClient } from '@renderer/lib/ipc/ipc-client'
+import { IPC } from '@renderer/lib/ipc/channels'
 import { cn } from '@renderer/lib/utils'
 import { resolveProjectMemoryTextFile } from '@renderer/lib/agent/memory-files'
 import { isProjectSession, workspaceContextAvailable } from '@renderer/lib/session-scope'
@@ -256,11 +255,13 @@ function ContextRing({
       </TooltipTrigger>
       <TooltipContent side="top">
         <div className="text-xs space-y-0.5">
-          <p className="font-medium">Compression Budget</p>
+          <p className="font-medium">{t('input.compressionBudget')}</p>
           <p className="text-muted-foreground">
             {formatTokens(ctxUsed)} / {formatTokens(ctxGaugeLimit)} ({pct.toFixed(1)}%)
           </p>
-          <p className="text-muted-foreground">{formatTokens(remaining)} remaining</p>
+          <p className="text-muted-foreground">
+            {formatTokens(remaining)} {t('input.remaining')}
+          </p>
           {onCompressContext && (
             <p className="text-muted-foreground">
               {isCompressing
@@ -320,25 +321,27 @@ const defaultRecommendationKeys: Record<AppMode, string> = {
   acp: 'input.recommendationDefaultAcp'
 }
 
-const composerModeOptions: Array<{
-  value: AppMode
-  label: string
-  icon: React.JSX.Element
-}> = [
-  { value: 'chat', label: 'Chat', icon: <Send className="size-3.5" /> },
-  { value: 'clarify', label: 'Clarify', icon: <CircleHelp className="size-3.5" /> },
-  { value: 'cowork', label: 'Cowork', icon: <Briefcase className="size-3.5" /> },
-  { value: 'code', label: 'Code', icon: <Code2 className="size-3.5" /> },
-  { value: 'acp', label: 'ACP', icon: <ShieldCheck className="size-3.5" /> }
-]
-
 interface FileSearchItem {
   name: string
   path: string
 }
 
+interface SlashSuggestionItem {
+  key: string
+  name: string
+  summary: string
+  kind: 'command' | 'skill'
+}
+
 const EMPTY_QUEUED_MESSAGES: PendingSessionMessageItem[] = []
 const INTERNAL_FILE_DRAG_MIME = 'application/x-opencowork-file-paths'
+const IMAGE_MEDIA_TYPE_BY_EXTENSION: Record<string, string> = {
+  gif: 'image/gif',
+  jpeg: 'image/jpeg',
+  jpg: 'image/jpeg',
+  png: 'image/png',
+  webp: 'image/webp'
+}
 const MIN_INPUT_HEIGHT = 120
 const DEFAULT_SESSION_INPUT_HEIGHT = 160
 const MAX_INPUT_HEIGHT = 500
@@ -412,6 +415,16 @@ function isReferenceOnlyDocument(document: EditorDocumentNode[]): boolean {
   return document.every((node) => node.type === 'file' || node.text.trim().length === 0)
 }
 
+function getImageMediaTypeForPath(filePath: string): string | null {
+  const normalized = filePath.split(/[?#]/, 1)[0]?.toLowerCase() ?? ''
+  const extension = normalized.match(/\.([a-z0-9]+)$/)?.[1]
+  return extension ? (IMAGE_MEDIA_TYPE_BY_EXTENSION[extension] ?? null) : null
+}
+
+function createImageAttachmentId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `image-${Date.now()}-${Math.random().toString(36)}`
+}
+
 interface InputAreaProps {
   sessionId?: string | null
   onSend: (text: string, images?: ImageAttachment[], options?: SendMessageOptions) => void
@@ -423,6 +436,11 @@ interface InputAreaProps {
   hideWorkingFolderPicker?: boolean
   onCompressContext?: () => ManualCompressionResult | void | Promise<ManualCompressionResult | void>
   disabled?: boolean
+  draftKeyOverride?: string | null
+  suppressPendingQueue?: boolean
+  hideGoalSessionBar?: boolean
+  hideModeSwitch?: boolean
+  modelRoute?: 'main' | 'fast'
 }
 
 export function InputArea({
@@ -435,11 +453,15 @@ export function InputArea({
   hideWorkingFolderIndicator = false,
   hideWorkingFolderPicker = false,
   onCompressContext,
-  disabled = false
+  disabled = false,
+  draftKeyOverride,
+  suppressPendingQueue = false,
+  hideGoalSessionBar = false,
+  hideModeSwitch = false,
+  modelRoute = 'main'
 }: InputAreaProps): React.JSX.Element {
   const { t } = useTranslation('chat')
   const chatView = useUIStore((s) => s.chatView)
-  const setMode = useUIStore((s) => s.setMode)
   const isSessionComposer = chatView === 'session' || Boolean(sessionId)
   const isHomeComposer = chatView === 'home' || chatView === 'project'
   const minComposerHeight = MIN_INPUT_HEIGHT
@@ -465,6 +487,7 @@ export function InputArea({
   const [fileSearchLoading, setFileSearchLoading] = React.useState(false)
   const [selectedFileSearchIndex, setSelectedFileSearchIndex] = React.useState(0)
   const [attachedImages, setAttachedImages] = React.useState<ImageAttachment[]>([])
+  const [previewImage, setPreviewImage] = React.useState<ImageAttachment | null>(null)
   const [pendingImageReads, setPendingImageReads] = React.useState(0)
   const [isOptimizing, setIsOptimizing] = React.useState(false)
   const [contextCompressionStatus, setContextCompressionStatus] =
@@ -481,7 +504,6 @@ export function InputArea({
   )
   const contentScrollRef = React.useRef<HTMLDivElement>(null)
   const editorRef = React.useRef<FileAwareEditorHandle | null>(null)
-  const fileInputRef = React.useRef<HTMLInputElement>(null)
   const queueFileInputRef = React.useRef<HTMLInputElement>(null)
   const rootRef = React.useRef<HTMLDivElement>(null)
   const draftSaveTimerRef = React.useRef<ReturnType<typeof setTimeout>>(undefined)
@@ -658,19 +680,27 @@ export function InputArea({
   )
   const activeProvider = useProviderStore(
     useShallow((s) => {
-      const { providers, activeProviderId } = s
-      if (!activeProviderId) return null
-      const p = providers.find((p) => p.id === activeProviderId)
+      const { providers, activeProviderId, activeModelId } = s
+      const fastConfig = modelRoute === 'fast' ? s.getFastProviderConfig() : null
+      const providerId = fastConfig?.providerId ?? activeProviderId
+      const modelId = fastConfig?.model ?? activeModelId
+      if (!providerId) return null
+      const p = providers.find((p) => p.id === providerId)
       if (!p) return null
-      return { apiKey: p.apiKey, requiresApiKey: p.requiresApiKey, type: p.type, models: p.models }
+      return {
+        apiKey: p.apiKey,
+        requiresApiKey: p.requiresApiKey,
+        type: p.type,
+        models: p.models,
+        modelId
+      }
     })
   )
-  const activeModelId = useProviderStore((s) => s.activeModelId)
   const supportsVision = React.useMemo(() => {
     if (!activeProvider) return false
-    const model = activeProvider.models.find((m) => m.id === activeModelId)
+    const model = activeProvider.models.find((m) => m.id === activeProvider.modelId)
     return modelSupportsVision(model, activeProvider.type)
-  }, [activeProvider, activeModelId])
+  }, [activeProvider])
   const webSearchEnabled = useSettingsStore((s) => s.webSearchEnabled)
   const webSearchProvider = useSettingsStore((s) => s.webSearchProvider)
   const webSearchApiKey = useSettingsStore((s) => s.webSearchApiKey)
@@ -722,7 +752,14 @@ export function InputArea({
     return targetSession?.sshConnectionId ?? activeProject?.sshConnectionId ?? null
   })
   const showInlineClearConversation = false
-  const { activeSessionId, hasMessages, clearSessionMessages, updateSessionMode } = useChatStore(
+  const { installedSkills, skillsLoading, loadSkills } = useSkillsStore(
+    useShallow((s) => ({
+      installedSkills: s.skills,
+      skillsLoading: s.loading,
+      loadSkills: s.loadSkills
+    }))
+  )
+  const { activeSessionId, hasMessages, clearSessionMessages } = useChatStore(
     useShallow((s) => {
       const targetSessionId = sessionId ?? s.activeSessionId
       const idx = targetSessionId ? s.sessionsById[targetSessionId] : undefined
@@ -730,8 +767,7 @@ export function InputArea({
       return {
         activeSessionId: targetSessionId,
         hasMessages: (targetSession?.messageCount ?? 0) > 0,
-        clearSessionMessages: s.clearSessionMessages,
-        updateSessionMode: s.updateSessionMode
+        clearSessionMessages: s.clearSessionMessages
       }
     })
   )
@@ -754,8 +790,8 @@ export function InputArea({
     workingFolder
   })
   const activeDraftKey = React.useMemo(
-    () => (draftSessionId ? getSessionInputDraftKey(draftSessionId) : null),
-    [draftSessionId]
+    () => draftKeyOverride ?? (draftSessionId ? getSessionInputDraftKey(draftSessionId) : null),
+    [draftKeyOverride, draftSessionId]
   )
   const inputDraftHydrated = useInputDraftStore((s) => s.hydrated)
   const persistedDraft = useInputDraftStore(
@@ -769,6 +805,7 @@ export function InputArea({
   const draftReadyKeyRef = React.useRef<string | null>(null)
   const queuedMessagesSnapshotRef = React.useRef<PendingSessionMessageItem[]>(EMPTY_QUEUED_MESSAGES)
   const getQueuedMessagesSnapshot = React.useCallback(() => {
+    if (suppressPendingQueue) return EMPTY_QUEUED_MESSAGES
     const next = activeSessionId
       ? getPendingSessionMessages(activeSessionId)
       : EMPTY_QUEUED_MESSAGES
@@ -778,7 +815,7 @@ export function InputArea({
     }
     queuedMessagesSnapshotRef.current = next
     return next
-  }, [activeSessionId])
+  }, [activeSessionId, suppressPendingQueue])
   const queuedMessages = React.useSyncExternalStore(
     subscribePendingSessionMessages,
     getQueuedMessagesSnapshot,
@@ -786,18 +823,19 @@ export function InputArea({
   )
   const isQueueDispatchPaused = React.useSyncExternalStore(
     subscribePendingSessionMessages,
-    () => (activeSessionId ? isPendingSessionDispatchPaused(activeSessionId) : false),
+    () =>
+      !suppressPendingQueue && activeSessionId
+        ? isPendingSessionDispatchPaused(activeSessionId)
+        : false,
     () => false
   )
   const [editingQueueItemId, setEditingQueueItemId] = React.useState<string | null>(null)
   const [editingQueueText, setEditingQueueText] = React.useState('')
   const [editingQueueImages, setEditingQueueImages] = React.useState<ImageAttachment[]>([])
-  const queueExpandedBySessionRef = React.useRef<Record<string, boolean>>({})
-  const previousQueueSizeBySessionRef = React.useRef<Record<string, number>>({})
-  const [isQueueExpanded, setIsQueueExpanded] = React.useState(false)
   const [queueClearConfirmOpen, setQueueClearConfirmOpen] = React.useState(false)
   const [autoAcceptCountdown, setAutoAcceptCountdown] = React.useState<number | null>(null)
   const [isWorkspaceAgentsMissing, setIsWorkspaceAgentsMissing] = React.useState(false)
+  const [pendingPlanMode, setPendingPlanMode] = React.useState(false)
 
   React.useLayoutEffect(() => {
     if (inputHeight === null) return
@@ -808,15 +846,7 @@ export function InputArea({
       if (prev >= minH && prev <= maxH) return prev
       return Math.min(Math.max(prev, minH), maxH)
     })
-  }, [
-    attachedImages.length,
-    selectedSkill,
-    queuedMessages.length,
-    isQueueExpanded,
-    getMaxInputHeight,
-    getMinInputHeight,
-    inputHeight
-  ])
+  }, [attachedImages.length, selectedSkill, getMaxInputHeight, getMinInputHeight, inputHeight])
 
   const syncAutoInputHeight = React.useCallback(() => {
     if (inputHeight !== null) return
@@ -839,15 +869,7 @@ export function InputArea({
 
   React.useLayoutEffect(() => {
     syncAutoInputHeight()
-  }, [
-    syncAutoInputHeight,
-    documentNodes,
-    selectedFiles,
-    attachedImages.length,
-    selectedSkill,
-    queuedMessages.length,
-    isQueueExpanded
-  ])
+  }, [syncAutoInputHeight, documentNodes, selectedFiles, attachedImages.length, selectedSkill])
 
   React.useEffect(() => {
     if (typeof ResizeObserver === 'undefined') return
@@ -925,6 +947,7 @@ export function InputArea({
 
   const removeQueuedImage = React.useCallback((id: string) => {
     setEditingQueueImages((prev) => prev.filter((img) => img.id !== id))
+    setPreviewImage((current) => (current?.id === id ? null : current))
   }, [])
 
   const saveQueuedMessage = React.useCallback(
@@ -954,16 +977,6 @@ export function InputArea({
     },
     [activeSessionId, queuedMessages, editingQueueText, editingQueueImages]
   )
-
-  const toggleQueueExpanded = React.useCallback(() => {
-    setIsQueueExpanded((prev) => {
-      const next = !prev
-      if (activeSessionId) {
-        queueExpandedBySessionRef.current[activeSessionId] = next
-      }
-      return next
-    })
-  }, [activeSessionId])
 
   const clearQueuedMessagesForActiveSession = React.useCallback(() => {
     if (!activeSessionId) return
@@ -1118,25 +1131,45 @@ export function InputArea({
   const fileQuery = activeFileMention?.query.trim() ?? ''
   const fileMenuOpen = projectScoped && Boolean(activeFileMention)
   const slashQuery = React.useMemo(() => getSlashCommandQuery(text), [text])
-  const filteredSlashCommands = React.useMemo(() => {
+  const filteredSlashSuggestions = React.useMemo(() => {
     const query = slashQuery ?? ''
-    const commandsByName = new Map<string, CommandCatalogItem>()
+    const suggestionsByIdentity = new Map<string, SlashSuggestionItem>()
+
     for (const command of [...BUILTIN_SLASH_COMMANDS, ...slashCommands]) {
-      commandsByName.set(command.name, command)
+      suggestionsByIdentity.set(`command:${command.name.toLowerCase()}`, {
+        key: `command:${command.name}`,
+        name: command.name,
+        summary: command.summary,
+        kind: 'command'
+      })
     }
-    return [...commandsByName.values()]
-      .map((command) => ({ command, score: scoreSlashCommand(command.name, query) }))
+
+    for (const skill of installedSkills) {
+      suggestionsByIdentity.set(`skill:${skill.name.toLowerCase()}`, {
+        key: `skill:${skill.name}`,
+        name: skill.name,
+        summary: skill.description,
+        kind: 'skill'
+      })
+    }
+
+    return [...suggestionsByIdentity.values()]
+      .map((item) => ({ item, score: scoreSlashCommand(item.name, query) }))
       .filter((item) => Number.isFinite(item.score))
       .sort((left, right) => {
         if (left.score !== right.score) return left.score - right.score
-        return left.command.name.localeCompare(right.command.name, undefined, {
+        if (left.item.kind !== right.item.kind) {
+          return left.item.kind === 'command' ? -1 : 1
+        }
+        return left.item.name.localeCompare(right.item.name, undefined, {
           sensitivity: 'base'
         })
       })
       .slice(0, MAX_SLASH_COMMAND_RESULTS)
-      .map((item) => item.command)
-  }, [slashCommands, slashQuery])
+      .map((item) => item.item)
+  }, [installedSkills, slashCommands, slashQuery])
   const slashMenuOpen = slashQuery !== null
+  const slashSuggestionsLoading = slashCommandsLoading || skillsLoading
 
   React.useEffect(() => {
     if (!slashMenuOpen) {
@@ -1148,8 +1181,8 @@ export function InputArea({
     let cancelled = false
     setSlashCommandsLoading(true)
 
-    void listCommands()
-      .then((commands) => {
+    void Promise.all([listCommands(), loadSkills()])
+      .then(([commands]) => {
         if (cancelled) return
         setSlashCommands(commands)
       })
@@ -1161,7 +1194,7 @@ export function InputArea({
     return () => {
       cancelled = true
     }
-  }, [slashMenuOpen, slashQuery])
+  }, [loadSkills, slashMenuOpen])
 
   React.useEffect(() => {
     setSelectedSlashIndex(0)
@@ -1263,14 +1296,43 @@ export function InputArea({
     },
     [applyEditorStateFromSerializedText, focusInputAtEnd, selectedFiles]
   )
+  const selectSlashSkill = React.useCallback(
+    (skillName: string) => {
+      setSelectedSkill(skillName)
+      applyEditorStateFromSerializedText('')
+      requestAnimationFrame(() => {
+        focusInputAtEnd()
+      })
+    },
+    [applyEditorStateFromSerializedText, focusInputAtEnd]
+  )
+  const applySlashSuggestion = React.useCallback(
+    (item: SlashSuggestionItem) => {
+      if (item.kind === 'skill') {
+        selectSlashSkill(item.name)
+        return
+      }
+      insertSlashCommand(item.name)
+    },
+    [insertSlashCommand, selectSlashSkill]
+  )
   const hasApiKey = !!activeProvider?.apiKey || activeProvider?.requiresApiKey === false
   const needsWorkingFolder = projectScoped && !workingFolder
   const planMode = useUIStore((s) =>
-    draftSessionId ? Boolean(s.planModesBySession[draftSessionId]) : false
+    draftSessionId ? Boolean(s.planModesBySession[draftSessionId]) : pendingPlanMode
+  )
+  const activeGoal = useGoalStore((s) =>
+    draftSessionId ? s.goalsBySession[draftSessionId] : undefined
   )
   const pendingReviewPlanId = usePlanStore((s) =>
     draftSessionId ? (s.getPendingReviewPlan(draftSessionId)?.id ?? null) : null
   )
+
+  React.useEffect(() => {
+    if (draftSessionId) {
+      setPendingPlanMode(false)
+    }
+  }, [draftSessionId])
 
   React.useEffect(() => {
     let cancelled = false
@@ -1293,12 +1355,6 @@ export function InputArea({
       cancelled = true
     }
   }, [activeSshConnectionId, workspaceReady, workingFolder])
-
-  React.useEffect(() => {
-    if (!isStreaming && !disabled) {
-      editorRef.current?.focus()
-    }
-  }, [isStreaming, disabled])
 
   React.useEffect(() => {
     if (!shouldAutoAcceptRecommendation || !suggestionText || !text.trim()) {
@@ -1346,15 +1402,7 @@ export function InputArea({
     setEditingQueueText('')
     setEditingQueueImages([])
     setQueueClearConfirmOpen(false)
-    if (!activeSessionId) {
-      setIsQueueExpanded(false)
-      return
-    }
-    setIsQueueExpanded(
-      queueExpandedBySessionRef.current[activeSessionId] ?? queuedMessages.length > 0
-    )
-    previousQueueSizeBySessionRef.current[activeSessionId] = queuedMessages.length
-  }, [activeSessionId, queuedMessages.length])
+  }, [activeSessionId])
 
   React.useEffect(() => {
     if (!editingQueueItemId) return
@@ -1371,18 +1419,9 @@ export function InputArea({
   }, [isStreaming, cancelEditQueuedMessage])
 
   React.useEffect(() => {
-    if (!activeSessionId) return
-    const previousSize = previousQueueSizeBySessionRef.current[activeSessionId] ?? 0
-    if (queuedMessages.length > previousSize) {
-      queueExpandedBySessionRef.current[activeSessionId] = true
-      setIsQueueExpanded(true)
-    } else if (queuedMessages.length === 0) {
-      queueExpandedBySessionRef.current[activeSessionId] = false
-      setIsQueueExpanded(false)
-      setQueueClearConfirmOpen(false)
-    }
-    previousQueueSizeBySessionRef.current[activeSessionId] = queuedMessages.length
-  }, [activeSessionId, queuedMessages.length])
+    if (queuedMessages.length > 0) return
+    setQueueClearConfirmOpen(false)
+  }, [queuedMessages.length])
 
   React.useEffect(() => {
     if (!inputDraftHydrated) return
@@ -1403,6 +1442,7 @@ export function InputArea({
       shouldResetHomeReferenceDraft ? [] : persistedSelectedFiles
     )
     setAttachedImages(persistedDraft?.images ? cloneImageAttachments(persistedDraft.images) : [])
+    setPreviewImage(null)
     setSelectedSkill(persistedDraft?.skill ?? null)
     setHighlightedFileId(null)
     setEditorSelection({ start: 0, end: 0 })
@@ -1422,6 +1462,29 @@ export function InputArea({
     persistedDraft,
     workingFolder
   ])
+
+  React.useEffect(() => {
+    if (isStreaming || disabled || !inputDraftHydrated) return
+
+    const rafId = window.requestAnimationFrame(() => {
+      if (activeDraftKey && draftReadyKeyRef.current !== activeDraftKey) return
+
+      const activeElement = document.activeElement
+      if (
+        activeElement &&
+        activeElement !== document.body &&
+        !rootRef.current?.contains(activeElement)
+      ) {
+        return
+      }
+
+      editorRef.current?.focus()
+    })
+
+    return () => {
+      window.cancelAnimationFrame(rafId)
+    }
+  }, [activeDraftKey, disabled, inputDraftHydrated, isStreaming])
 
   React.useEffect(() => {
     if (!activeDraftKey || !inputDraftHydrated) return
@@ -1495,7 +1558,31 @@ export function InputArea({
 
   const removeImage = React.useCallback((id: string) => {
     setAttachedImages((prev) => prev.filter((img) => img.id !== id))
+    setPreviewImage((current) => (current?.id === id ? null : current))
   }, [])
+
+  const readImagePathAsAttachment = React.useCallback(
+    async (filePath: string): Promise<ImageAttachment | null> => {
+      const mediaType = getImageMediaTypeForPath(filePath)
+      if (!mediaType) return null
+
+      const result = (await ipcClient.invoke(IPC.FS_READ_FILE_BINARY, { path: filePath })) as {
+        data?: string
+        error?: string
+      }
+      if (result.error || !result.data) {
+        console.warn('[InputArea] Failed to read selected image:', result.error ?? filePath)
+        return null
+      }
+
+      return {
+        id: createImageAttachmentId(),
+        dataUrl: `data:${mediaType};base64,${result.data}`,
+        mediaType
+      }
+    },
+    []
+  )
 
   const addFilesToEditor = React.useCallback(
     (filePaths: string[], selection?: { start: number; end: number }) => {
@@ -1526,6 +1613,86 @@ export function InputArea({
     },
     [editorSelection.end, editorSelection.start, replaceSelectionWithText, workingFolder]
   )
+
+  const handleAttachMedia = React.useCallback(async (): Promise<void> => {
+    try {
+      const result = (await ipcClient.invoke(IPC.FS_SELECT_FILE, {
+        multiSelections: true,
+        filters: [
+          {
+            name: t('input.mediaFilter'),
+            extensions: [
+              'png',
+              'jpg',
+              'jpeg',
+              'gif',
+              'webp',
+              'md',
+              'txt',
+              'docx',
+              'pdf',
+              'html',
+              'csv',
+              'json',
+              'xml',
+              'yaml',
+              'yml',
+              'ts',
+              'js',
+              'tsx',
+              'jsx'
+            ]
+          },
+          { name: t('input.allFilesFilter'), extensions: ['*'] }
+        ]
+      })) as { canceled?: boolean; path?: string; paths?: string[] }
+
+      const paths = Array.from(
+        new Set(
+          (Array.isArray(result.paths) && result.paths.length > 0
+            ? result.paths
+            : result.path
+              ? [result.path]
+              : []
+          ).filter((filePath): filePath is string => Boolean(filePath))
+        )
+      )
+      if (result.canceled || paths.length === 0) return
+
+      const imagePaths = supportsVision
+        ? paths.filter((filePath) => Boolean(getImageMediaTypeForPath(filePath)))
+        : []
+      const filePaths = paths.filter((filePath) => !imagePaths.includes(filePath))
+      const imageFallbackPaths: string[] = []
+
+      if (imagePaths.length > 0) {
+        setPendingImageReads((prev) => prev + imagePaths.length)
+        try {
+          const images = await Promise.all(
+            imagePaths.map(async (filePath) => {
+              const attachment = await readImagePathAsAttachment(filePath)
+              if (!attachment) imageFallbackPaths.push(filePath)
+              return attachment
+            })
+          )
+          const validImages = images.filter((image): image is ImageAttachment => Boolean(image))
+          if (validImages.length > 0) {
+            setAttachedImages((prev) => [...prev, ...validImages])
+          }
+        } finally {
+          setPendingImageReads((prev) => Math.max(0, prev - imagePaths.length))
+        }
+      }
+
+      const pathsForFileReferences = [...filePaths, ...imageFallbackPaths]
+      if (pathsForFileReferences.length > 0) {
+        addFilesToEditor(pathsForFileReferences)
+      }
+    } catch (error) {
+      console.error('[InputArea] Failed to attach media:', error)
+      toast.error(t('input.attachMediaFailed'))
+    }
+  }, [addFilesToEditor, readImagePathAsAttachment, supportsVision, t])
 
   const handlePreviewFile = React.useCallback(
     (fileId: string) => {
@@ -1585,30 +1752,6 @@ export function InputArea({
     )
   }, [])
 
-  const showAllComposerModesForNewSession = !draftSessionId && Boolean(activeProjectId)
-  const availableComposerModes = React.useMemo(() => {
-    if (showAllComposerModesForNewSession) {
-      return composerModeOptions
-    }
-    return projectScoped
-      ? composerModeOptions.filter((option) => option.value !== 'chat')
-      : composerModeOptions.filter((option) => option.value === 'chat')
-  }, [projectScoped, showAllComposerModesForNewSession])
-  const showModeSwitchControl = availableComposerModes.length > 1
-  const activeComposerMode =
-    availableComposerModes.find((option) => option.value === mode) ??
-    availableComposerModes[0] ??
-    composerModeOptions[0]!
-  const handleModeSwitch = React.useCallback(
-    (nextMode: AppMode) => {
-      setMode(nextMode)
-      if (draftSessionId) {
-        updateSessionMode(draftSessionId, nextMode)
-      }
-    },
-    [draftSessionId, setMode, updateSessionMode]
-  )
-
   const getLiveEditorState = React.useCallback(() => {
     const liveDocument = editorRef.current?.getDocumentSnapshot() ?? documentRef.current
     const referencedFileIds = new Set(
@@ -1628,6 +1771,23 @@ export function InputArea({
     }
   }, [])
 
+  const resetComposer = React.useCallback((): void => {
+    if (activeDraftKey) {
+      removePersistedDraft(activeDraftKey)
+    }
+
+    setDocumentNodes([])
+    setSelectedFiles([])
+    setHighlightedFileId(null)
+    setEditorSelection({ start: 0, end: 0 })
+    setAttachedImages([])
+    setPreviewImage(null)
+    setSelectedSkill(null)
+    requestAnimationFrame(() => {
+      editorRef.current?.setSelectionOffsets(0, 0)
+    })
+  }, [activeDraftKey, removePersistedDraft])
+
   const handleSend = React.useCallback((): void => {
     const liveEditorState = getLiveEditorState()
     const serialized = liveEditorState.serializedText.trim()
@@ -1643,22 +1803,11 @@ export function InputArea({
         : serialized
 
     onSend(message, attachedImages.length > 0 ? attachedImages : undefined, {
-      clearCompletedTasksOnTurnStart: true
+      clearCompletedTasksOnTurnStart: true,
+      enablePlanMode: planMode || undefined
     })
 
-    if (activeDraftKey) {
-      removePersistedDraft(activeDraftKey)
-    }
-
-    setDocumentNodes([])
-    setSelectedFiles([])
-    setHighlightedFileId(null)
-    setEditorSelection({ start: 0, end: 0 })
-    setAttachedImages([])
-    setSelectedSkill(null)
-    requestAnimationFrame(() => {
-      editorRef.current?.setSelectionOffsets(0, 0)
-    })
+    resetComposer()
   }, [
     getLiveEditorState,
     attachedImages,
@@ -1668,9 +1817,90 @@ export function InputArea({
     cancelPromptRecommendation,
     selectedSkill,
     onSend,
-    activeDraftKey,
-    removePersistedDraft
+    planMode,
+    resetComposer
   ])
+
+  const handlePlanModeChange = React.useCallback(
+    (enabled: boolean): void => {
+      if (enabled && !projectScoped) {
+        toast.error(
+          t('input.planModeUnavailable', {
+            defaultValue: 'Plan Mode needs a project working folder.'
+          })
+        )
+        return
+      }
+
+      if (draftSessionId) {
+        if (enabled) {
+          useUIStore.getState().enterPlanMode(draftSessionId)
+        } else {
+          useUIStore.getState().exitPlanMode(draftSessionId)
+        }
+        return
+      }
+
+      setPendingPlanMode(enabled)
+    },
+    [draftSessionId, projectScoped, t]
+  )
+
+  const handleGoalModeChange = React.useCallback(
+    (enabled: boolean): void => {
+      if (disabled || isStreaming || isOptimizing || pendingImageReads > 0) return
+
+      if (!enabled) {
+        if (draftSessionId && activeGoal?.status === 'active') {
+          void useGoalStore
+            .getState()
+            .loadGoalForSession(draftSessionId, true)
+            .then(async () => {
+              return await useGoalStore.getState().updateGoal(draftSessionId, { status: 'paused' })
+            })
+            .then(async (result) => {
+              if (!result.success) {
+                toast.error(t('goal.toasts.updateFailed'), { description: result.error })
+              }
+            })
+        }
+        return
+      }
+
+      const liveEditorState = getLiveEditorState()
+      const objective = liveEditorState.serializedText.trim() || activeGoal?.objective.trim() || ''
+      const validation = validateGoalObjective(objective)
+      if (validation) {
+        toast.error(t('goal.toasts.objectiveInvalid'), { description: validation })
+        return
+      }
+
+      cancelPromptRecommendation()
+      onSend('', undefined, {
+        clearCompletedTasksOnTurnStart: true,
+        enablePlanMode: planMode || undefined,
+        goalObjective: objective
+      })
+
+      if (liveEditorState.serializedText.trim()) {
+        resetComposer()
+      }
+    },
+    [
+      activeGoal,
+      cancelPromptRecommendation,
+      disabled,
+      draftSessionId,
+      getLiveEditorState,
+      isOptimizing,
+      isStreaming,
+      onSend,
+      pendingImageReads,
+      planMode,
+      resetComposer,
+      t
+    ]
+  )
 
   const handleKeyDown = React.useCallback(
     (e: React.KeyboardEvent<HTMLDivElement>): void => {
@@ -1716,24 +1946,24 @@ export function InputArea({
         if (!e.altKey && !e.ctrlKey && !e.metaKey && e.key === 'ArrowDown') {
           e.preventDefault()
           setSelectedSlashIndex((prev) =>
-            filteredSlashCommands.length === 0 ? 0 : (prev + 1) % filteredSlashCommands.length
+            filteredSlashSuggestions.length === 0 ? 0 : (prev + 1) % filteredSlashSuggestions.length
           )
           return
         }
         if (!e.altKey && !e.ctrlKey && !e.metaKey && e.key === 'ArrowUp') {
           e.preventDefault()
           setSelectedSlashIndex((prev) =>
-            filteredSlashCommands.length === 0
+            filteredSlashSuggestions.length === 0
               ? 0
-              : (prev - 1 + filteredSlashCommands.length) % filteredSlashCommands.length
+              : (prev - 1 + filteredSlashSuggestions.length) % filteredSlashSuggestions.length
           )
           return
         }
         if (!e.altKey && !e.ctrlKey && !e.metaKey && (e.key === 'Tab' || e.key === 'Enter')) {
-          const selectedCommand = filteredSlashCommands[selectedSlashIndex]
-          if (selectedCommand) {
+          const selectedSuggestion = filteredSlashSuggestions[selectedSlashIndex]
+          if (selectedSuggestion) {
             e.preventDefault()
-            insertSlashCommand(selectedCommand.name)
+            applySlashSuggestion(selectedSuggestion)
             return
           }
         }
@@ -1763,11 +1993,11 @@ export function InputArea({
       slashMenuOpen,
       fileSearchResults,
       selectedFileSearchIndex,
-      filteredSlashCommands,
+      filteredSlashSuggestions,
       selectedSlashIndex,
       activeFileMention,
       insertSelectedFile,
-      insertSlashCommand,
+      applySlashSuggestion,
       acceptSuggestion,
       applyEditorStateFromSerializedText,
       selectedFiles,
@@ -2045,44 +2275,6 @@ export function InputArea({
 
   const composerVariant = 'session'
   const composerIconControlClass = 'composer-control rounded-xl'
-  const composerTextControlClass = 'composer-control rounded-xl text-[11px] shadow-none'
-
-  const modeSwitchControl = (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          variant="ghost"
-          size="sm"
-          data-tour="mode-switch"
-          className={cn('gap-1.5 px-2.5', composerTextControlClass)}
-          disabled={disabled || isStreaming}
-        >
-          {activeComposerMode.icon}
-          <span>{activeComposerMode.label}</span>
-          <ChevronDown className="size-3.5 text-muted-foreground" />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="composer-flyout w-40">
-        {availableComposerModes.map((option) => {
-          const active = mode === option.value
-          return (
-            <DropdownMenuItem
-              key={option.value}
-              className={cn(
-                'gap-2',
-                active &&
-                  'bg-accent text-accent-foreground focus:bg-accent focus:text-accent-foreground'
-              )}
-              onSelect={() => handleModeSwitch(option.value)}
-            >
-              {option.icon}
-              <span>{option.label}</span>
-            </DropdownMenuItem>
-          )
-        })}
-      </DropdownMenuContent>
-    </DropdownMenu>
-  )
 
   const webSearchToggleControl = canToggleWebSearch && (
     <Tooltip>
@@ -2115,14 +2307,25 @@ export function InputArea({
       onSelectCommand={(name) => {
         insertSlashCommand(name)
       }}
-      onAttachMedia={() => {
-        fileInputRef.current?.click()
-      }}
+      onAttachMedia={() => void handleAttachMedia()}
       disabled={disabled || isStreaming}
       projectId={activeProjectId}
       showChannels={mode !== 'chat'}
       triggerClassName={composerIconControlClass}
       menuClassName="composer-flyout"
+      showModeToggles={!hideModeSwitch}
+      planModeEnabled={planMode}
+      goalModeEnabled={activeGoal?.status === 'active'}
+      planModeDisabled={disabled || isStreaming || !projectScoped}
+      goalModeDisabled={
+        disabled ||
+        isStreaming ||
+        isOptimizing ||
+        pendingImageReads > 0 ||
+        (!finalSerializedText.trim() && !activeGoal)
+      }
+      onPlanModeChange={handlePlanModeChange}
+      onGoalModeChange={handleGoalModeChange}
     />
   )
 
@@ -2213,6 +2416,264 @@ export function InputArea({
     </Tooltip>
   )
 
+  const queuedMessagesPanel =
+    queuedMessages.length > 0 ? (
+      <>
+        <div className="mx-auto mb-2 w-full max-w-[820px] overflow-hidden rounded-lg border border-border/50 bg-muted/20 shadow-sm backdrop-blur">
+          <div className="max-h-40 overflow-y-auto py-1">
+            {queuedMessages.map((msg, index) => {
+              const isEditing = editingQueueItemId === msg.id
+              const summaryText = summarizeQueuedMessage(msg.text)
+              const commandLabel = msg.command ? `/${msg.command.name}` : ''
+              const fallbackText =
+                summaryText ||
+                commandLabel ||
+                t('input.queueImageOnly', { defaultValue: '[Images only]' })
+              const quoteLabel = t('input.queueQuote', { defaultValue: 'Quote' })
+
+              return (
+                <div
+                  key={msg.id}
+                  className={cn(
+                    'border-b border-border/35 last:border-b-0',
+                    isEditing ? 'px-3 py-2' : 'group flex min-h-8 items-center gap-2 px-3 py-1'
+                  )}
+                >
+                  {isEditing ? (
+                    <div className="w-full space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[10px] font-medium text-muted-foreground">
+                          {t('input.queueEditing', { defaultValue: 'Edit queued message' })}
+                        </span>
+                        <div className="flex items-center gap-1">
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 rounded-md px-2 text-[10px] text-muted-foreground hover:bg-muted/70 hover:text-foreground"
+                            onClick={() => saveQueuedMessage(msg.id)}
+                          >
+                            {t('action.save', { ns: 'common' })}
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 rounded-md px-2 text-[10px] text-muted-foreground hover:bg-muted/70 hover:text-foreground"
+                            onClick={cancelEditQueuedMessage}
+                          >
+                            {t('action.cancel', { ns: 'common' })}
+                          </Button>
+                        </div>
+                      </div>
+                      {msg.command && (
+                        <div className="rounded-md border border-violet-500/20 bg-violet-500/5 px-2.5 py-1.5 text-[10px] font-medium text-violet-700 dark:text-violet-300">
+                          /{msg.command.name}
+                        </div>
+                      )}
+                      <Textarea
+                        value={editingQueueText}
+                        onChange={(e) => setEditingQueueText(e.target.value)}
+                        onPaste={handleQueueEditPaste}
+                        className="composer-aux-textarea min-h-[56px] max-h-36 resize-none text-xs"
+                        rows={2}
+                      />
+                      {editingQueueImages.length > 0 && (
+                        <div className="flex gap-2 overflow-x-auto pb-1">
+                          {editingQueueImages.map((img) => (
+                            <div key={img.id} className="relative group/img shrink-0">
+                              <button
+                                type="button"
+                                className="block cursor-zoom-in rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                aria-label={t('userMessage.imagePreview')}
+                                title={t('userMessage.imagePreview')}
+                                onClick={() => setPreviewImage(img)}
+                              >
+                                <img
+                                  src={img.dataUrl}
+                                  alt=""
+                                  className="composer-image-thumb size-12 rounded-lg object-cover transition-transform group-hover/img:scale-[1.03]"
+                                />
+                              </button>
+                              <button
+                                type="button"
+                                className="absolute -top-1.5 -right-1.5 flex size-4 items-center justify-center rounded-full bg-destructive text-destructive-foreground shadow-sm opacity-0 transition-opacity group-hover/img:opacity-100"
+                                aria-label={t('userMessage.removeImage')}
+                                title={t('userMessage.removeImage')}
+                                onClick={() => removeQueuedImage(img.id)}
+                              >
+                                <X className="size-2.5" />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      <div className="flex items-center justify-between gap-2">
+                        {editingQueueImages.length > 0 ? (
+                          <p className="text-[10px] text-muted-foreground">
+                            {t('input.queueImageCount', {
+                              defaultValue: '{{count}} images',
+                              count: editingQueueImages.length
+                            })}
+                          </p>
+                        ) : (
+                          <span />
+                        )}
+                        {supportsVision && (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 rounded-md px-2 text-[10px] text-muted-foreground hover:bg-muted/70 hover:text-foreground"
+                            onClick={() => queueFileInputRef.current?.click()}
+                          >
+                            <ImagePlus className="size-3" />
+                            {t('input.attachImages')}
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <CornerDownRight className="size-3 shrink-0 text-muted-foreground/65" />
+                      <button
+                        type="button"
+                        className="min-w-0 flex-1 text-left"
+                        title={fallbackText}
+                        onClick={() => startEditQueuedMessage(msg)}
+                      >
+                        <span className="block truncate text-xs leading-5 text-muted-foreground/90 group-hover:text-foreground">
+                          {fallbackText}
+                        </span>
+                      </button>
+                      {commandLabel && summaryText ? (
+                        <span className="hidden shrink-0 rounded border border-violet-500/20 px-1.5 py-0.5 text-[10px] text-violet-700 sm:inline-flex dark:text-violet-300">
+                          {commandLabel}
+                        </span>
+                      ) : null}
+                      {msg.images.length > 0 ? (
+                        <span className="hidden shrink-0 rounded border border-border/60 px-1.5 py-0.5 text-[10px] text-muted-foreground sm:inline-flex">
+                          {t('input.queueImageCount', {
+                            defaultValue: '{{count}} images',
+                            count: msg.images.length
+                          })}
+                        </span>
+                      ) : null}
+                      <div className="flex shrink-0 items-center gap-0.5 text-muted-foreground">
+                        {isQueueDispatchPaused && index === 0 ? (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 rounded-md px-2 text-[10px] text-muted-foreground hover:bg-muted/70 hover:text-foreground"
+                            onClick={resumeQueuedMessages}
+                            title={t('input.queueResume', { defaultValue: 'Resume' })}
+                            aria-label={t('input.queueResume', { defaultValue: 'Resume' })}
+                          >
+                            <Send className="size-3" />
+                            <span className="hidden sm:inline">
+                              {t('input.queueResume', { defaultValue: 'Resume' })}
+                            </span>
+                          </Button>
+                        ) : null}
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 rounded-md px-2 text-[10px] text-muted-foreground hover:bg-muted/70 hover:text-foreground"
+                          onClick={() => startEditQueuedMessage(msg)}
+                          title={quoteLabel}
+                          aria-label={quoteLabel}
+                        >
+                          <CornerDownRight className="size-3" />
+                          <span className="hidden sm:inline">{quoteLabel}</span>
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="size-7 rounded-md text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                          onClick={() => removeQueuedMessage(msg.id)}
+                          title={t('action.delete', { ns: 'common' })}
+                          aria-label={t('action.delete', { ns: 'common' })}
+                        >
+                          <Trash2 className="size-3.5" />
+                        </Button>
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="size-7 rounded-md text-muted-foreground hover:bg-muted/70 hover:text-foreground"
+                              title={t('action.more', { ns: 'common' })}
+                              aria-label={t('action.more', { ns: 'common' })}
+                            >
+                              <Ellipsis className="size-3.5" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end" className="min-w-36">
+                            {isQueueDispatchPaused ? (
+                              <DropdownMenuItem onSelect={resumeQueuedMessages}>
+                                <Send className="size-3.5" />
+                                {t('input.queueResume', { defaultValue: 'Resume' })}
+                              </DropdownMenuItem>
+                            ) : null}
+                            <DropdownMenuItem onSelect={() => startEditQueuedMessage(msg)}>
+                              <CornerDownRight className="size-3.5" />
+                              {quoteLabel}
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              variant="destructive"
+                              onSelect={handleClearQueuedMessages}
+                            >
+                              <Trash2 className="size-3.5" />
+                              {t('action.clear', { ns: 'common' })}
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </div>
+
+        <AlertDialog open={queueClearConfirmOpen} onOpenChange={setQueueClearConfirmOpen}>
+          <AlertDialogContent size="sm">
+            <AlertDialogHeader>
+              <AlertDialogTitle>
+                {t('input.queueClearConfirmTitle', {
+                  defaultValue: 'Clear queued messages?'
+                })}
+              </AlertDialogTitle>
+              <AlertDialogDescription>
+                {t('input.queueClearConfirmDesc', {
+                  defaultValue:
+                    'This will delete {{count}} pending messages in the current session.',
+                  count: queuedMessages.length
+                })}
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel size="sm">
+                {t('action.cancel', { ns: 'common' })}
+              </AlertDialogCancel>
+              <AlertDialogAction
+                variant="destructive"
+                size="sm"
+                onClick={clearQueuedMessagesForActiveSession}
+              >
+                {t('action.clear', { ns: 'common' })}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      </>
+    ) : null
+
   return (
     <div ref={rootRef} data-tour="composer" className="px-4 py-3 pb-4">
       {/* API key warning */}
@@ -2269,6 +2730,12 @@ export function InputArea({
         </div>
       )}
 
+      {queuedMessagesPanel}
+
+      {!hideGoalSessionBar && draftSessionId && (
+        <GoalSessionBar sessionId={draftSessionId} className="mb-2" />
+      )}
+
       <div className="mx-auto w-full max-w-[820px]">
         <div
           ref={containerRef}
@@ -2293,250 +2760,6 @@ export function InputArea({
               <div className="composer-drag-grip h-1 w-11 rounded-full" />
             </div>
           )}
-          {/* Queued message list */}
-          {queuedMessages.length > 0 && (
-            <div className="shrink-0 px-3 pt-3 pb-1">
-              <div className="composer-panel overflow-hidden rounded-[18px]">
-                <div className="flex items-center justify-between gap-2 px-3 py-2.5">
-                  <button
-                    type="button"
-                    className="flex min-w-0 flex-1 items-center gap-2 text-left"
-                    onClick={toggleQueueExpanded}
-                  >
-                    {isQueueExpanded ? (
-                      <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
-                    ) : (
-                      <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
-                    )}
-                    <ClipboardList className="size-3.5 shrink-0 text-primary/80" />
-                    <span className="truncate text-xs font-medium text-foreground">
-                      {t('input.queueTitle', { defaultValue: 'Queued messages' })}
-                    </span>
-                    <span className="composer-status-pill rounded-full px-1.5 py-0.5 text-[10px]">
-                      {queuedMessages.length}
-                    </span>
-                    <span className="truncate text-[10px] text-muted-foreground/80">
-                      {isQueueDispatchPaused
-                        ? t('input.queuePausedHint', {
-                            defaultValue: 'Paused, click to resume sending'
-                          })
-                        : t('input.queueRunningHint', {
-                            defaultValue: 'Will send in order after current task completes'
-                          })}
-                    </span>
-                  </button>
-                  <div className="flex shrink-0 items-center gap-1">
-                    {isQueueDispatchPaused && (
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        className="composer-control rounded-lg px-2 text-[10px]"
-                        onClick={resumeQueuedMessages}
-                      >
-                        <Send className="size-3" />
-                        {t('input.queueResume', { defaultValue: 'Resume sending' })}
-                      </Button>
-                    )}
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      className="composer-control rounded-lg px-2 text-[10px]"
-                      data-tone="danger"
-                      onClick={handleClearQueuedMessages}
-                    >
-                      <Trash2 className="size-3" />
-                      {t('action.clear', { ns: 'common' })}
-                    </Button>
-                  </div>
-                </div>
-
-                {isQueueExpanded && (
-                  <div className="border-t border-[var(--composer-toolbar-border)] px-3 py-2">
-                    <div className="max-h-56 space-y-2 overflow-y-auto pr-1">
-                      {queuedMessages.map((msg) => {
-                        const isEditing = editingQueueItemId === msg.id
-                        const summaryText = summarizeQueuedMessage(msg.text)
-                        const commandLabel = msg.command ? `/${msg.command.name}` : ''
-                        return (
-                          <div key={msg.id} className="composer-cardlet rounded-[14px] px-3 py-2">
-                            {isEditing ? (
-                              <div className="space-y-2">
-                                <div className="flex items-center justify-between gap-2">
-                                  <span className="text-[10px] font-medium text-muted-foreground">
-                                    {t('input.queueEditing', {
-                                      defaultValue: 'Edit queued message'
-                                    })}
-                                  </span>
-                                  <div className="flex items-center gap-1">
-                                    <Button
-                                      type="button"
-                                      variant="ghost"
-                                      size="sm"
-                                      className="composer-control rounded-md px-2 text-[10px]"
-                                      onClick={() => saveQueuedMessage(msg.id)}
-                                    >
-                                      {t('action.save', { ns: 'common' })}
-                                    </Button>
-                                    <Button
-                                      type="button"
-                                      variant="ghost"
-                                      size="sm"
-                                      className="composer-control rounded-md px-2 text-[10px]"
-                                      onClick={cancelEditQueuedMessage}
-                                    >
-                                      {t('action.cancel', { ns: 'common' })}
-                                    </Button>
-                                  </div>
-                                </div>
-                                {msg.command && (
-                                  <div className="rounded-md border border-violet-500/20 bg-violet-500/5 px-2.5 py-1.5 text-[10px] font-medium text-violet-700 dark:text-violet-300">
-                                    /{msg.command.name}
-                                  </div>
-                                )}
-                                <Textarea
-                                  value={editingQueueText}
-                                  onChange={(e) => setEditingQueueText(e.target.value)}
-                                  onPaste={handleQueueEditPaste}
-                                  className="composer-aux-textarea min-h-[56px] max-h-36 resize-none text-xs"
-                                  rows={2}
-                                />
-                                {editingQueueImages.length > 0 && (
-                                  <div className="flex gap-2 overflow-x-auto pb-1">
-                                    {editingQueueImages.map((img) => (
-                                      <div key={img.id} className="relative group/img shrink-0">
-                                        <img
-                                          src={img.dataUrl}
-                                          alt=""
-                                          className="composer-image-thumb size-12 rounded-lg object-cover"
-                                        />
-                                        <button
-                                          type="button"
-                                          className="absolute -top-1.5 -right-1.5 flex size-4 items-center justify-center rounded-full bg-destructive text-destructive-foreground shadow-sm opacity-0 transition-opacity group-hover/img:opacity-100"
-                                          onClick={() => removeQueuedImage(img.id)}
-                                        >
-                                          <X className="size-2.5" />
-                                        </button>
-                                      </div>
-                                    ))}
-                                  </div>
-                                )}
-                                <div className="flex items-center justify-between gap-2">
-                                  {editingQueueImages.length > 0 ? (
-                                    <p className="text-[10px] text-muted-foreground">
-                                      {t('input.queueImageCount', {
-                                        defaultValue: '{{count}} images',
-                                        count: editingQueueImages.length
-                                      })}
-                                    </p>
-                                  ) : (
-                                    <span />
-                                  )}
-                                  {supportsVision && (
-                                    <Button
-                                      type="button"
-                                      variant="ghost"
-                                      size="sm"
-                                      className="composer-control rounded-md px-2 text-[10px]"
-                                      onClick={() => queueFileInputRef.current?.click()}
-                                    >
-                                      <ImagePlus className="size-3" />
-                                      {t('input.attachImages')}
-                                    </Button>
-                                  )}
-                                </div>
-                              </div>
-                            ) : (
-                              <div className="flex items-start gap-2">
-                                <div className="min-w-0 flex-1">
-                                  <div className="truncate text-xs leading-5 text-foreground/90">
-                                    {summaryText ||
-                                      commandLabel ||
-                                      t('input.queueImageOnly', { defaultValue: '[Images only]' })}
-                                  </div>
-                                  {commandLabel && summaryText && (
-                                    <div className="mt-1 text-[10px] text-violet-700 dark:text-violet-300">
-                                      {commandLabel}
-                                    </div>
-                                  )}
-                                  {msg.images.length > 0 && (
-                                    <div className="mt-1 flex items-center gap-1.5">
-                                      <span className="composer-status-pill rounded-full px-1.5 py-0.5 text-[10px]">
-                                        {t('input.queueImageCount', {
-                                          defaultValue: '{{count}} images',
-                                          count: msg.images.length
-                                        })}
-                                      </span>
-                                    </div>
-                                  )}
-                                </div>
-                                <div className="flex shrink-0 items-center gap-1">
-                                  <Button
-                                    type="button"
-                                    variant="ghost"
-                                    size="sm"
-                                    className="composer-control size-7 rounded-md p-0"
-                                    onClick={() => startEditQueuedMessage(msg)}
-                                    title={t('action.edit', { ns: 'common', defaultValue: 'Edit' })}
-                                  >
-                                    <Pencil className="size-3.5" />
-                                  </Button>
-                                  <Button
-                                    type="button"
-                                    variant="ghost"
-                                    size="sm"
-                                    className="composer-control size-7 rounded-md p-0"
-                                    data-tone="danger"
-                                    onClick={() => removeQueuedMessage(msg.id)}
-                                    title={t('action.delete', { ns: 'common' })}
-                                  >
-                                    <Trash2 className="size-3.5" />
-                                  </Button>
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                        )
-                      })}
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              <AlertDialog open={queueClearConfirmOpen} onOpenChange={setQueueClearConfirmOpen}>
-                <AlertDialogContent size="sm">
-                  <AlertDialogHeader>
-                    <AlertDialogTitle>
-                      {t('input.queueClearConfirmTitle', {
-                        defaultValue: 'Clear queued messages?'
-                      })}
-                    </AlertDialogTitle>
-                    <AlertDialogDescription>
-                      {t('input.queueClearConfirmDesc', {
-                        defaultValue:
-                          'This will delete {{count}} pending messages in the current session.',
-                        count: queuedMessages.length
-                      })}
-                    </AlertDialogDescription>
-                  </AlertDialogHeader>
-                  <AlertDialogFooter>
-                    <AlertDialogCancel size="sm">
-                      {t('action.cancel', { ns: 'common' })}
-                    </AlertDialogCancel>
-                    <AlertDialogAction
-                      variant="destructive"
-                      size="sm"
-                      onClick={clearQueuedMessagesForActiveSession}
-                    >
-                      {t('action.clear', { ns: 'common' })}
-                    </AlertDialogAction>
-                  </AlertDialogFooter>
-                </AlertDialogContent>
-              </AlertDialog>
-            </div>
-          )}
-
           {/* Skill tag */}
           {selectedSkill && (
             <div className="shrink-0 px-3 pt-3 pb-0">
@@ -2562,14 +2785,24 @@ export function InputArea({
             >
               {attachedImages.map((img) => (
                 <div key={img.id} className="relative group/img shrink-0">
-                  <img
-                    src={img.dataUrl}
-                    alt=""
-                    className="composer-image-thumb size-16 rounded-xl object-cover"
-                  />
+                  <button
+                    type="button"
+                    className="block cursor-zoom-in rounded-xl outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    aria-label={t('userMessage.imagePreview')}
+                    title={t('userMessage.imagePreview')}
+                    onClick={() => setPreviewImage(img)}
+                  >
+                    <img
+                      src={img.dataUrl}
+                      alt=""
+                      className="composer-image-thumb size-16 rounded-xl object-cover transition-transform group-hover/img:scale-[1.03]"
+                    />
+                  </button>
                   <button
                     type="button"
                     className="absolute -top-1.5 -right-1.5 size-5 rounded-full bg-destructive text-destructive-foreground shadow-md opacity-0 group-hover/img:opacity-100 transition-opacity flex items-center justify-center"
+                    aria-label={t('userMessage.removeImage')}
+                    title={t('userMessage.removeImage')}
                     onClick={() => removeImage(img.id)}
                   >
                     <X className="size-3" />
@@ -2578,6 +2811,26 @@ export function InputArea({
               ))}
             </div>
           )}
+
+          <Dialog
+            open={Boolean(previewImage)}
+            onOpenChange={(open) => {
+              if (!open) setPreviewImage(null)
+            }}
+          >
+            <DialogContent className="max-h-[90vh] !w-fit !max-w-[min(96vw,1100px)] overflow-hidden p-2 sm:!max-w-[min(96vw,1100px)]">
+              <DialogTitle className="sr-only">{t('userMessage.imagePreview')}</DialogTitle>
+              {previewImage && (
+                <div className="flex max-w-full items-center justify-center overflow-hidden">
+                  <img
+                    src={previewImage.dataUrl}
+                    alt={t('userMessage.imagePreview')}
+                    className="block h-auto max-h-[calc(90vh-1rem)] w-auto max-w-[min(92vw,1068px)] rounded object-contain"
+                  />
+                </div>
+              )}
+            </DialogContent>
+          </Dialog>
 
           {/* Optimizing indicator - only show spinner, hide text */}
           {isOptimizing && (
@@ -2821,50 +3074,67 @@ export function InputArea({
                   <div className="composer-flyout-header flex items-center gap-2 px-3 py-2 text-[11px] text-muted-foreground">
                     <Command className="size-3.5" />
                     <span>
-                      {t('input.commandSuggestions', { defaultValue: 'Command suggestions' })}
+                      {t('input.slashSuggestions', {
+                        defaultValue: 'Command & skill suggestions'
+                      })}
                     </span>
                     <span className="composer-status-pill ml-auto rounded-full px-1.5 py-0.5 text-[10px]">
                       /{slashQuery ?? ''}
                     </span>
                   </div>
-                  <div className="max-h-64 overflow-y-auto p-1.5">
-                    {slashCommandsLoading ? (
+                  <div className="max-h-64 overflow-y-auto p-1">
+                    {slashSuggestionsLoading ? (
                       <div className="flex items-center gap-2 px-2 py-3 text-xs text-muted-foreground">
                         <Spinner className="size-3.5" />
                         <span>
-                          {t('input.loadingCommands', { defaultValue: 'Loading commands...' })}
+                          {t('input.loadingSlashSuggestions', {
+                            defaultValue: 'Loading commands and skills...'
+                          })}
                         </span>
                       </div>
-                    ) : filteredSlashCommands.length === 0 ? (
+                    ) : filteredSlashSuggestions.length === 0 ? (
                       <div className="px-2 py-3 text-xs text-muted-foreground">
-                        {t('input.noCommandsFound', { defaultValue: 'No matching commands' })}
+                        {t('input.noSlashSuggestionsFound', {
+                          defaultValue: 'No matching commands or skills'
+                        })}
                       </div>
                     ) : (
-                      filteredSlashCommands.map((command, index) => {
+                      filteredSlashSuggestions.map((item, index) => {
                         const isSelected = index === selectedSlashIndex
                         return (
                           <button
-                            key={command.name}
+                            key={item.key}
                             type="button"
-                            className={`flex w-full items-start gap-2 rounded-lg px-2.5 py-2 text-left transition-colors ${
+                            className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors ${
                               isSelected
                                 ? 'bg-accent text-accent-foreground'
                                 : 'hover:bg-muted/50 text-foreground'
                             }`}
                             onMouseDown={(event) => {
                               event.preventDefault()
-                              insertSlashCommand(command.name)
+                              applySlashSuggestion(item)
                             }}
                           >
-                            <Command className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
-                            <div className="min-w-0 flex-1">
-                              <div className="truncate text-sm font-medium">/{command.name}</div>
-                              {command.summary && (
-                                <div className="mt-0.5 line-clamp-2 text-[11px] text-muted-foreground">
-                                  {command.summary}
+                            {item.kind === 'skill' ? (
+                              <Sparkles className="size-3.5 shrink-0 text-muted-foreground" />
+                            ) : (
+                              <Command className="size-3.5 shrink-0 text-muted-foreground" />
+                            )}
+                            <div className="min-w-0 flex flex-1 items-center gap-2 overflow-hidden">
+                              <div className="max-w-[45%] shrink-0 truncate text-sm font-medium">
+                                {item.kind === 'command' ? `/${item.name}` : item.name}
+                              </div>
+                              {item.summary && (
+                                <div className="truncate text-[11px] text-muted-foreground">
+                                  {item.summary}
                                 </div>
                               )}
                             </div>
+                            <span className="composer-status-pill shrink-0 rounded-full px-1.5 py-0.5 text-[10px]">
+                              {item.kind === 'command'
+                                ? t('skills.commandsLabel')
+                                : t('skills.skillsLabel')}
+                            </span>
                           </button>
                         )
                       })
@@ -2890,18 +3160,6 @@ export function InputArea({
             }}
           />
 
-          {/* Hidden file input for image upload */}
-          <input
-            ref={fileInputRef}
-            type="file"
-            multiple
-            className="hidden"
-            onChange={(e) => {
-              handleDropFiles(e.target.files)
-              e.target.value = ''
-            }}
-          />
-
           {/* Bottom toolbar */}
           <div
             ref={bottomToolbarRef}
@@ -2909,10 +3167,8 @@ export function InputArea({
           >
             <div className="flex w-full items-center justify-between gap-2">
               <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto pr-1 [scrollbar-width:none]">
-                {showModeSwitchControl ? modeSwitchControl : null}
-                {showModeSwitchControl ? <div className="h-4 w-px shrink-0 bg-border/50" /> : null}
                 <div className="shrink-0">
-                  <ModelSwitcher />
+                  <ModelSwitcher modelRoute={modelRoute} />
                 </div>
                 {webSearchToggleControl}
                 {skillsMenuControl}
@@ -3002,7 +3258,6 @@ export function InputArea({
             </div>
           </div>
         </div>
-        {draftSessionId && <GoalSessionBar sessionId={draftSessionId} />}
       </div>
     </div>
   )

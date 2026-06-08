@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { ipcClient } from '@renderer/lib/ipc/ipc-client'
-import { refreshSkillTools } from '@renderer/lib/tools/skill-tool'
+import { refreshDynamicToolCatalog } from '@renderer/lib/tools/dynamic-tool-catalog'
 
 export interface SkillInfo {
   name: string
@@ -212,7 +212,7 @@ export const useSkillsStore = create<SkillsStore>((set, get) => ({
           skillContent: state.selectedSkill === name ? null : state.skillContent,
           skillFiles: state.selectedSkill === name ? [] : state.skillFiles
         })
-        await refreshSkillTools()
+        await refreshDynamicToolCatalog()
         return true
       }
       return false
@@ -238,7 +238,7 @@ export const useSkillsStore = create<SkillsStore>((set, get) => ({
       }
       if (result.success) {
         await get().loadSkills()
-        await refreshSkillTools()
+        await refreshDynamicToolCatalog()
       }
       return result
     } catch (err) {
@@ -410,7 +410,7 @@ export const useSkillsStore = create<SkillsStore>((set, get) => ({
       }
       if (result.success) {
         set({ skillContent: content, editing: false, editContent: null })
-        await refreshSkillTools()
+        await refreshDynamicToolCatalog()
         return true
       }
       return false

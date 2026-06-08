@@ -2,9 +2,10 @@ import { toolRegistry } from '../agent/tool-registry'
 import { joinFsPath } from '../agent/memory-files'
 import { IPC } from '../ipc/channels'
 import { encodeStructuredToolResult, encodeToolError } from './tool-result-format'
-import type { ToolHandler, ToolContext } from './tool-types'
+import type { FileReadSnapshot, ToolHandler, ToolContext } from './tool-types'
 
 type EolStyle = '\n' | '\r\n' | null
+type TextWriteToolName = 'Write' | 'Edit' | 'MultiEdit' | 'NotebookEdit'
 
 type LsEntry = { name: string; type: string; path: string }
 type LsLimitReason = 'max_results' | 'max_output_bytes' | null
@@ -88,9 +89,59 @@ function normalizeReadHistoryPath(filePath: string): string {
   return filePath.replace(/\\/g, '/').toLowerCase()
 }
 
-function recordRead(ctx: ToolContext, filePath: string): void {
-  if (!ctx.readFileHistory) ctx.readFileHistory = new Map<string, number>()
-  ctx.readFileHistory.set(normalizeReadHistoryPath(filePath), Date.now())
+function isFileReadSnapshot(value: unknown): value is FileReadSnapshot {
+  return !!value && typeof value === 'object' && 'exists' in value
+}
+
+function isSameReadSnapshot(left: FileReadSnapshot, right: FileReadSnapshot): boolean {
+  if (left.exists !== right.exists) return false
+  if (!left.exists && !right.exists) return true
+  return (
+    (left.type ?? null) === (right.type ?? null) &&
+    (left.size ?? null) === (right.size ?? null) &&
+    (left.mtimeMs ?? null) === (right.mtimeMs ?? null)
+  )
+}
+
+async function captureReadSnapshot(
+  ctx: ToolContext,
+  filePath: string
+): Promise<FileReadSnapshot | { error: string }> {
+  const channel = isSsh(ctx) ? IPC.SSH_FS_STAT_PATH : IPC.FS_STAT_PATH
+  const args = isSsh(ctx) ? sshArgs(ctx, { path: filePath }) : { path: filePath }
+  const result = await ctx.ipc.invoke(channel, args)
+  if (isErrorResult(result)) return { error: result.error }
+  if (!isFileReadSnapshot(result)) return { error: 'stat did not return a file snapshot' }
+  return result
+}
+
+async function recordRead(ctx: ToolContext, filePath: string): Promise<void> {
+  const snapshot = await captureReadSnapshot(ctx, filePath)
+  if ('error' in snapshot) return
+  if (!ctx.readFileHistory) ctx.readFileHistory = new Map<string, FileReadSnapshot>()
+  ctx.readFileHistory.set(normalizeReadHistoryPath(filePath), snapshot)
+}
+
+async function assertCurrentFileMatchesLastRead(args: {
+  ctx: ToolContext
+  filePath: string
+  toolName: TextWriteToolName
+  allowMissingFile: boolean
+}): Promise<string | null> {
+  const current = await captureReadSnapshot(args.ctx, args.filePath)
+  if ('error' in current) return `Could not stat file before ${args.toolName}: ${current.error}`
+  if (!current.exists && args.allowMissingFile) return null
+
+  const previous = args.ctx.readFileHistory?.get(normalizeReadHistoryPath(args.filePath))
+  if (!previous) {
+    return `${args.toolName} requires the file to be read in this agent turn first. Call Read on ${args.filePath} and retry.`
+  }
+
+  if (!isSameReadSnapshot(previous, current)) {
+    return `${args.toolName} refused to edit because the file changed since it was last read in this turn. Call Read on ${args.filePath} again and retry.`
+  }
+
+  return null
 }
 
 // ── SSH routing helper ──
@@ -105,7 +156,7 @@ function sshArgs(ctx: ToolContext, extra: Record<string, unknown>): Record<strin
 
 function buildChangeMeta(
   ctx: ToolContext,
-  toolName: 'Write' | 'Edit'
+  toolName: TextWriteToolName
 ): Record<string, unknown> | undefined {
   if (!ctx.agentRunId) return undefined
   return {
@@ -120,11 +171,13 @@ function localWriteArgs(
   ctx: ToolContext,
   path: string,
   content: string,
-  toolName: 'Write' | 'Edit'
+  toolName: TextWriteToolName,
+  beforeContent?: string
 ): Record<string, unknown> {
   return {
     path,
     content,
+    ...(beforeContent !== undefined ? { beforeContent } : {}),
     ...(buildChangeMeta(ctx, toolName) ? { changeMeta: buildChangeMeta(ctx, toolName) } : {})
   }
 }
@@ -133,13 +186,56 @@ function sshWriteArgs(
   ctx: ToolContext,
   path: string,
   content: string,
-  toolName: 'Write' | 'Edit'
+  toolName: TextWriteToolName,
+  beforeContent?: string
 ): Record<string, unknown> {
   return sshArgs(ctx, {
     path,
     content,
+    ...(beforeContent !== undefined ? { beforeContent } : {}),
     ...(buildChangeMeta(ctx, toolName) ? { changeMeta: buildChangeMeta(ctx, toolName) } : {})
   })
+}
+
+function applyExactReplacement(args: {
+  content: string
+  oldStr: string
+  newStr: string
+  replaceAll: boolean
+}): { updated: string; occurrences: number } | { error: string } {
+  if (!args.oldStr) {
+    return { error: 'old_string must be non-empty' }
+  }
+
+  if (args.oldStr === args.newStr) {
+    return { error: 'new_string must be different from old_string' }
+  }
+
+  const oldStringVariants = buildOldStringVariants(args.oldStr, args.content)
+  const matchedVariant = oldStringVariants.find(
+    (variant) => variant.text.length > 0 && args.content.includes(variant.text)
+  )
+
+  if (!matchedVariant) {
+    return { error: `String to replace not found in file.\nString: ${args.oldStr}` }
+  }
+
+  const occurrences = countOccurrences(args.content, matchedVariant.text)
+  if (!args.replaceAll && occurrences > 1) {
+    return {
+      error: `Found ${occurrences} matches of the string to replace, but replace_all is false. To replace all occurrences, set replace_all to true. To replace only one occurrence, provide more surrounding context.\nString: ${args.oldStr}`
+    }
+  }
+
+  const replacementText = applyEolStyle(
+    args.newStr,
+    getReplacementEolStyle(matchedVariant, args.content)
+  )
+  const updated = args.replaceAll
+    ? args.content.split(matchedVariant.text).join(replacementText)
+    : args.content.replace(matchedVariant.text, replacementText)
+
+  return { updated, occurrences }
 }
 
 // ── Plugin path permission helpers ──
@@ -306,7 +402,7 @@ const readHandler: ToolHandler = {
         })
       )
       if (isErrorResult(result)) throw new Error(`Read failed: ${result.error}`)
-      recordRead(ctx, resolvedPath)
+      await recordRead(ctx, resolvedPath)
       return String(result)
     }
     const result = await ctx.ipc.invoke(IPC.FS_READ_FILE, {
@@ -316,7 +412,7 @@ const readHandler: ToolHandler = {
       raw: false
     })
     if (isErrorResult(result)) throw new Error(`Read failed: ${result.error}`)
-    recordRead(ctx, resolvedPath)
+    await recordRead(ctx, resolvedPath)
     if (
       result &&
       typeof result === 'object' &&
@@ -370,6 +466,13 @@ const writeHandler: ToolHandler = {
     }
 
     const resolvedPath = resolveToolPath(inputPath, ctx.workingFolder)
+    const guardError = await assertCurrentFileMatchesLastRead({
+      ctx,
+      filePath: resolvedPath,
+      toolName: 'Write',
+      allowMissingFile: true
+    })
+    if (guardError) throw new Error(guardError)
 
     if (isSsh(ctx)) {
       const result = await ctx.ipc.invoke(
@@ -377,6 +480,7 @@ const writeHandler: ToolHandler = {
         sshWriteArgs(ctx, resolvedPath, input.content, 'Write')
       )
       if (isErrorResult(result)) throw new Error(`Write failed: ${result.error}`)
+      await recordRead(ctx, resolvedPath)
       return encodeStructuredToolResult({
         success: true,
         path: resolvedPath,
@@ -392,6 +496,7 @@ const writeHandler: ToolHandler = {
     if (isErrorResult(result)) {
       throw new Error(`Write failed: ${result.error}`)
     }
+    await recordRead(ctx, resolvedPath)
 
     return encodeStructuredToolResult({
       success: true,
@@ -459,6 +564,14 @@ const editHandler: ToolHandler = {
       return encodeToolError('new_string must be different from old_string')
     }
 
+    const guardError = await assertCurrentFileMatchesLastRead({
+      ctx,
+      filePath: resolvedPath,
+      toolName: 'Edit',
+      allowMissingFile: false
+    })
+    if (guardError) return encodeToolError(guardError)
+
     const readCh = isSsh(ctx) ? IPC.SSH_FS_READ_FILE : IPC.FS_READ_FILE
     const readArgs = isSsh(ctx) ? sshArgs(ctx, { path: resolvedPath }) : { path: resolvedPath }
     const contentResult = await ctx.ipc.invoke(readCh, readArgs)
@@ -467,43 +580,20 @@ const editHandler: ToolHandler = {
     }
 
     const content = String(contentResult)
-    const oldStringVariants = buildOldStringVariants(oldStr, content)
-    const matchedVariant = oldStringVariants.find(
-      (variant) => variant.text.length > 0 && content.includes(variant.text)
-    )
-
-    if (!matchedVariant) {
-      return encodeToolError(`String to replace not found in file.\nString: ${oldStr}`)
-    }
-
-    const occurrences = countOccurrences(content, matchedVariant.text)
-
-    if (!replaceAll && occurrences > 1) {
-      return encodeToolError(
-        `Found ${occurrences} matches of the string to replace, but replace_all is false. To replace all occurrences, set replace_all to true. To replace only one occurrence, please provide more context to uniquely identify the instance.\nString: ${oldStr}`
-      )
-    }
-
-    const replacementText = applyEolStyle(newStr, getReplacementEolStyle(matchedVariant, content))
-    const updated = replaceAll
-      ? content.split(matchedVariant.text).join(replacementText)
-      : content.replace(matchedVariant.text, replacementText)
+    const editResult = applyExactReplacement({ content, oldStr, newStr, replaceAll })
+    if ('error' in editResult) return encodeToolError(editResult.error)
+    const updated = editResult.updated
 
     const writeCh = isSsh(ctx) ? IPC.SSH_FS_WRITE_FILE : IPC.FS_WRITE_FILE
     const writeArgs = isSsh(ctx)
-      ? sshArgs(ctx, {
-          path: resolvedPath,
-          content: updated,
-          beforeContent: content,
-          ...(buildChangeMeta(ctx, 'Edit') ? { changeMeta: buildChangeMeta(ctx, 'Edit') } : {})
-        })
-      : localWriteArgs(ctx, resolvedPath, updated, 'Edit')
+      ? sshWriteArgs(ctx, resolvedPath, updated, 'Edit', content)
+      : localWriteArgs(ctx, resolvedPath, updated, 'Edit', content)
     const writeResult = await ctx.ipc.invoke(writeCh, writeArgs)
     if (isErrorResult(writeResult)) {
       return encodeToolError(`Write failed: ${writeResult.error}`)
     }
 
-    recordRead(ctx, resolvedPath)
+    await recordRead(ctx, resolvedPath)
     return encodeStructuredToolResult({
       success: true,
       path: resolvedPath,
@@ -515,6 +605,240 @@ const editHandler: ToolHandler = {
     const inputPath = getFileToolInputPath(input)
     if (!inputPath) return false
     const filePath = resolveToolPath(inputPath, ctx.workingFolder)
+    if (ctx.channelPermissions) {
+      return !isPluginPathAllowed(filePath, ctx, 'write')
+    }
+    if (!ctx.workingFolder) return true
+    return !filePath.startsWith(ctx.workingFolder)
+  }
+}
+
+const multiEditHandler: ToolHandler = {
+  definition: {
+    name: 'MultiEdit',
+    description:
+      'Perform multiple exact string replacements in one file. Replacements are applied in order and written atomically only if every edit succeeds.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        file_path: {
+          type: 'string',
+          description: 'Absolute path or relative to the working folder'
+        },
+        edits: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              old_string: { type: 'string', description: 'The text to replace' },
+              new_string: { type: 'string', description: 'The text to replace it with' },
+              replace_all: {
+                type: 'boolean',
+                description: 'Replace all occurrences of old_string'
+              }
+            },
+            required: ['old_string', 'new_string']
+          },
+          description: 'Ordered list of exact replacements'
+        }
+      },
+      required: ['file_path', 'edits']
+    }
+  },
+  execute: async (input, ctx) => {
+    const inputPath = getFileToolInputPath(input)
+    if (!inputPath) return encodeToolError('MultiEdit requires a non-empty "file_path" string')
+    if (!Array.isArray(input.edits) || input.edits.length === 0) {
+      return encodeToolError('MultiEdit requires a non-empty edits array')
+    }
+
+    const resolvedPath = resolveToolPath(inputPath, ctx.workingFolder)
+    const guardError = await assertCurrentFileMatchesLastRead({
+      ctx,
+      filePath: resolvedPath,
+      toolName: 'MultiEdit',
+      allowMissingFile: false
+    })
+    if (guardError) return encodeToolError(guardError)
+
+    const readCh = isSsh(ctx) ? IPC.SSH_FS_READ_FILE : IPC.FS_READ_FILE
+    const readArgs = isSsh(ctx) ? sshArgs(ctx, { path: resolvedPath }) : { path: resolvedPath }
+    const contentResult = await ctx.ipc.invoke(readCh, readArgs)
+    if (isErrorResult(contentResult)) return encodeToolError(`Read failed: ${contentResult.error}`)
+
+    const content = String(contentResult)
+    let updated = content
+    const applied: Array<{ index: number; occurrences: number; replaceAll: boolean }> = []
+
+    for (let index = 0; index < input.edits.length; index += 1) {
+      const edit = input.edits[index]
+      if (!edit || typeof edit !== 'object') {
+        return encodeToolError(`Edit ${index} must be an object`)
+      }
+      const record = edit as Record<string, unknown>
+      const oldStr = String(record.old_string ?? '')
+      const newStr = String(record.new_string ?? '')
+      const replaceAll = Boolean(record.replace_all)
+      const editResult = applyExactReplacement({ content: updated, oldStr, newStr, replaceAll })
+      if ('error' in editResult) {
+        return encodeToolError(`Edit ${index} failed: ${editResult.error}`)
+      }
+      updated = editResult.updated
+      applied.push({ index, occurrences: editResult.occurrences, replaceAll })
+    }
+
+    const writeCh = isSsh(ctx) ? IPC.SSH_FS_WRITE_FILE : IPC.FS_WRITE_FILE
+    const writeArgs = isSsh(ctx)
+      ? sshWriteArgs(ctx, resolvedPath, updated, 'MultiEdit', content)
+      : localWriteArgs(ctx, resolvedPath, updated, 'MultiEdit', content)
+    const writeResult = await ctx.ipc.invoke(writeCh, writeArgs)
+    if (isErrorResult(writeResult)) return encodeToolError(`Write failed: ${writeResult.error}`)
+
+    await recordRead(ctx, resolvedPath)
+    return encodeStructuredToolResult({ success: true, path: resolvedPath, edits: applied })
+  },
+  requiresApproval: (input, ctx) => {
+    if (isSsh(ctx)) return false
+    const inputPath = getFileToolInputPath(input)
+    if (!inputPath) return false
+    const filePath = resolveToolPath(inputPath, ctx.workingFolder)
+    if (ctx.channelPermissions) {
+      return !isPluginPathAllowed(filePath, ctx, 'write')
+    }
+    if (!ctx.workingFolder) return true
+    return !filePath.startsWith(ctx.workingFolder)
+  }
+}
+
+const notebookEditHandler: ToolHandler = {
+  definition: {
+    name: 'NotebookEdit',
+    description: 'Edit a Jupyter notebook cell by index or cell_id.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        notebook_path: {
+          type: 'string',
+          description: 'Notebook path, absolute or relative to the working folder'
+        },
+        file_path: {
+          type: 'string',
+          description: 'Alias for notebook_path'
+        },
+        cell_id: { type: 'string', description: 'Cell id to edit' },
+        cell_index: { type: 'number', description: 'Zero-based cell index' },
+        mode: {
+          type: 'string',
+          enum: ['replace', 'insert', 'delete'],
+          description: 'Edit mode. Defaults to replace.'
+        },
+        new_source: { type: 'string', description: 'New cell source' },
+        source: { type: 'string', description: 'Alias for new_source' },
+        cell_type: {
+          type: 'string',
+          enum: ['code', 'markdown', 'raw'],
+          description: 'Cell type for inserted or replaced cells'
+        }
+      },
+      required: []
+    }
+  },
+  execute: async (input, ctx) => {
+    const rawPath =
+      typeof input.notebook_path === 'string' && input.notebook_path.trim()
+        ? input.notebook_path
+        : input.file_path
+    const resolvedPath = resolveToolPath(rawPath, ctx.workingFolder)
+    if (!resolvedPath || resolvedPath === '.') {
+      return encodeToolError('NotebookEdit requires notebook_path or file_path')
+    }
+    const guardError = await assertCurrentFileMatchesLastRead({
+      ctx,
+      filePath: resolvedPath,
+      toolName: 'NotebookEdit',
+      allowMissingFile: false
+    })
+    if (guardError) return encodeToolError(guardError)
+
+    const readCh = isSsh(ctx) ? IPC.SSH_FS_READ_FILE : IPC.FS_READ_FILE
+    const readArgs = isSsh(ctx) ? sshArgs(ctx, { path: resolvedPath }) : { path: resolvedPath }
+    const contentResult = await ctx.ipc.invoke(readCh, readArgs)
+    if (isErrorResult(contentResult)) return encodeToolError(`Read failed: ${contentResult.error}`)
+
+    let notebook: { cells?: unknown[] }
+    try {
+      notebook = JSON.parse(String(contentResult)) as { cells?: unknown[] }
+    } catch (error) {
+      return encodeToolError(`Invalid notebook JSON: ${error instanceof Error ? error.message : error}`)
+    }
+
+    if (!Array.isArray(notebook.cells)) {
+      return encodeToolError('Notebook does not contain a cells array')
+    }
+
+    const mode = input.mode === 'insert' || input.mode === 'delete' ? input.mode : 'replace'
+    const cellIndex =
+      typeof input.cell_index === 'number'
+        ? Math.floor(input.cell_index)
+        : typeof input.cell_id === 'string'
+          ? notebook.cells.findIndex(
+              (cell) =>
+                !!cell &&
+                typeof cell === 'object' &&
+                (cell as { id?: unknown; cell_id?: unknown }).id === input.cell_id
+            )
+          : mode === 'insert'
+            ? notebook.cells.length - 1
+            : -1
+
+    if (mode !== 'insert' && (cellIndex < 0 || cellIndex >= notebook.cells.length)) {
+      return encodeToolError('Notebook cell not found')
+    }
+    if (mode === 'insert' && (cellIndex < -1 || cellIndex >= notebook.cells.length)) {
+      return encodeToolError('Insert cell_index is out of range')
+    }
+
+    if (mode === 'delete') {
+      notebook.cells.splice(cellIndex, 1)
+    } else {
+      const source = String(input.new_source ?? input.source ?? '')
+      const cellType =
+        input.cell_type === 'markdown' || input.cell_type === 'raw' || input.cell_type === 'code'
+          ? input.cell_type
+          : 'code'
+      const sourceLines = source
+        ? source.endsWith('\n')
+          ? source.split(/(?<=\n)/)
+          : source.split(/(?<=\n)/)
+        : []
+      const nextCell = {
+        cell_type: cellType,
+        metadata: {},
+        source: sourceLines
+      }
+      if (cellType === 'code') Object.assign(nextCell, { outputs: [], execution_count: null })
+      if (mode === 'insert') notebook.cells.splice(cellIndex + 1, 0, nextCell)
+      else notebook.cells[cellIndex] = { ...(notebook.cells[cellIndex] as object), ...nextCell }
+    }
+
+    const updated = `${JSON.stringify(notebook, null, 1)}\n`
+    const writeCh = isSsh(ctx) ? IPC.SSH_FS_WRITE_FILE : IPC.FS_WRITE_FILE
+    const writeArgs = isSsh(ctx)
+      ? sshWriteArgs(ctx, resolvedPath, updated, 'NotebookEdit', String(contentResult))
+      : localWriteArgs(ctx, resolvedPath, updated, 'NotebookEdit', String(contentResult))
+    const writeResult = await ctx.ipc.invoke(writeCh, writeArgs)
+    if (isErrorResult(writeResult)) return encodeToolError(`Write failed: ${writeResult.error}`)
+
+    await recordRead(ctx, resolvedPath)
+    return encodeStructuredToolResult({ success: true, path: resolvedPath, mode })
+  },
+  requiresApproval: (input, ctx) => {
+    if (isSsh(ctx)) return false
+    const rawPath =
+      typeof input.notebook_path === 'string' && input.notebook_path.trim()
+        ? input.notebook_path
+        : input.file_path
+    const filePath = resolveToolPath(rawPath, ctx.workingFolder)
     if (ctx.channelPermissions) {
       return !isPluginPathAllowed(filePath, ctx, 'write')
     }
@@ -579,6 +903,8 @@ export function registerFsTools(): void {
   toolRegistry.register(readHandler)
   toolRegistry.register(writeHandler)
   toolRegistry.register(editHandler)
+  toolRegistry.register(multiEditHandler)
+  toolRegistry.register(notebookEditHandler)
   toolRegistry.register(lsHandler)
 }
 

@@ -40,6 +40,17 @@ export function getBillableInputTokens(
   return usage.inputTokens ?? 0
 }
 
+export function getCacheHitRate(billableInputTokens: number, cacheReadTokens: number): number {
+  const safeBillableInputTokens = Number.isFinite(billableInputTokens)
+    ? Math.max(0, billableInputTokens)
+    : 0
+  const safeCacheReadTokens = Number.isFinite(cacheReadTokens) ? Math.max(0, cacheReadTokens) : 0
+  const totalInputTokens = safeBillableInputTokens + safeCacheReadTokens
+
+  if (totalInputTokens <= 0) return 0
+  return safeCacheReadTokens / totalInputTokens
+}
+
 export function getBillableTotalTokens(
   usage: TokenUsage,
   requestType?: ProviderType | AIModelConfig['type']

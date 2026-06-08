@@ -13,6 +13,7 @@ import {
   YAxis
 } from 'recharts'
 import { Badge } from '@renderer/components/ui/badge'
+import { getCacheHitRate } from '@renderer/lib/format-tokens'
 import type {
   UsageAnalyticsGroupRow,
   UsageAnalyticsOverview,
@@ -171,8 +172,15 @@ function fmtMoney(value: number): string {
 
 function fmtMoneyCompact(value: number, locale: string): string {
   if (value === 0) return '$0'
-  if (Math.abs(value) < 1) return `$${value.toFixed(2)}`
-  return `$${fmtAxisCompact(value, locale)}`
+  if (Math.abs(value) < 1) return '$' + value.toFixed(2)
+  return '$' + fmtAxisCompact(value, locale)
+}
+
+function fmtPercent(value: number, locale: string): string {
+  return new Intl.NumberFormat(locale, {
+    style: 'percent',
+    maximumFractionDigits: 1
+  }).format(Math.max(0, value))
 }
 
 function fmtMs(value: unknown): string {
@@ -280,7 +288,23 @@ function AnalyticsTooltip({
   label,
   locale
 }: AnalyticsTooltipProps): React.JSX.Element | null {
+  const { t } = useTranslation('settings')
+
   if (!active || !payload?.length) return null
+
+  const inputTokens = toNumber(
+    payload.find((entry) => String(entry.dataKey ?? '') === 'inputTokens')?.value
+  )
+  const cacheReadTokens = toNumber(
+    payload.find((entry) => String(entry.dataKey ?? '') === 'cacheReadTokens')?.value
+  )
+  const cacheHitRate = getCacheHitRate(inputTokens, cacheReadTokens)
+  const showCacheHitRate =
+    payload.some((entry) => {
+      const key = String(entry.dataKey ?? '')
+      return key === 'inputTokens' || key === 'cacheReadTokens'
+    }) &&
+    inputTokens + cacheReadTokens > 0
 
   return (
     <div className="min-w-44 rounded-xl border border-border/60 bg-background/95 px-3 py-2 shadow-2xl backdrop-blur-sm">
@@ -291,7 +315,7 @@ function AnalyticsTooltip({
           const value = toNumber(entry.value)
           const formattedValue =
             key === 'totalCostUsd'
-              ? `$${fmtMoney(value)}`
+              ? '$' + fmtMoney(value)
               : key === 'requestCount'
                 ? fmtInt(value, locale)
                 : `${fmtTokenCompact(value)} Token`
@@ -309,6 +333,14 @@ function AnalyticsTooltip({
             </div>
           )
         })}
+        {showCacheHitRate ? (
+          <div className="mt-2 flex items-center justify-between gap-4 border-t border-border/40 pt-2 text-xs">
+            <span className="text-muted-foreground">{t('analytics.cacheHitRate')}</span>
+            <span className="font-medium tabular-nums text-foreground">
+              {fmtPercent(cacheHitRate, locale)}
+            </span>
+          </div>
+        ) : null}
       </div>
     </div>
   )
@@ -351,21 +383,28 @@ export function AnalyticsOverview({
 
   const totalCost = toNumber(overview?.total_cost_usd)
   const totalRequests = toNumber(overview?.request_count)
+  const totalInputTokens = toNumber(overview?.input_tokens)
   const totalOutputTokens = toNumber(overview?.output_tokens)
+  const totalCacheReadTokens = toNumber(overview?.cache_read_tokens)
+  const totalCacheHitRate = getCacheHitRate(totalInputTokens, totalCacheReadTokens)
   const totalTokenComposition =
-    toNumber(overview?.input_tokens) +
-    toNumber(overview?.output_tokens) +
-    toNumber(overview?.cache_read_tokens) +
+    totalInputTokens +
+    totalOutputTokens +
+    totalCacheReadTokens +
     toNumber(overview?.cache_creation_tokens)
 
   return (
     <div className="space-y-4">
-      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <MetricCard label={t('analytics.costUsd')} value={`$${fmtMoney(totalCost)}`} />
+      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+        <MetricCard label={t('analytics.costUsd')} value={'$' + fmtMoney(totalCost)} />
         <MetricCard label={t('analytics.requests')} value={fmtInt(totalRequests, tokenLocale)} />
         <MetricCard
           label={t('analytics.outputTokens')}
           value={renderTokenValue(totalOutputTokens, tokenLocale, true)}
+        />
+        <MetricCard
+          label={t('analytics.cacheHitRate')}
+          value={fmtPercent(totalCacheHitRate, tokenLocale)}
         />
         <MetricCard label={t('analytics.avgTotal')} value={fmtMs(overview?.avg_total_ms)} />
       </section>
@@ -377,7 +416,7 @@ export function AnalyticsOverview({
               title={t('analytics.chartCost')}
               badge={chartBadge}
               summaryLabel={t('analytics.costUsd')}
-              summaryValue={`$${fmtMoney(totalCost)}`}
+              summaryValue={'$' + fmtMoney(totalCost)}
             >
               <div className="h-72">
                 <ResponsiveContainer width="100%" height="100%">

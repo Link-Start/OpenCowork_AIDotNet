@@ -32,7 +32,7 @@ import {
 } from '@renderer/lib/agent/sub-agents/create-tool'
 import type { SubAgentEvent } from '@renderer/lib/agent/sub-agents/types'
 import { abortAllTeammates } from '@renderer/lib/agent/teams/teammate-runner'
-import { TEAM_TOOL_NAMES } from '@renderer/lib/agent/teams/register'
+import { filterTeamToolDefinitions } from '@renderer/lib/agent/teams/register'
 import { teamEvents } from '@renderer/lib/agent/teams/events'
 import { useTeamStore, type ActiveTeam } from '@renderer/stores/team-store'
 import { ipcClient } from '@renderer/lib/ipc/ipc-client'
@@ -44,11 +44,7 @@ import type { ToolContext } from '@renderer/lib/tools/tool-types'
 import { ACP_MODE_ALLOWED_TOOLS, PLAN_MODE_ALLOWED_TOOLS } from '@renderer/lib/tools/plan-tool'
 import { usePlanStore, type Plan } from '@renderer/stores/plan-store'
 import { useTaskStore } from '@renderer/stores/task-store'
-import {
-  useGoalStore,
-  type SessionGoal,
-  type SessionGoalEventType
-} from '@renderer/stores/goal-store'
+import { useGoalStore, type SessionGoal } from '@renderer/stores/goal-store'
 import { generateSessionTitle } from '@renderer/lib/api/generate-title'
 import {
   RESPONSES_SESSION_SCOPE_AGENT_MAIN,
@@ -86,13 +82,17 @@ import {
   serializeSystemCommand,
   type SystemCommandSnapshot
 } from '@renderer/lib/commands/system-command'
-import type { AgentEvent, AgentLoopConfig, ToolCallState } from '@renderer/lib/agent/types'
+import {
+  type AgentEvent,
+  type AgentLoopConfig,
+  type ToolCallState
+} from '@renderer/lib/agent/types'
 import { ApiStreamError } from '@renderer/lib/ipc/api-stream'
 import { recordUsageEvent } from '@renderer/lib/usage-analytics'
 import {
   compressMessages,
-  isCompactSummaryLikeMessage,
-  mergeCompressedMessagesIntoConversation,
+  mergeCompressedMessagesKeepHistory,
+  mergeLoopEndMessagesKeepHistory,
   resolveCompressionContextLength,
   resolveCompressionReservedOutputBudget,
   resolveCompressionThreshold
@@ -112,6 +112,7 @@ import {
   appendRuntimeThinkingDelta,
   appendRuntimeToolUse,
   completeRuntimeThinking,
+  flushRuntimeForegroundMutations,
   flushBackgroundSessionToForeground,
   isSessionForeground,
   mergeRuntimeMessageUsage,
@@ -132,7 +133,8 @@ import { confirm } from '@renderer/components/ui/confirm-dialog'
 import {
   registerPluginTools,
   unregisterPluginTools,
-  isPluginToolsRegistered
+  isPluginToolsRegistered,
+  getDefaultPluginToolNamesForType
 } from '@renderer/lib/channel/plugin-tools'
 import { useMcpStore } from '@renderer/stores/mcp-store'
 import {
@@ -144,6 +146,10 @@ import {
   loadLayeredMemorySnapshot,
   type SessionMemoryScope
 } from '@renderer/lib/agent/memory-files'
+import {
+  installMemoryAutomationDailyRollup,
+  runMemoryAutomationForSession
+} from '@renderer/lib/agent/memory-automation'
 import { IMAGE_GENERATE_TOOL_NAME } from '@renderer/lib/app-plugin/types'
 import {
   isDesktopControlToolName,
@@ -158,19 +164,26 @@ import {
   buildChatModePromptContextCacheKey,
   buildChatModeSystemPrompt,
   buildSystemPromptContextCacheKey,
-  filterChatModeToolDefinitions,
-  hasChatModePluginTools
+  hasChatModePluginTools,
+  haveSameToolDefinitions
 } from '@renderer/lib/chat-mode-tools'
+import { ensureDefaultChatWorkingFolder } from '@renderer/lib/chat-working-folder'
+import { ensureRequestToolCatalogFresh } from '@renderer/lib/tools/dynamic-tool-catalog'
 import {
-  buildGoalRuntimeContext,
   goalStatusLabel,
-  goalTokenDeltaForUsage,
-  GOAL_TOOL_NAMES,
+  shouldIgnoreGoalRuntimeForMode,
   validateGoalObjective
 } from '@renderer/lib/agent/goal-context'
-import { getTailToolExecutionState } from '@renderer/components/chat/transcript-utils'
+import {
+  getTailToolExecutionState,
+  type TailToolExecutionState
+} from '@renderer/components/chat/transcript-utils'
 import type { AutoModelSelectionStatus } from '@renderer/stores/ui-store'
-import { agentBridge, canSidecarHandle } from '@renderer/lib/ipc/agent-bridge'
+import {
+  agentBridge,
+  canSidecarHandle,
+  runSidecarContextCompression
+} from '@renderer/lib/ipc/agent-bridge'
 import {
   buildSidecarAgentRunRequest,
   normalizeSidecarApprovalRequest
@@ -183,8 +196,10 @@ import type { AgentStreamEvent } from '../../../shared/agent-stream-protocol'
 const sessionAbortControllers = new Map<string, AbortController>()
 const sessionSidecarRunIds = new Map<string, string>()
 const continuingToolExecutionSessions = new Set<string>()
-const GOAL_STALL_CONTINUE_LIMIT = 2
-const goalStallStateBySession = new Map<string, { goalId: string; sterileContinueCount: number }>()
+const pendingGoalContinuationSessions = new Set<string>()
+const scheduledGoalContinuationSessions = new Set<string>()
+/** Per-session id of the synthetic system message rendered while compression is in flight. */
+const sessionCompressionPlaceholderIds = new Map<string, string>()
 installSessionControlSyncListener((event) => {
   applySessionControlSyncEvent(event)
 })
@@ -199,6 +214,7 @@ useChatStore.subscribe((state) => {
         pendingSessionMessages.delete(id)
         pendingSessionMessageViews.delete(id)
         pausedPendingSessionDispatch.delete(id)
+        sessionCompressionPlaceholderIds.delete(id)
       }
     }
   }
@@ -278,6 +294,9 @@ function addMessageWithSync(sessionId: string, message: UnifiedMessage): void {
 void addMessageWithSync
 
 function setStreamingMessageIdWithSync(sessionId: string, messageId: string | null): void {
+  if (messageId === null) {
+    flushRuntimeForegroundMutations()
+  }
   useChatStore.getState().setStreamingMessageId(sessionId, messageId)
   emitSessionRuntimeSync({ kind: 'set_streaming_message', sessionId, messageId })
 }
@@ -322,6 +341,18 @@ function resolveSessionWorkingFolder(
   return project?.workingFolder?.trim() || undefined
 }
 
+async function ensureChatSessionWorkingFolder(sessionId: string): Promise<void> {
+  const chatStore = useChatStore.getState()
+  const session = chatStore.sessions.find((item) => item.id === sessionId)
+  if (!session || session.mode !== 'chat' || session.sshConnectionId) return
+  if (session.workingFolder?.trim()) return
+
+  const folder = await ensureDefaultChatWorkingFolder()
+  if (folder) {
+    chatStore.setWorkingFolder(sessionId, folder)
+  }
+}
+
 function resolveActiveMcpContext(projectId?: string | null): {
   activeMcps: ReturnType<ReturnType<typeof useMcpStore.getState>['getActiveMcps']>
   activeMcpTools: ReturnType<ReturnType<typeof useMcpStore.getState>['getActiveMcpTools']>
@@ -337,15 +368,6 @@ function resolveActiveMcpContext(projectId?: string | null): {
   }
 
   return { activeMcps, activeMcpTools }
-}
-
-function haveSameToolDefinitionNames(
-  left: readonly Pick<ToolDefinition, 'name'>[],
-  right: readonly Pick<ToolDefinition, 'name'>[]
-): boolean {
-  if (left.length !== right.length) return false
-  const rightNames = new Set(right.map((tool) => tool.name))
-  return left.every((tool) => rightNames.has(tool.name))
 }
 
 function summarizeActiveTeamForPromptCache(activeTeam: ActiveTeam | null | undefined): {
@@ -369,6 +391,8 @@ export interface SendMessageOptions {
   longRunningMode?: boolean
   clearCompletedTasksOnTurnStart?: boolean
   skipPendingPlanRevision?: boolean
+  enablePlanMode?: boolean
+  goalObjective?: string
   imageEdit?: {
     maskDataUrl?: string
   }
@@ -407,103 +431,6 @@ function getTaskProgressSnapshot(sessionId: string): string {
   const inProgress = tasks.filter((task) => task.status === 'in_progress').length
   const completed = tasks.filter((task) => task.status === 'completed').length
   return `${tasks.length}:${pending}:${inProgress}:${completed}`
-}
-
-function buildGoalCompletionGateBlockers(options: {
-  sessionId: string
-  isPlanMode: boolean
-  loopEndReason: 'completed' | 'max_iterations' | 'aborted' | 'error' | null
-  failedToolNames: Iterable<string>
-  unsettledToolNames: Iterable<string>
-}): string[] {
-  const blockers: string[] = []
-  const tasks = useTaskStore.getState().getTasksBySession(options.sessionId)
-  const pendingTasks = tasks.filter((task) => task.status === 'pending').length
-  const inProgressTasks = tasks.filter((task) => task.status === 'in_progress').length
-  const failedTools = [...new Set([...options.failedToolNames])].sort()
-  const unsettledTools = [...new Set([...options.unsettledToolNames])].sort()
-
-  if (options.loopEndReason !== 'completed') {
-    blockers.push(
-      options.loopEndReason === 'max_iterations'
-        ? 'the agent reached its iteration limit before a final completion turn'
-        : `the run ended with ${options.loopEndReason ?? 'an unknown state'}`
-    )
-  }
-  if (options.isPlanMode) {
-    blockers.push('Plan Mode is still active')
-  }
-  if (pendingTasks > 0 || inProgressTasks > 0) {
-    blockers.push(`${pendingTasks} pending and ${inProgressTasks} in-progress tasks remain`)
-  }
-  if (failedTools.length > 0) {
-    blockers.push(`failed tools: ${failedTools.join(', ')}`)
-  }
-  if (unsettledTools.length > 0) {
-    blockers.push(`unfinished tool calls: ${unsettledTools.join(', ')}`)
-  }
-  if (hasPendingSessionMessages(options.sessionId)) {
-    blockers.push('queued user messages have not been handled')
-  }
-  if (isPendingSessionDispatchPaused(options.sessionId)) {
-    blockers.push('queued user message dispatch is paused')
-  }
-
-  return blockers
-}
-
-function buildGoalContinuationBlockers(options: {
-  sessionId: string
-  isPlanMode: boolean
-  aborted: boolean
-  loopEndReason: 'completed' | 'max_iterations' | 'aborted' | 'error' | null
-}): string[] {
-  const blockers: string[] = []
-  if (options.isPlanMode) blockers.push('Plan Mode is active')
-  if (options.aborted || options.loopEndReason === 'aborted')
-    blockers.push('the user stopped the run')
-  if (options.loopEndReason === 'error') blockers.push('the last run ended with an error')
-  if (hasPendingSessionMessages(options.sessionId)) {
-    blockers.push('queued user messages are waiting')
-  }
-  if (isPendingSessionDispatchPaused(options.sessionId)) {
-    blockers.push('queued user message dispatch is paused')
-  }
-  return blockers
-}
-
-function recordGoalEvent(args: {
-  sessionId: string
-  goalId?: string | null
-  eventType: SessionGoalEventType
-  message?: string | null
-  metadata?: Record<string, unknown> | null
-}): void {
-  void useGoalStore.getState().addGoalEvent(args)
-}
-
-function updateGoalStallState(options: {
-  sessionId: string
-  goalId: string
-  source?: MessageSource
-  madeMaterialProgress: boolean
-}): boolean {
-  if (options.source !== 'continue' || options.madeMaterialProgress) {
-    goalStallStateBySession.set(options.sessionId, {
-      goalId: options.goalId,
-      sterileContinueCount: 0
-    })
-    return false
-  }
-
-  const previous = goalStallStateBySession.get(options.sessionId)
-  const sterileContinueCount =
-    previous?.goalId === options.goalId ? previous.sterileContinueCount + 1 : 1
-  goalStallStateBySession.set(options.sessionId, {
-    goalId: options.goalId,
-    sterileContinueCount
-  })
-  return sterileContinueCount >= GOAL_STALL_CONTINUE_LIMIT
 }
 
 function shouldClearCompletedSessionTasks(sessionId: string): boolean {
@@ -1114,6 +1041,39 @@ function estimateContextTokensForRequest(args: {
   }
 }
 
+function findRecentInputTokenUsage(messages: UnifiedMessage[]): number {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const usage = messages[index]?.usage
+    if (!usage) continue
+
+    const contextTokens = usage.contextTokens
+    if (typeof contextTokens === 'number' && Number.isFinite(contextTokens) && contextTokens > 0) {
+      return Math.floor(contextTokens)
+    }
+
+    const inputTokens = usage.inputTokens
+    if (typeof inputTokens === 'number' && Number.isFinite(inputTokens) && inputTokens > 0) {
+      return Math.floor(inputTokens)
+    }
+  }
+
+  return 0
+}
+
+function estimateManualCompressionInputTokens(
+  messages: UnifiedMessage[],
+  providerConfig: ProviderConfig
+): number {
+  const reportedTokens = findRecentInputTokenUsage(messages)
+  if (reportedTokens > 0) return reportedTokens
+
+  return estimateContextTokensForRequest({
+    messages,
+    tools: [],
+    providerConfig
+  })
+}
+
 function estimateCurrentIterationContextTokens(args: {
   sessionId: string
   assistantMessageId: string
@@ -1611,17 +1571,16 @@ function formatGoalSummary(goal: SessionGoal): string {
   const commands =
     goal.status === 'active'
       ? '/goal edit, /goal pause, /goal clear'
-      : goal.status === 'paused'
-        ? '/goal edit, /goal resume, /goal clear'
-        : '/goal edit, /goal clear'
+      : goal.status === 'complete'
+        ? '/goal edit, /goal clear'
+        : goal.status === 'paused' ||
+            goal.status === 'blocked' ||
+            goal.status === 'usage_limited' ||
+            goal.status === 'budget_limited'
+          ? '/goal edit, /goal resume, /goal clear'
+          : '/goal edit, /goal clear'
   lines.push('', `Commands: ${commands}`)
   return lines.join('\n')
-}
-
-function formatGoalFinalUsage(goal: SessionGoal): string {
-  const tokenBudget =
-    goal.tokenBudget !== undefined && goal.tokenBudget !== null ? ` of ${goal.tokenBudget}` : ''
-  return `${goal.tokensUsed}${tokenBudget} tokens, ${goal.timeUsedSeconds}s`
 }
 
 function appendGoalCommandMessages(
@@ -1644,7 +1603,7 @@ function appendGoalCommandMessages(
   })
 }
 
-type GoalSlashResult = false | 'handled' | 'start_goal'
+type GoalSlashResult = false | 'handled'
 
 async function tryHandleGoalSlashCommand(args: {
   sessionId: string
@@ -1708,7 +1667,7 @@ async function tryHandleGoalSlashCommand(args: {
       commandText,
       result.goal ? formatGoalSummary(result.goal) : `Failed to update goal: ${result.error}`
     )
-    return control === 'resume' && result.goal?.status === 'active' ? 'start_goal' : 'handled'
+    return 'handled'
   }
 
   if (control === 'edit') {
@@ -1733,7 +1692,7 @@ async function tryHandleGoalSlashCommand(args: {
       commandText,
       result.goal ? formatGoalSummary(result.goal) : `Failed to edit goal: ${result.error}`
     )
-    return result.goal?.status === 'active' ? 'start_goal' : 'handled'
+    return 'handled'
   }
 
   const validationError = validateGoalObjective(objectiveOrCommand)
@@ -1751,7 +1710,7 @@ async function tryHandleGoalSlashCommand(args: {
     commandText,
     result.goal ? formatGoalSummary(result.goal) : `Failed to set goal: ${result.error}`
   )
-  return result.goal?.status === 'active' ? 'start_goal' : 'handled'
+  return 'handled'
 }
 
 function findLastEditableUserMessage(messages: UnifiedMessage[]): EditableUserMessageTarget | null {
@@ -1899,11 +1858,65 @@ function ensureRequestContainsExpectedUserMessage(
   return [...messages, expectedUserMessage]
 }
 
-function extractToolErrorMessage(output: UnifiedMessage['content'] | string): string | undefined {
+function extractToolErrorMessage(output: unknown): string | undefined {
   if (typeof output !== 'string' || !isStructuredToolErrorText(output)) return undefined
   const parsed = decodeStructuredToolResult(output)
   if (!parsed || Array.isArray(parsed)) return undefined
   return typeof parsed.error === 'string' ? parsed.error : undefined
+}
+
+function reconcileIterationToolResults(
+  sessionId: string,
+  toolResults: { toolUseId: string; content: ToolResultContent; isError?: boolean }[]
+): void {
+  if (toolResults.length === 0) return
+
+  const agentStore = useAgentStore.getState()
+  const sessionToolCalls = agentStore.sessionToolCallsCache[sessionId]
+  const candidates = [
+    ...agentStore.pendingToolCalls,
+    ...agentStore.executedToolCalls,
+    ...(sessionToolCalls?.pending ?? []),
+    ...(sessionToolCalls?.executed ?? [])
+  ]
+  const completedAt = Date.now()
+  const seen = new Set<string>()
+
+  for (const result of toolResults) {
+    if (!result.toolUseId || seen.has(result.toolUseId)) continue
+    seen.add(result.toolUseId)
+
+    const existing = candidates.find((toolCall) => toolCall.id === result.toolUseId)
+    if (!existing) continue
+
+    if (
+      (existing.status === 'completed' || existing.status === 'error') &&
+      existing.output !== undefined
+    ) {
+      continue
+    }
+
+    const isError = result.isError === true
+    const errorMessage = isError ? extractToolErrorMessage(result.content) : undefined
+    const patch: Partial<ToolCallState> = {
+      status: isError ? 'error' : 'completed',
+      output: result.content,
+      ...(errorMessage ? { error: errorMessage } : {}),
+      completedAt
+    }
+
+    agentStore.updateToolCall(result.toolUseId, patch, sessionId)
+
+    if (existing.name === TASK_TOOL_NAME && existing.input.run_in_background !== true) {
+      reconcileSubAgentCompletionFromTaskToolCall(sessionId, {
+        ...existing,
+        ...patch,
+        status: patch.status ?? existing.status,
+        output: result.content,
+        completedAt
+      })
+    }
+  }
 }
 
 function getStoredToolCallResult(
@@ -1932,6 +1945,34 @@ function getStoredToolCallResult(
   return null
 }
 
+function collectAvailableContinuationToolResults(
+  sessionId: string,
+  tailToolExecution: TailToolExecutionState
+): {
+  toolResultsById: Map<string, { content: ToolResultContent; isError?: boolean }>
+  missingToolUses: TailToolExecutionState['toolUseBlocks']
+} {
+  const toolResultsById = new Map(tailToolExecution.toolResultMap)
+  const missingToolUses: TailToolExecutionState['toolUseBlocks'] = []
+
+  for (const toolUse of tailToolExecution.toolUseBlocks) {
+    if (toolResultsById.has(toolUse.id)) continue
+
+    const cachedResult = getStoredToolCallResult(sessionId, toolUse.id)
+    if (cachedResult) {
+      toolResultsById.set(toolUse.id, {
+        content: cachedResult.content,
+        isError: cachedResult.isError
+      })
+      continue
+    }
+
+    missingToolUses.push(toolUse)
+  }
+
+  return { toolResultsById, missingToolUses }
+}
+
 // ── Team lead auto-trigger: teammate messages → new agent turn ──
 
 /** Module-level ref to the latest sendMessage function from the hook */
@@ -1946,6 +1987,75 @@ let _sendMessageFn:
       options?: SendMessageOptions
     ) => Promise<void>)
   | null = null
+
+function tryDispatchPendingGoalContinuation(sessionId: string): boolean {
+  if (!pendingGoalContinuationSessions.has(sessionId)) return false
+  if (scheduledGoalContinuationSessions.has(sessionId)) return true
+  const currentGoal = useGoalStore.getState().getGoalBySession(sessionId)
+  if (currentGoal && currentGoal.status !== 'active') {
+    pendingGoalContinuationSessions.delete(sessionId)
+    return false
+  }
+  if (!_sendMessageFn) return false
+  if (useUIStore.getState().isPlanModeEnabled(sessionId)) return false
+  if (hasActiveSessionRun(sessionId)) return false
+  if (hasPendingSessionMessages(sessionId) || isPendingSessionDispatchPaused(sessionId)) {
+    return false
+  }
+
+  const sendMessage = _sendMessageFn
+  if (!sendMessage) return false
+  pendingGoalContinuationSessions.delete(sessionId)
+  scheduledGoalContinuationSessions.add(sessionId)
+  queueMicrotask(() => {
+    if (!scheduledGoalContinuationSessions.has(sessionId)) return
+    void sendMessage('', undefined, 'continue', sessionId, null)
+      .catch((error) => {
+        console.warn('[ChatActions] Failed to dispatch goal continuation:', error)
+      })
+      .finally(() => {
+        scheduledGoalContinuationSessions.delete(sessionId)
+        tryDispatchPendingGoalContinuation(sessionId)
+      })
+  })
+  return true
+}
+
+function clearGoalContinuationState(sessionId: string): void {
+  pendingGoalContinuationSessions.delete(sessionId)
+  scheduledGoalContinuationSessions.delete(sessionId)
+}
+
+let goalContinuationListenerCount = 0
+let stopGoalContinuationListener: (() => void) | null = null
+
+function acquireGoalContinuationListener(): () => void {
+  goalContinuationListenerCount += 1
+
+  if (!stopGoalContinuationListener) {
+    stopGoalContinuationListener = ipcClient.on('goal:continue-requested', (payload: unknown) => {
+      const sessionId =
+        payload && typeof payload === 'object'
+          ? (payload as { sessionId?: unknown }).sessionId
+          : undefined
+      if (typeof sessionId !== 'string' || !sessionId.trim()) return
+      const currentGoal = useGoalStore.getState().getGoalBySession(sessionId)
+      if (currentGoal && currentGoal.status !== 'active') {
+        clearGoalContinuationState(sessionId)
+        return
+      }
+      pendingGoalContinuationSessions.add(sessionId)
+      tryDispatchPendingGoalContinuation(sessionId)
+    })
+  }
+
+  return () => {
+    goalContinuationListenerCount = Math.max(0, goalContinuationListenerCount - 1)
+    if (goalContinuationListenerCount > 0) return
+    stopGoalContinuationListener?.()
+    stopGoalContinuationListener = null
+  }
+}
 
 /** Queue of teammate messages to lead waiting to be processed */
 const pendingLeadMessages: { from: string; content: string }[] = []
@@ -2147,7 +2257,7 @@ function dispatchNextQueuedMessage(sessionId: string): boolean {
 
 export function dispatchNextQueuedMessageForSession(sessionId: string): boolean {
   setPendingSessionDispatchPaused(sessionId, false)
-  return dispatchNextQueuedMessage(sessionId)
+  return dispatchNextQueuedMessage(sessionId) || tryDispatchPendingGoalContinuation(sessionId)
 }
 
 function abortTeamForSession(sessionId: string, clearPendingApprovals = false): void {
@@ -2164,6 +2274,7 @@ function abortTeamForSession(sessionId: string, clearPendingApprovals = false): 
 
 function finishStoppingSession(sessionId: string): void {
   setPendingSessionDispatchPaused(sessionId, true)
+  clearGoalContinuationState(sessionId)
 
   const ac = sessionAbortControllers.get(sessionId)
   if (ac) {
@@ -2475,8 +2586,9 @@ function createSidecarEventStream(options: {
   sidecarRequest: unknown
   signal?: AbortSignal
   logLabel: 'chat' | 'agent'
+  onRunIdAssigned?: (runId: string) => void
 }): AsyncIterable<AgentEvent> {
-  const { sessionId, sidecarRequest, signal, logLabel } = options
+  const { sessionId, sidecarRequest, signal, logLabel, onRunIdAssigned } = options
 
   return {
     async *[Symbol.asyncIterator]() {
@@ -2558,7 +2670,7 @@ function createSidecarEventStream(options: {
         const subEvent = toSubAgentEvent(event)
         if (subEvent) {
           markProgress()
-          subAgentEvents.emit(subEvent)
+          subAgentEvents.emit(sessionId ?? null, subEvent)
           return
         }
 
@@ -2591,6 +2703,7 @@ function createSidecarEventStream(options: {
         const result = await agentBridge.runAgent(sidecarRequest)
         runId = result.runId
         sessionSidecarRunIds.set(sessionId, result.runId)
+        onRunIdAssigned?.(result.runId)
         console.log(`[ChatActions] sidecar ${logLabel} stream started`, { sessionId, runId })
 
         if (signal?.aborted) {
@@ -2658,31 +2771,27 @@ function createSubAgentEventBuffer(sessionId: string): {
       entry.timer = undefined
     }
     if (entry.thinking) {
-      if (isSessionForeground(sessionId)) {
-        useAgentStore.getState().handleSubAgentEvent(
-          {
-            type: 'sub_agent_thinking_delta',
-            subAgentName: entry.subAgentName,
-            toolUseId,
-            thinking: entry.thinking
-          },
-          sessionId
-        )
-      }
+      useAgentStore.getState().handleSubAgentEvent(
+        {
+          type: 'sub_agent_thinking_delta',
+          subAgentName: entry.subAgentName,
+          toolUseId,
+          thinking: entry.thinking
+        },
+        sessionId
+      )
       entry.thinking = ''
     }
     if (entry.text) {
-      if (isSessionForeground(sessionId)) {
-        useAgentStore.getState().handleSubAgentEvent(
-          {
-            type: 'sub_agent_text_delta',
-            subAgentName: entry.subAgentName,
-            toolUseId,
-            text: entry.text
-          },
-          sessionId
-        )
-      }
+      useAgentStore.getState().handleSubAgentEvent(
+        {
+          type: 'sub_agent_text_delta',
+          subAgentName: entry.subAgentName,
+          toolUseId,
+          text: entry.text
+        },
+        sessionId
+      )
       entry.text = ''
     }
   }
@@ -2727,9 +2836,7 @@ function createSubAgentEventBuffer(sessionId: string): {
       }
 
       flushBeforeBoundary(event)
-      if (isSessionForeground(sessionId)) {
-        useAgentStore.getState().handleSubAgentEvent(event, sessionId)
-      }
+      useAgentStore.getState().handleSubAgentEvent(event, sessionId)
     },
     dispose: () => {
       flushAll()
@@ -2823,11 +2930,15 @@ export function useChatActions(): {
       // Ensure we have an active session
       let sessionId = targetSessionId ?? chatStore.activeSessionId
       if (!sessionId) {
+        const chatWorkingFolder =
+          uiStore.mode === 'chat' ? await ensureDefaultChatWorkingFolder() : undefined
         sessionId = chatStore.createSession(uiStore.mode, undefined, {
           ...options,
-          preserveProjectless: true
+          preserveProjectless: true,
+          workingFolder: chatWorkingFolder
         })
       }
+      await ensureChatSessionWorkingFolder(sessionId)
       if (source !== 'continue') {
         // Reset the back-to-back Task dedup guard on every fresh user turn —
         // the guard is only meant to block immediate retries within one loop,
@@ -2835,6 +2946,62 @@ export function useChatActions(): {
         clearLastTaskInvocation(sessionId)
       }
       await chatStore.loadRecentSessionMessages(sessionId)
+
+      if (options?.enablePlanMode) {
+        useUIStore.getState().enterPlanMode(sessionId)
+      }
+
+      if (options?.goalObjective !== undefined && source !== 'continue') {
+        if (commandOverride || images?.length) {
+          toast.error(i18n.t('goal.toasts.createFailed', { ns: 'chat' }), {
+            description: i18n.t('goal.errors.objectiveOnly', {
+              ns: 'chat',
+              defaultValue: 'Goal mode can only start from text input.'
+            })
+          })
+          return
+        }
+
+        const objective = options.goalObjective.trim()
+        const validationError = validateGoalObjective(objective)
+        if (validationError) {
+          toast.error(i18n.t('goal.toasts.objectiveInvalid', { ns: 'chat' }), {
+            description: validationError
+          })
+          return
+        }
+
+        const result = await useGoalStore.getState().setGoal({
+          sessionId,
+          objective,
+          status: 'active'
+        })
+        if (!result.success) {
+          toast.error(i18n.t('goal.toasts.createFailed', { ns: 'chat' }), {
+            description: result.error
+          })
+          return
+        }
+
+        const goalSession = useChatStore.getState().sessions.find((s) => s.id === sessionId)
+        if (goalSession && canAutoGenerateSessionTitle(goalSession.title)) {
+          const capturedSessionId = sessionId
+          generateSessionTitle(objective)
+            .then((titleResult) => {
+              if (!titleResult) return
+              const store = useChatStore.getState()
+              const latestSession = store.sessions.find((item) => item.id === capturedSessionId)
+              if (!latestSession || !canAutoGenerateSessionTitle(latestSession.title)) return
+              store.updateSessionTitle(capturedSessionId, titleResult.title)
+              store.updateSessionIcon(capturedSessionId, titleResult.icon)
+            })
+            .catch(() => {
+              /* keep default title on failure */
+            })
+        }
+
+        return
+      }
 
       const goalSlashResult = await tryHandleGoalSlashCommand({
         sessionId,
@@ -2844,11 +3011,6 @@ export function useChatActions(): {
         commandOverride
       })
       if (goalSlashResult) {
-        if (goalSlashResult === 'start_goal') {
-          queueMicrotask(() => {
-            void sendMessage('', undefined, 'continue', sessionId, null)
-          })
-        }
         return
       }
 
@@ -3242,6 +3404,8 @@ export function useChatActions(): {
         const abortController = new AbortController()
         sessionAbortControllers.set(sessionId, abortController)
 
+        await ensureRequestToolCatalogFresh()
+
         const mode = sessionMode
         const activeChannels = useChannelStore.getState().getActiveChannels()
         const needsPluginTools = activeChannels.length > 0 || !!session?.pluginId
@@ -3257,33 +3421,48 @@ export function useChatActions(): {
         const sessionGoalSnapshot =
           useGoalStore.getState().getGoalBySession(sessionId) ??
           (await useGoalStore.getState().loadGoalForSession(sessionId, true))
-        const activeGoalForRun =
-          sessionGoalSnapshot?.status === 'active' ? sessionGoalSnapshot : null
-        const registeredToolDefs = toolRegistry.getDefinitions()
-        const goalToolDefs = registeredToolDefs.filter((tool) => GOAL_TOOL_NAMES.has(tool.name))
+        const hasGoalContextForRun =
+          !!sessionGoalSnapshot &&
+          sessionGoalSnapshot.status !== 'paused' &&
+          sessionGoalSnapshot.status !== 'complete'
         const chatMcpContext =
           mode === 'chat' ? resolveActiveMcpContext(session?.projectId ?? null) : null
+        const registeredToolDefs = toolRegistry.getDefinitions()
         const baseChatModeToolDefs =
           mode === 'chat' &&
           !(providerResolution.modelConfig?.category === 'image' && source !== 'continue')
-            ? filterChatModeToolDefinitions(registeredToolDefs)
+            ? registeredToolDefs
             : []
-        const chatModeToolDefs =
-          goalToolDefs.length > 0
-            ? [
-                ...baseChatModeToolDefs,
-                ...goalToolDefs.filter(
-                  (goalTool) => !baseChatModeToolDefs.some((tool) => tool.name === goalTool.name)
-                )
-              ]
-            : baseChatModeToolDefs
+        const chatModeToolDefs = baseChatModeToolDefs
+        const sessionScope: SessionMemoryScope = session?.pluginId ? 'channel' : 'main'
+        const sessionWorkingFolder = resolveSessionWorkingFolder(session)
+        const memorySnapshot = await loadLayeredMemorySnapshot(ipcClient, {
+          workingFolder: sessionWorkingFolder,
+          sshConnectionId: session?.sshConnectionId,
+          scope: sessionScope
+        })
+        const sshConnection = session?.sshConnectionId
+          ? useSshStore
+              .getState()
+              .connections.find((connection) => connection.id === session.sshConnectionId)
+          : undefined
+        const environmentContext = resolvePromptEnvironmentContext({
+          sshConnectionId: session?.sshConnectionId,
+          workingFolder: sessionWorkingFolder,
+          sshConnection
+        })
+        const activeTeam = useTeamStore.getState().activeTeam
 
-        if (mode === 'chat' && chatModeToolDefs.length === 0) {
+        if (mode === 'chat' && chatModeToolDefs.length === 0 && !hasGoalContextForRun) {
           // Chat mode without enabled chat-mode tools: single API call, no tools
           const cachedPromptSnapshot = session?.promptSnapshot
           const chatPromptContextCacheKey = buildChatModePromptContextCacheKey({
             language: settings.language,
             userRules: settings.systemPrompt || undefined,
+            workingFolder: sessionWorkingFolder,
+            environmentContext,
+            memorySnapshot,
+            sessionScope,
             hasWebSearch: false,
             hasPluginTools: false,
             activeMcps: [],
@@ -3293,6 +3472,9 @@ export function useChatActions(): {
             !!cachedPromptSnapshot &&
             cachedPromptSnapshot.mode === 'chat' &&
             cachedPromptSnapshot.planMode === false &&
+            (cachedPromptSnapshot.projectId ?? null) === (session?.projectId ?? null) &&
+            (cachedPromptSnapshot.workingFolder ?? null) === (sessionWorkingFolder ?? null) &&
+            (cachedPromptSnapshot.sshConnectionId ?? null) === (session?.sshConnectionId ?? null) &&
             cachedPromptSnapshot.contextCacheKey === chatPromptContextCacheKey
 
           let chatSystemPrompt = cachedPromptSnapshot?.systemPrompt ?? ''
@@ -3300,6 +3482,10 @@ export function useChatActions(): {
             chatSystemPrompt = buildChatModeSystemPrompt({
               language: settings.language,
               userRules: settings.systemPrompt || undefined,
+              workingFolder: sessionWorkingFolder,
+              environmentContext,
+              memorySnapshot,
+              sessionScope,
               hasWebSearch: false,
               hasPluginTools: false,
               activeMcps: [],
@@ -3311,6 +3497,9 @@ export function useChatActions(): {
               planMode: false,
               systemPrompt: chatSystemPrompt,
               toolDefs: [],
+              projectId: session?.projectId,
+              workingFolder: sessionWorkingFolder,
+              sshConnectionId: session?.sshConnectionId ?? null,
               contextCacheKey: chatPromptContextCacheKey
             })
           }
@@ -3338,6 +3527,17 @@ export function useChatActions(): {
             agentStore.setSessionStatus(sessionId, 'completed')
             sessionAbortControllers.delete(sessionId)
             sessionSidecarRunIds.delete(sessionId)
+            if (sessionScope === 'main' && !abortController.signal.aborted) {
+              void runMemoryAutomationForSession({
+                sessionId,
+                assistantMessageId: assistantMsgId,
+                memorySnapshot,
+                source,
+                aborted: abortController.signal.aborted
+              }).catch((error) => {
+                console.warn('[MemoryAutomation] Session run failed:', error)
+              })
+            }
             if (!isSessionForeground(sessionId)) {
               const sessionTitle =
                 useChatStore.getState().sessions.find((item) => item.id === sessionId)?.title ??
@@ -3358,13 +3558,8 @@ export function useChatActions(): {
 
           // Filter out team tools when the feature is disabled. Capture after registration changes.
           const allToolDefs = toolRegistry.getDefinitions()
-          const finalToolDefs = allToolDefs
-          let finalEffectiveToolDefs =
-            mode === 'chat'
-              ? chatModeToolDefs
-              : settings.teamToolsEnabled
-                ? finalToolDefs
-                : finalToolDefs.filter((t) => !TEAM_TOOL_NAMES.has(t.name))
+          const finalToolDefs = filterTeamToolDefinitions(allToolDefs, settings.teamToolsEnabled)
+          let finalEffectiveToolDefs = finalToolDefs
 
           // Plan mode: restrict to read-only + planning tools
           const isPlanMode = useUIStore.getState().isPlanModeEnabled(sessionId)
@@ -3476,7 +3671,12 @@ export function useChatActions(): {
             const channelDescriptor = channelMeta
               ? useChannelStore.getState().getDescriptor(channelMeta.type)
               : undefined
-            const toolNames = channelDescriptor?.tools ?? []
+            const toolNames = Array.from(
+              new Set([
+                ...(channelDescriptor?.tools ?? []),
+                ...getDefaultPluginToolNamesForType(channelMeta?.type)
+              ])
+            )
             const enabledTools = toolNames.filter((name) => channelMeta?.tools?.[name] !== false)
             const senderLabel = session.pluginSenderName || session.pluginSenderId || 'unknown'
             const channelCtx = [
@@ -3493,29 +3693,15 @@ export function useChatActions(): {
             userPrompt = userPrompt ? `${userPrompt}\n${channelCtx}` : channelCtx
           }
 
-          const sessionScope: SessionMemoryScope = session?.pluginId ? 'shared' : 'main'
-          const sessionWorkingFolder = resolveSessionWorkingFolder(session)
-          const memorySnapshot = await loadLayeredMemorySnapshot(ipcClient, {
-            workingFolder: sessionWorkingFolder,
-            sshConnectionId: session?.sshConnectionId,
-            scope: sessionScope
-          })
-          const sshConnection = session?.sshConnectionId
-            ? useSshStore
-                .getState()
-                .connections.find((connection) => connection.id === session.sshConnectionId)
-            : undefined
-          const environmentContext = resolvePromptEnvironmentContext({
-            sshConnectionId: session?.sshConnectionId,
-            workingFolder: sessionWorkingFolder,
-            sshConnection
-          })
-          const activeTeam = useTeamStore.getState().activeTeam
           const promptContextCacheKey =
             mode === 'chat'
               ? buildChatModePromptContextCacheKey({
                   language: settings.language,
                   userRules: userPrompt || undefined,
+                  workingFolder: sessionWorkingFolder,
+                  environmentContext,
+                  memorySnapshot,
+                  sessionScope,
                   hasWebSearch: finalEffectiveToolDefs.some(
                     (tool) => tool.name === 'WebSearch' || tool.name === 'WebFetch'
                   ),
@@ -3539,7 +3725,7 @@ export function useChatActions(): {
             (cachedPromptSnapshot.workingFolder ?? null) === (sessionWorkingFolder ?? null) &&
             (cachedPromptSnapshot.sshConnectionId ?? null) === (session?.sshConnectionId ?? null) &&
             cachedPromptSnapshot.contextCacheKey === promptContextCacheKey &&
-            haveSameToolDefinitionNames(cachedPromptSnapshot.toolDefs, finalEffectiveToolDefs) &&
+            haveSameToolDefinitions(cachedPromptSnapshot.toolDefs, finalEffectiveToolDefs) &&
             // Plugin-bound sessions require plugin tools in the cached snapshot.
             // A stale snapshot (built when plugin tools were unregistered) must be
             // discarded so the system prompt + tool list are rebuilt. Issue #73.
@@ -3568,6 +3754,10 @@ export function useChatActions(): {
                 ? buildChatModeSystemPrompt({
                     language: settings.language,
                     userRules: userPrompt || undefined,
+                    workingFolder: sessionWorkingFolder,
+                    environmentContext,
+                    memorySnapshot,
+                    sessionScope,
                     hasWebSearch: finalEffectiveToolDefs.some(
                       (tool) => tool.name === 'WebSearch' || tool.name === 'WebFetch'
                     ),
@@ -3630,9 +3820,6 @@ export function useChatActions(): {
           const accumulatedUsage: TokenUsage = existingAssistantMessage?.usage
             ? { ...existingAssistantMessage.usage }
             : { inputTokens: 0, outputTokens: 0 }
-          const goalUsageBaseline = existingAssistantMessage?.usage
-            ? goalTokenDeltaForUsage(existingAssistantMessage.usage)
-            : 0
           const requestTimings: RequestTiming[] = []
           const loopStartedAt = Date.now()
           let currentUsageProviderId = agentProviderConfig.providerId ?? null
@@ -3643,7 +3830,7 @@ export function useChatActions(): {
 
           // Subscribe to SubAgent events during agent loop
           const subAgentEventBuffer = createSubAgentEventBuffer(sessionId!)
-          const unsubSubAgent = subAgentEvents.on((event) => {
+          const unsubSubAgent = subAgentEvents.on(sessionId, (event) => {
             subAgentEventBuffer.handleEvent(event)
             // Accumulate SubAgent token usage into the parent message
             if (event.type === 'sub_agent_end' && event.result?.usage) {
@@ -3666,12 +3853,7 @@ export function useChatActions(): {
           const preRunTaskSnapshot = getTaskProgressSnapshot(sessionId)
           let runUsedTools = false
           let shouldAutoContinueLongRunning = false
-          let shouldAutoContinueGoal = false
-          let loopEndReasonForGoal: 'completed' | 'max_iterations' | 'aborted' | 'error' | null =
-            null
           const liveToolNames = new Map<string, string>()
-          const goalRunFailedToolNames = new Set<string>()
-          const goalRunUnsettledToolCalls = new Map<string, string>()
 
           // Tool input throttling state — defined before try block so finally can safely dispose
           const liveToolInputThrottle = new Map<string, LiveToolInputThrottleEntry>()
@@ -3767,45 +3949,6 @@ export function useChatActions(): {
               }
             }
 
-            const goalContextTarget =
-              sessionGoalSnapshot &&
-              sessionGoalSnapshot.status !== 'paused' &&
-              sessionGoalSnapshot.status !== 'complete'
-                ? sessionGoalSnapshot
-                : null
-            if (goalContextTarget) {
-              const goalContext = buildGoalRuntimeContext(
-                goalContextTarget,
-                source === 'continue' ? 'continue' : 'user_turn'
-              )
-              const goalContextBlock = { type: 'text' as const, text: goalContext }
-              if (source === 'continue') {
-                messagesToSend = [
-                  ...messagesToSend,
-                  {
-                    id: nanoid(),
-                    role: 'user',
-                    content: [goalContextBlock],
-                    createdAt: Date.now()
-                  }
-                ]
-              } else {
-                const lastUserIndex = messagesToSend.findLastIndex((m) => m.role === 'user')
-                if (lastUserIndex >= 0) {
-                  const lastUserMsg = messagesToSend[lastUserIndex]
-                  const newContent =
-                    typeof lastUserMsg.content === 'string'
-                      ? [goalContextBlock, { type: 'text' as const, text: lastUserMsg.content }]
-                      : [goalContextBlock, ...lastUserMsg.content]
-                  messagesToSend = [
-                    ...messagesToSend.slice(0, lastUserIndex),
-                    { ...lastUserMsg, content: newContent },
-                    ...messagesToSend.slice(lastUserIndex + 1)
-                  ]
-                }
-              }
-            }
-
             if (pendingPlanRevisionContext && source !== 'continue' && messagesToSend.length > 0) {
               const lastUserIndex = messagesToSend.findLastIndex(
                 (message) => message.role === 'user'
@@ -3846,6 +3989,7 @@ export function useChatActions(): {
               sessionMode: 'agent',
               planMode: isPlanMode,
               planModeAllowedTools: isPlanMode ? [...PLAN_MODE_ALLOWED_TOOLS] : undefined,
+              goalRunSource: source === 'continue' ? 'continue' : 'user_turn',
               pluginId: session?.pluginId,
               pluginChatId: session?.externalChatId
                 ? extractPluginChatId(session.externalChatId)
@@ -3856,22 +4000,25 @@ export function useChatActions(): {
               sshConnectionId: session?.sshConnectionId
             })
 
-            const useSidecar = await canUseSidecarForAgentRun({
-              messages: messagesToSend,
-              provider: agentProviderConfig,
-              tools: effectiveToolDefs,
-              sessionId,
-              workingFolder: sessionWorkingFolder,
-              sshConnectionId: session?.sshConnectionId,
-              maxIterations: DEFAULT_AGENT_MAX_ITERATIONS,
-              forceApproval: false,
-              compression: compressionConfig,
-              isPlanMode,
-              sessionMode: mode,
-              desktopControlMode,
-              hasChannels: scopedActiveChannels.length > 0,
-              hasMcps: activeMcps.length > 0
-            })
+            const useSidecar =
+              hasGoalContextForRun && !shouldIgnoreGoalRuntimeForMode(isPlanMode)
+                ? true
+                : await canUseSidecarForAgentRun({
+                    messages: messagesToSend,
+                    provider: agentProviderConfig,
+                    tools: effectiveToolDefs,
+                    sessionId,
+                    workingFolder: sessionWorkingFolder,
+                    sshConnectionId: session?.sshConnectionId,
+                    maxIterations: DEFAULT_AGENT_MAX_ITERATIONS,
+                    forceApproval: false,
+                    compression: compressionConfig,
+                    isPlanMode,
+                    sessionMode: mode,
+                    desktopControlMode,
+                    hasChannels: scopedActiveChannels.length > 0,
+                    hasMcps: activeMcps.length > 0
+                  })
 
             console.log('[ChatActions] Agent execution path', {
               sessionId,
@@ -4317,9 +4464,6 @@ export function useChatActions(): {
 
                 case 'tool_use_streaming_start':
                   liveToolNames.set(event.toolCallId, event.toolName)
-                  if (activeGoalForRun) {
-                    goalRunUnsettledToolCalls.set(event.toolCallId, event.toolName)
-                  }
                   // Preserve stream order: flush any pending thinking/text before inserting tool block.
                   streamDeltaBuffer.flushNow()
                   if (!thinkingDone) {
@@ -4363,9 +4507,6 @@ export function useChatActions(): {
                 case 'tool_use_generated': {
                   runUsedTools = true
                   liveToolNames.set(event.toolUseBlock.id, event.toolUseBlock.name)
-                  if (activeGoalForRun) {
-                    goalRunUnsettledToolCalls.set(event.toolUseBlock.id, event.toolUseBlock.name)
-                  }
                   if (event.toolUseBlock.name === 'Write') {
                     console.log('[WriteTrace] tool_use_generated', {
                       sessionId,
@@ -4455,9 +4596,6 @@ export function useChatActions(): {
                 case 'tool_call_start':
                   runUsedTools = true
                   liveToolNames.set(event.toolCall.id, event.toolCall.name)
-                  if (activeGoalForRun) {
-                    goalRunUnsettledToolCalls.set(event.toolCall.id, event.toolCall.name)
-                  }
                   if (isSessionForeground(sessionId!)) {
                     useAgentStore.getState().addToolCall(
                       {
@@ -4498,12 +4636,6 @@ export function useChatActions(): {
 
                 case 'tool_call_result': {
                   liveToolNames.set(event.toolCall.id, event.toolCall.name)
-                  if (activeGoalForRun) {
-                    goalRunUnsettledToolCalls.delete(event.toolCall.id)
-                    if (event.toolCall.status === 'error' || event.toolCall.status === 'canceled') {
-                      goalRunFailedToolNames.add(event.toolCall.name)
-                    }
-                  }
                   clearToolInputPending(event.toolCall.id)
                   if (event.toolCall.name === 'Write') {
                     console.log('[WriteTrace] tool_call_result', {
@@ -4550,7 +4682,9 @@ export function useChatActions(): {
                       event.toolCall.status === 'completed' &&
                       (event.toolCall.name === 'Write' || event.toolCall.name === 'Edit')
                     ) {
-                      void useAgentStore.getState().refreshRunChanges(assistantMsgId)
+                      void useAgentStore.getState().refreshRunChanges(assistantMsgId, {
+                        sessionId
+                      })
                     }
                   }
                   if (event.toolCall.status === 'completed' || event.toolCall.status === 'error') {
@@ -4589,6 +4723,7 @@ export function useChatActions(): {
                   // When an iteration ends with tool results, append tool_result user message.
                   // The next iteration's text/tool_use will continue appending to the same assistant message.
                   if (event.toolResults && event.toolResults.length > 0) {
+                    reconcileIterationToolResults(sessionId!, event.toolResults)
                     const toolResultMsg: UnifiedMessage = {
                       id: nanoid(),
                       role: 'user',
@@ -4710,7 +4845,6 @@ export function useChatActions(): {
 
                 case 'loop_end': {
                   streamDeltaBuffer.flushNow()
-                  loopEndReasonForGoal = event.reason
                   accumulatedUsage.totalDurationMs = Date.now() - loopStartedAt
                   if (requestTimings.length > 0) {
                     accumulatedUsage.requestTimings = [...requestTimings]
@@ -4731,7 +4865,27 @@ export function useChatActions(): {
                     event.messages.length > 0 &&
                     (event.reason === 'completed' || event.reason === 'max_iterations')
                   ) {
-                    chatStore.replaceSessionMessages(sessionId!, event.messages)
+                    flushRuntimeForegroundMutations()
+                    const currentMessages =
+                      useChatStore.getState().sessions.find((item) => item.id === sessionId)
+                        ?.messages ?? []
+                    // The agent loop only emits messages on loop_end when compression
+                    // ran during this run. The agent carries the reduced view
+                    // ([boundary, summary, ...preserved, ...newTurns]) but the
+                    // renderer holds the full transcript with old messages intact —
+                    // splice the agent's tail over the renderer's tail instead of
+                    // overwriting the prefix.
+                    const merged = mergeLoopEndMessagesKeepHistory(currentMessages, event.messages)
+                    if (merged) {
+                      chatStore.replaceSessionMessages(sessionId!, merged)
+                    } else if (currentMessages.length === 0) {
+                      // Fresh session that never displayed the older history (e.g.
+                      // resumed after a crash) — adopt the agent's reduced view.
+                      chatStore.replaceSessionMessages(sessionId!, event.messages)
+                    }
+                    // Otherwise: merge couldn't anchor (boundary id missing from the
+                    // renderer view). Skip the replace rather than wipe the older
+                    // messages from the UI and DB.
                   }
                   break
                 }
@@ -4818,25 +4972,113 @@ export function useChatActions(): {
                   break
                 }
 
-                case 'context_compression_start':
+                case 'context_compression_start': {
+                  // Reuse the existing placeholder if one is already in flight (e.g.
+                  // the previous attempt failed without a context_compressed event,
+                  // or the agent retried compression on the next iteration). This
+                  // avoids accumulating empty system rows in the transcript when
+                  // compression keeps failing.
+                  const existingPlaceholderId = sessionCompressionPlaceholderIds.get(sessionId!)
+                  const startedAt = Date.now()
+                  if (existingPlaceholderId) {
+                    chatStore.updateMessage(sessionId!, existingPlaceholderId, {
+                      meta: {
+                        compressionStatus: {
+                          state: 'compressing',
+                          startedAt
+                        }
+                      }
+                    })
+                    break
+                  }
+                  const placeholderId = nanoid()
+                  chatStore.addMessage(sessionId!, {
+                    id: placeholderId,
+                    role: 'system',
+                    content: '',
+                    createdAt: startedAt,
+                    meta: {
+                      compressionStatus: {
+                        state: 'compressing',
+                        startedAt
+                      }
+                    }
+                  })
+                  sessionCompressionPlaceholderIds.set(sessionId!, placeholderId)
                   break
+                }
 
                 case 'context_compressed':
                   {
                     const compressedMessages = event.messages
+                    const placeholderId = sessionCompressionPlaceholderIds.get(sessionId!)
+                    sessionCompressionPlaceholderIds.delete(sessionId!)
+
+                    streamDeltaBuffer.flushNow()
+                    flushRuntimeForegroundMutations()
                     const currentMessages =
                       useChatStore.getState().sessions.find((item) => item.id === sessionId)
                         ?.messages ?? []
-                    const mergedMessages = compressedMessages
-                      ? mergeCompressedMessagesIntoConversation(currentMessages, compressedMessages)
-                      : null
-                    const nextVisibleMessages = mergedMessages ?? compressedMessages ?? null
-                    const shouldPersistMergedMessages =
-                      !!nextVisibleMessages &&
-                      !hasSameMessageIdSequence(currentMessages, nextVisibleMessages)
 
-                    if (shouldPersistMergedMessages) {
-                      chatStore.replaceSessionMessages(sessionId!, nextVisibleMessages)
+                    // Keep the full prior transcript visible; insert boundary + summary at
+                    // the preserved-segment head rather than dropping the older messages.
+                    const merged = compressedMessages
+                      ? mergeCompressedMessagesKeepHistory(currentMessages, compressedMessages)
+                      : null
+                    if (!merged) {
+                      // Nothing to merge — at least clear the placeholder so the loader
+                      // doesn't linger forever.
+                      if (placeholderId) {
+                        chatStore.updateMessage(sessionId!, placeholderId, { meta: undefined })
+                      }
+                      break
+                    }
+                    // The merge always returns a freshly-constructed array, but Zustand's
+                    // immer middleware auto-freezes state. Take a copy before in-place
+                    // mutation to keep this defensive against future merge changes.
+                    const nextMessages = [...merged]
+
+                    // Promote the placeholder to the persistent "compressed" marker in-place.
+                    if (placeholderId) {
+                      const placeholderIndex = nextMessages.findIndex(
+                        (item) => item.id === placeholderId
+                      )
+                      if (placeholderIndex >= 0) {
+                        const placeholder = nextMessages[placeholderIndex]
+                        const startedAt =
+                          placeholder.meta?.compressionStatus?.startedAt ?? placeholder.createdAt
+                        const boundaryMeta = compressedMessages?.find(
+                          (item) => item.role === 'system' && item.meta?.compactBoundary
+                        )?.meta?.compactBoundary
+                        nextMessages[placeholderIndex] = {
+                          ...placeholder,
+                          meta: {
+                            ...placeholder.meta,
+                            compressionStatus: {
+                              state: 'compressed',
+                              startedAt,
+                              completedAt: Date.now(),
+                              ...(typeof event.keptMessageCount === 'number' &&
+                              event.keptMessageCount > 0
+                                ? { keptMessageCount: event.keptMessageCount }
+                                : boundaryMeta?.messagesSummarized
+                                  ? { keptMessageCount: boundaryMeta.messagesSummarized }
+                                  : {}),
+                              ...(typeof boundaryMeta?.preTokens === 'number' &&
+                              boundaryMeta.preTokens > 0
+                                ? { preTokens: boundaryMeta.preTokens }
+                                : {}),
+                              ...(typeof event.newCount === 'number' && event.newCount > 0
+                                ? { newCount: event.newCount }
+                                : {})
+                            }
+                          }
+                        }
+                      }
+                    }
+
+                    if (!hasSameMessageIdSequence(currentMessages, nextMessages)) {
+                      chatStore.replaceSessionMessages(sessionId!, nextMessages)
                     }
                   }
                   break
@@ -4942,164 +5184,14 @@ export function useChatActions(): {
             setStreamingMessageIdWithSync(sessionId, null)
             sessionAbortControllers.delete(sessionId)
             sessionSidecarRunIds.delete(sessionId)
-            if (activeGoalForRun) {
-              const tokenDelta = Math.max(
-                0,
-                goalTokenDeltaForUsage(accumulatedUsage) - goalUsageBaseline
-              )
-              const accountResult = await useGoalStore.getState().accountGoalUsage({
-                sessionId,
-                timeDeltaSeconds: Math.floor((Date.now() - loopStartedAt) / 1000),
-                tokenDelta,
-                expectedGoalId: activeGoalForRun.goalId
-              })
-              let latestGoal =
-                accountResult.goal ?? useGoalStore.getState().getGoalBySession(sessionId)
-              if (
-                latestGoal?.goalId === activeGoalForRun.goalId &&
-                latestGoal.status === 'budget_limited'
-              ) {
-                goalStallStateBySession.delete(sessionId)
-                appendRuntimeTextDelta(
-                  sessionId,
-                  assistantMsgId,
-                  `\n\n> ${i18n.t('goal.runtime.budgetReached', {
-                    ns: 'chat',
-                    defaultValue:
-                      'Goal budget reached. I stopped starting new work for this goal; increase the budget or replace the goal to continue.'
-                  })}`
-                )
-              } else if (
-                latestGoal?.goalId === activeGoalForRun.goalId &&
-                latestGoal.status === 'complete'
-              ) {
-                const completionBlockers = buildGoalCompletionGateBlockers({
-                  sessionId,
-                  isPlanMode,
-                  loopEndReason: loopEndReasonForGoal,
-                  failedToolNames: goalRunFailedToolNames,
-                  unsettledToolNames: goalRunUnsettledToolCalls.values()
-                })
-
-                if (completionBlockers.length > 0) {
-                  const restoreResult = await useGoalStore
-                    .getState()
-                    .updateGoal(sessionId, { status: 'active' })
-                  if (restoreResult.success && restoreResult.goal) {
-                    latestGoal = restoreResult.goal
-                  }
-                  const blockerText = completionBlockers.join('; ')
-                  recordGoalEvent({
-                    sessionId,
-                    goalId: activeGoalForRun.goalId,
-                    eventType: 'completion_deferred',
-                    message: blockerText,
-                    metadata: { blockers: completionBlockers }
-                  })
-                  appendRuntimeTextDelta(
-                    sessionId,
-                    assistantMsgId,
-                    `\n\n> ${i18n.t('goal.runtime.completionDeferred', {
-                      ns: 'chat',
-                      blockers: blockerText,
-                      defaultValue:
-                        'Goal completion deferred. Completion gate found: {{blockers}}. The goal remains active.'
-                    })}`
-                  )
-                } else {
-                  goalStallStateBySession.delete(sessionId)
-                  recordGoalEvent({
-                    sessionId,
-                    goalId: latestGoal.goalId,
-                    eventType: 'completed',
-                    metadata: {
-                      tokensUsed: latestGoal.tokensUsed,
-                      tokenBudget: latestGoal.tokenBudget ?? null,
-                      timeUsedSeconds: latestGoal.timeUsedSeconds
-                    }
-                  })
-                  appendRuntimeTextDelta(
-                    sessionId,
-                    assistantMsgId,
-                    `\n\n> ${i18n.t('goal.runtime.complete', {
-                      ns: 'chat',
-                      usage: formatGoalFinalUsage(latestGoal),
-                      defaultValue:
-                        'Goal complete. Final audit: {{usage}}; no unfinished tasks, failed tools, queued user messages, or pending plan gate.'
-                    })}`
-                  )
-                }
-              }
-              if (
-                latestGoal?.goalId === activeGoalForRun.goalId &&
-                latestGoal.status === 'active'
-              ) {
-                const continuationBlockers = buildGoalContinuationBlockers({
-                  sessionId,
-                  isPlanMode,
-                  aborted: abortController.signal.aborted,
-                  loopEndReason: loopEndReasonForGoal
-                })
-                const madeMaterialProgress =
-                  runUsedTools || getTaskProgressSnapshot(sessionId) !== preRunTaskSnapshot
-                const shouldPauseForStall =
-                  continuationBlockers.length === 0 &&
-                  updateGoalStallState({
-                    sessionId,
-                    goalId: activeGoalForRun.goalId,
-                    source,
-                    madeMaterialProgress
-                  })
-
-                if (shouldPauseForStall) {
-                  const stalledGoalResult = await useGoalStore
-                    .getState()
-                    .updateGoal(sessionId, { status: 'paused' })
-                  if (stalledGoalResult.success && stalledGoalResult.goal) {
-                    latestGoal = stalledGoalResult.goal
-                  }
-                  const stallMessage = i18n.t('goal.runtime.stallPaused', {
-                    ns: 'chat',
-                    count: GOAL_STALL_CONTINUE_LIMIT,
-                    defaultValue:
-                      'Goal paused by the stall guard after {{count}} continuation rounds without tool or task progress. Review the goal or resume it when ready.'
-                  })
-                  recordGoalEvent({
-                    sessionId,
-                    goalId: activeGoalForRun.goalId,
-                    eventType: 'stall_paused',
-                    message: stallMessage,
-                    metadata: { sterileContinueLimit: GOAL_STALL_CONTINUE_LIMIT }
-                  })
-                  appendRuntimeTextDelta(sessionId, assistantMsgId, `\n\n> ${stallMessage}`)
-                } else if (continuationBlockers.length > 0) {
-                  const blockerText = continuationBlockers.join('; ')
-                  recordGoalEvent({
-                    sessionId,
-                    goalId: activeGoalForRun.goalId,
-                    eventType: 'auto_continue_blocked',
-                    message: blockerText,
-                    metadata: { blockers: continuationBlockers }
-                  })
-                  appendRuntimeTextDelta(
-                    sessionId,
-                    assistantMsgId,
-                    `\n\n> ${i18n.t('goal.runtime.autoContinueBlocked', {
-                      ns: 'chat',
-                      blockers: blockerText,
-                      defaultValue: 'Goal auto-continue is waiting: {{blockers}}.'
-                    })}`
-                  )
-                }
-
-                shouldAutoContinueGoal = Boolean(
-                  latestGoal?.goalId === activeGoalForRun.goalId &&
-                  latestGoal.status === 'active' &&
-                  continuationBlockers.length === 0 &&
-                  !shouldPauseForStall
-                )
-              } else {
-                goalStallStateBySession.delete(sessionId)
+            // If the run ended (completed / error / aborted) while a compression
+            // status placeholder is still mid-flight, clear its loader meta so the
+            // UI doesn't keep showing "compressing…" forever.
+            {
+              const lingeringPlaceholderId = sessionCompressionPlaceholderIds.get(sessionId)
+              if (lingeringPlaceholderId) {
+                chatStore.updateMessage(sessionId, lingeringPlaceholderId, { meta: undefined })
+                sessionCompressionPlaceholderIds.delete(sessionId)
               }
             }
             // Derive global isRunning from remaining running sessions
@@ -5109,11 +5201,24 @@ export function useChatActions(): {
             agentStore.setRunning(hasOtherRunning)
             dispatchNextQueuedMessage(sessionId)
 
-            if (shouldAutoContinueGoal || shouldAutoContinueLongRunning) {
+            if (shouldAutoContinueLongRunning) {
               queueMicrotask(() => {
                 void sendMessage('', undefined, 'continue', sessionId, null, assistantMsgId)
               })
             } else {
+              tryDispatchPendingGoalContinuation(sessionId)
+              if (sessionScope === 'main' && !abortController.signal.aborted) {
+                void runMemoryAutomationForSession({
+                  sessionId,
+                  assistantMessageId: assistantMsgId,
+                  memorySnapshot,
+                  source,
+                  aborted: abortController.signal.aborted
+                }).catch((error) => {
+                  console.warn('[MemoryAutomation] Session run failed:', error)
+                })
+              }
+
               if (!isSessionForeground(sessionId)) {
                 const sessionTitle =
                   useChatStore.getState().sessions.find((session) => session.id === sessionId)
@@ -5145,10 +5250,27 @@ export function useChatActions(): {
   )
 
   useEffect(() => {
+    installMemoryAutomationDailyRollup()
     ensureTeamLeadListener()
     if (useTeamStore.getState().activeTeam) {
       scheduleDrain()
     }
+  }, [])
+
+  useEffect(() => {
+    return acquireGoalContinuationListener()
+  }, [])
+
+  useEffect(() => {
+    let previous = useUIStore.getState().planModesBySession
+    return useUIStore.subscribe((state) => {
+      const next = state.planModesBySession
+      for (const [sessionId, enabled] of Object.entries(previous ?? {})) {
+        if (!enabled || next?.[sessionId]) continue
+        tryDispatchPendingGoalContinuation(sessionId)
+      }
+      previous = next
+    })
   }, [])
 
   // IPC listeners (session-control, sidecar tools/approval) are registered
@@ -5179,7 +5301,7 @@ export function useChatActions(): {
     continuingToolExecutionSessions.add(sessionId)
 
     try {
-      await chatStore.loadRecentSessionMessages(sessionId)
+      await chatStore.loadSessionMessages(sessionId, true)
     } catch (error) {
       continuingToolExecutionSessions.delete(sessionId)
       throw error
@@ -5191,12 +5313,6 @@ export function useChatActions(): {
       return
     }
 
-    const session = chatStore.sessions.find((item) => item.id === sessionId)
-    if (!session) {
-      continuingToolExecutionSessions.delete(sessionId)
-      return
-    }
-
     const resumedAssistantMessageId = tailToolExecution.assistantMessageId
     let handedOffToSendMessage = false
 
@@ -5204,130 +5320,23 @@ export function useChatActions(): {
     agentStore.setRunning(true)
 
     try {
-      const toolResultsById = new Map(tailToolExecution.toolResultMap)
-      const pendingToolUses = tailToolExecution.toolUseBlocks.filter(
-        (toolUse) => !toolResultsById.has(toolUse.id)
+      const { toolResultsById, missingToolUses } = collectAvailableContinuationToolResults(
+        sessionId,
+        tailToolExecution
       )
 
-      if (pendingToolUses.length > 0) {
-        const abortController = new AbortController()
-        sessionAbortControllers.set(sessionId, abortController)
-        clearRequestRetryState(sessionId)
-        agentStore.setSessionStatus(sessionId, 'running')
-
-        try {
-          for (const toolUse of pendingToolUses) {
-            if (abortController.signal.aborted) return
-
-            const cachedResult = getStoredToolCallResult(sessionId, toolUse.id)
-            if (cachedResult) {
-              toolResultsById.set(toolUse.id, {
-                content: cachedResult.content,
-                isError: cachedResult.isError
-              })
-              continue
-            }
-
-            const pluginChatId = extractPluginChatId(session.externalChatId)
-            const toolCtx: ToolContext = {
-              sessionId,
-              workingFolder: resolveSessionWorkingFolder(session),
-              sshConnectionId: session.sshConnectionId,
-              signal: abortController.signal,
-              ipc: ipcClient,
-              currentToolUseId: toolUse.id,
-              agentRunId: resumedAssistantMessageId,
-              ...(session.pluginId ? { pluginId: session.pluginId } : {}),
-              ...(pluginChatId ? { pluginChatId } : {}),
-              ...(session.pluginChatType ? { pluginChatType: session.pluginChatType } : {}),
-              ...(session.pluginSenderId ? { pluginSenderId: session.pluginSenderId } : {}),
-              ...(session.pluginSenderName ? { pluginSenderName: session.pluginSenderName } : {}),
-              sharedState: {}
-            }
-
-            const requiresApproval = toolRegistry.checkRequiresApproval(
-              toolUse.name,
-              toolUse.input,
-              toolCtx
-            )
-
-            if (requiresApproval) {
-              agentStore.addToolCall(
-                {
-                  id: toolUse.id,
-                  name: toolUse.name,
-                  input: toolUse.input,
-                  status: 'pending_approval',
-                  requiresApproval: true
-                },
-                sessionId
-              )
-
-              const approved = await agentStore.requestApproval(toolUse.id)
-              if (approved) {
-                agentStore.addApprovedTool(toolUse.name)
-              } else {
-                const deniedOutput = encodeToolError('User denied permission')
-                agentStore.updateToolCall(
-                  toolUse.id,
-                  {
-                    status: 'error',
-                    output: deniedOutput,
-                    error: 'User denied permission',
-                    completedAt: Date.now()
-                  },
-                  sessionId
-                )
-                toolResultsById.set(toolUse.id, { content: deniedOutput, isError: true })
-                continue
-              }
-            }
-
-            const startedAt = Date.now()
-            agentStore.addToolCall(
-              {
-                id: toolUse.id,
-                name: toolUse.name,
-                input: toolUse.input,
-                status: 'running',
-                requiresApproval,
-                startedAt
-              },
-              sessionId
-            )
-
-            const output = await toolRegistry.execute(toolUse.name, toolUse.input, toolCtx)
-            const isError = typeof output === 'string' && isStructuredToolErrorText(output)
-            const errorMessage = extractToolErrorMessage(output)
-
-            agentStore.updateToolCall(
-              toolUse.id,
-              {
-                status: isError ? 'error' : 'completed',
-                output,
-                ...(errorMessage ? { error: errorMessage } : {}),
-                completedAt: Date.now()
-              },
-              sessionId
-            )
-
-            if (
-              resumedAssistantMessageId &&
-              (toolUse.name === 'Write' || toolUse.name === 'Edit')
-            ) {
-              void agentStore.refreshRunChanges(resumedAssistantMessageId)
-            }
-
-            toolResultsById.set(toolUse.id, { content: output, isError })
-          }
-        } finally {
-          const activeController = sessionAbortControllers.get(sessionId)
-          if (activeController === abortController) {
-            sessionAbortControllers.delete(sessionId)
-          }
-          clearRequestRetryState(sessionId)
-          agentStore.setSessionStatus(sessionId, null)
-        }
+      // Continue must only bridge saved tool results back to the model; replaying historical
+      // tool_use blocks can repeat writes, shell commands, or other side effects.
+      if (missingToolUses.length > 0) {
+        const names = Array.from(new Set(missingToolUses.map((toolUse) => toolUse.name)))
+          .slice(0, 3)
+          .join(', ')
+        toast.error('Cannot continue safely', {
+          description: `Missing saved results for ${missingToolUses.length} previous tool call${
+            missingToolUses.length === 1 ? '' : 's'
+          }${names ? ` (${names})` : ''}. Retry the turn instead of replaying tools.`
+        })
+        return
       }
 
       const consolidatedToolResults = tailToolExecution.toolUseBlocks.map((toolUse) => {
@@ -5516,32 +5525,23 @@ export function useChatActions(): {
       toast.error('Cannot compress', { description: 'No active session' })
       return 'blocked'
     }
-    await chatStore.loadSessionMessages(sessionId)
-
     // Limitation 1: agent must not be running
     const sessionStatus = agentStore.runningSessions[sessionId]
     if (sessionStatus === 'running' || sessionStatus === 'retrying') {
-      toast.error('Cannot compress', { description: 'Agent is running, please wait for completion before manual compression' })
-      return 'blocked'
-    }
-
-    const messages = chatStore.getSessionMessages(sessionId)
-    const MIN_MESSAGES = 8
-
-    // Limitation 2: minimum message count
-    if (messages.length < MIN_MESSAGES) {
       toast.error('Cannot compress', {
-        description: `At least ${MIN_MESSAGES} messages required for compression (currently ${messages.length})`
+        description: 'Agent is running, please wait for completion before manual compression'
       })
       return 'blocked'
     }
 
-    // Limitation 3: detect recent compressed summaries in both new and legacy top-of-session layouts.
-    const hasRecentSummary = messages
-      .slice(0, 3)
-      .some((message) => isCompactSummaryLikeMessage(message))
-    if (hasRecentSummary && messages.length < MIN_MESSAGES + 4) {
-      toast.error('Cannot compress', { description: 'Too few messages since last compression, please continue the conversation' })
+    const messages = await chatStore.getSessionMessagesForRequest(sessionId, {
+      requestContextMaxMessages: null,
+      includeTrailingAssistantPlaceholder: false
+    })
+    if (messages.length === 0) {
+      toast.error('Cannot compress', {
+        description: 'No messages to compress'
+      })
       return 'blocked'
     }
 
@@ -5552,7 +5552,9 @@ export function useChatActions(): {
     if (activeProvider) {
       const ready = await ensureProviderAuthReady(activeProvider.id)
       if (!ready) {
-        toast.error('Authentication missing', { description: 'Please complete provider login in settings first' })
+        toast.error('Authentication missing', {
+          description: 'Please complete provider login in settings first'
+        })
         return 'blocked'
       }
     }
@@ -5592,7 +5594,9 @@ export function useChatActions(): {
     if (compressSession?.providerId && compressSession?.modelId) {
       const ready = await ensureProviderAuthReady(compressSession.providerId)
       if (!ready) {
-        toast.error('Authentication missing', { description: 'Please complete session provider login in settings first' })
+        toast.error('Authentication missing', {
+          description: 'Please complete session provider login in settings first'
+        })
         return 'blocked'
       }
       const sessionProviderConfig = providerStore.getProviderConfigById(
@@ -5607,21 +5611,80 @@ export function useChatActions(): {
       }
     }
 
+    // Surface a "compressing…" status card to match the agent-loop UX. The card
+    // gets promoted to a "compressed" marker (or cleared) once the request
+    // settles.
+    const placeholderId = nanoid()
+    const placeholderStartedAt = Date.now()
+    chatStore.addMessage(sessionId, {
+      id: placeholderId,
+      role: 'system',
+      content: '',
+      createdAt: placeholderStartedAt,
+      meta: {
+        compressionStatus: {
+          state: 'compressing',
+          startedAt: placeholderStartedAt
+        }
+      }
+    })
+
     try {
-      const { messages: compressed, result } = await compressMessages(
+      const preTokens = estimateManualCompressionInputTokens(messages, config)
+      const { messages: compressed, result } = await runSidecarContextCompression({
         messages,
-        config,
-        undefined, // no abort signal for manual
-        undefined, // adaptive preserve count
-        focusPrompt || undefined
-      )
+        provider: config,
+        focusPrompt: focusPrompt || undefined,
+        preTokens
+      })
       if (!result.compressed) {
-        toast.warning('No compression needed', { description: 'Current message count insufficient for effective compression' })
+        // Nothing changed — drop the placeholder's status meta so it renders as
+        // an inert system row (which MessageItem skips entirely).
+        chatStore.updateMessage(sessionId, placeholderId, { meta: undefined })
+        toast.warning('No compression needed', {
+          description: 'No compressible context found'
+        })
         return 'skipped'
       }
-      chatStore.replaceSessionMessages(sessionId, compressed)
+      // Match the agent-loop behavior: keep all prior messages visible and
+      // insert the boundary + summary at the preserved-segment head rather
+      // than dropping the older history.
+      const currentMessages =
+        useChatStore.getState().sessions.find((item) => item.id === sessionId)?.messages ?? []
+      const merged = mergeCompressedMessagesKeepHistory(currentMessages, compressed)
+      const nextMessages = merged ? [...merged] : [...compressed]
+      const placeholderIndex = nextMessages.findIndex((item) => item.id === placeholderId)
+      if (placeholderIndex >= 0) {
+        const placeholder = nextMessages[placeholderIndex]
+        const boundaryMeta = compressed.find(
+          (item) => item.role === 'system' && item.meta?.compactBoundary
+        )?.meta?.compactBoundary
+        nextMessages[placeholderIndex] = {
+          ...placeholder,
+          meta: {
+            ...placeholder.meta,
+            compressionStatus: {
+              state: 'compressed',
+              startedAt: placeholderStartedAt,
+              completedAt: Date.now(),
+              ...(typeof result.messagesSummarized === 'number' && result.messagesSummarized > 0
+                ? { keptMessageCount: result.messagesSummarized }
+                : boundaryMeta?.messagesSummarized
+                  ? { keptMessageCount: boundaryMeta.messagesSummarized }
+                  : {}),
+              ...(typeof boundaryMeta?.preTokens === 'number' && boundaryMeta.preTokens > 0
+                ? { preTokens: boundaryMeta.preTokens }
+                : {}),
+              newCount: result.newCount
+            }
+          }
+        }
+      }
+      chatStore.replaceSessionMessages(sessionId, nextMessages)
       return 'compressed'
     } catch (err) {
+      // Clear the loader so it doesn't linger after a failure.
+      chatStore.updateMessage(sessionId, placeholderId, { meta: undefined })
       const errMsg = err instanceof Error ? err.message : String(err)
       console.error('[Manual Compress Error]', err)
       toast.error('Compression failed', { description: errMsg })

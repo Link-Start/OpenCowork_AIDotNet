@@ -8,7 +8,8 @@ import {
   clipboard,
   nativeImage,
   dialog,
-  session
+  session,
+  type IpcMainEvent
 } from 'electron'
 
 import { join, extname } from 'path'
@@ -19,9 +20,9 @@ import { randomUUID } from 'crypto'
 import { spawn } from 'child_process'
 
 // Delay import of @electron-toolkit/utils to avoid accessing app before ready
-let electronApp: any
-let optimizer: any
-let is: any
+let electronApp: { setAppUserModelId: (id: string) => void }
+let optimizer: { watchWindowShortcuts: (window: BrowserWindow) => void }
+let is: { dev: boolean }
 
 import icon from '../../resources/icon.png?asset'
 import icon_mac from '../../resources/icon-mac.png?asset'
@@ -36,12 +37,15 @@ import { registerApiProxyHandlers } from './ipc/api-proxy'
 import { registerSettingsHandlers, flushSettingsSync } from './ipc/settings-handlers'
 
 import { registerSkillsHandlers } from './ipc/skills-handlers'
+import { registerSoulsHandlers } from './ipc/souls-handlers'
 import { registerAgentsHandlers } from './ipc/agents-handlers'
 import { registerPromptsHandlers } from './ipc/prompts-handlers'
 import { registerCommandsHandlers } from './ipc/commands-handlers'
 import { registerProcessManagerHandlers, killAllManagedProcesses } from './ipc/process-manager'
 import { registerTerminalHandlers, killAllTerminalSessions } from './ipc/terminal-handlers'
 import { registerDbHandlers } from './ipc/db-handlers'
+import { registerGoalRuntimeHandlers } from './ipc/goal-runtime-handlers'
+import { registerMemoryAutomationHandlers } from './ipc/memory-automation-handlers'
 import { registerConfigHandlers } from './ipc/secure-key-store'
 import { registerChannelHandlers, autoStartChannels } from './ipc/channel-handlers'
 import { ChannelManager } from './channels/channel-manager'
@@ -57,6 +61,7 @@ import { registerImageGifHandlers } from './ipc/image-gif-handlers'
 import { registerGitHandlers } from './ipc/git-handlers'
 import { registerWikiHandlers } from './ipc/wiki-handlers'
 import { registerMigrationHandlers } from './ipc/migration-handlers'
+import { registerSyncHandlers } from './ipc/sync-handlers'
 import { registerSidecarHandlers, getSidecarManager } from './ipc/sidecar-manager'
 import { registerTeamRuntimeHandlers } from './ipc/team-runtime-handlers'
 import { registerTeamWorkerHandlers, stopAllIsolatedTeamWorkers } from './ipc/team-worker-handlers'
@@ -68,6 +73,11 @@ import { writeCrashLog, getCrashLogDir } from './crash-logger'
 import { setupAutoUpdater } from './updater'
 import { safeSendToWindow } from './window-ipc'
 import * as sessionsDao from './db/sessions-dao'
+import {
+  configureBuiltInBrowserSession,
+  flushBuiltInBrowserStorage,
+  resolveBrowserSessionStorageMode
+} from './browser/browser-emulation'
 
 import { createFeishuService } from './channels/providers/feishu/feishu-service'
 import { FeishuApi } from './channels/providers/feishu/feishu-api'
@@ -110,6 +120,7 @@ let sshWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let isQuiting = false
 const detachedSessionWindows = new Map<string, BrowserWindow>()
+const visibleSessionWindowIds = new Map<string, Set<number>>()
 
 const GENERATED_IMAGES_DIR = 'open-cowork'
 const GENERATED_IMAGES_SUBDIR = 'image'
@@ -404,7 +415,8 @@ function attachWindowCrashLogging(window: BrowserWindow): void {
 }
 
 function configureChromiumCachePaths(): void {
-  const sessionDataPath = join(app.getPath('userData'), 'session-data')
+  const browserStorageMode = resolveBrowserSessionStorageMode(app.getPath('userData'))
+  const sessionDataPath = browserStorageMode.sessionDataPath
   const diskCachePath = join(sessionDataPath, 'Cache')
 
   try {
@@ -412,6 +424,13 @@ function configureChromiumCachePaths(): void {
     mkdirSync(diskCachePath, { recursive: true })
     app.setPath('sessionData', sessionDataPath)
     app.commandLine.appendSwitch('disk-cache-dir', diskCachePath)
+    if (browserStorageMode.usingDetectedBrowserProfile) {
+      console.log(
+        `[Browser] Using isolated browser storage while emulating ${browserStorageMode.browserName} profile: ${browserStorageMode.browserProfilePath}`
+      )
+    } else if (browserStorageMode.reuseEnabled) {
+      console.log('[Browser] Browser profile reuse enabled, but no supported profile was found')
+    }
   } catch (error) {
     console.error('[Main] Failed to configure Chromium cache paths:', error)
     recordCrash('configure_chromium_cache_failed', { error })
@@ -497,6 +516,134 @@ function getAttachedDetachedSessionWindow(sessionId: string): BrowserWindow | nu
   return existing
 }
 
+function normalizeIpcRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
+}
+
+function readNonEmptyString(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  return trimmed ? trimmed : null
+}
+
+function readRuntimePayloadSessionId(payload: unknown): string | null {
+  const record = normalizeIpcRecord(payload)
+  const directSessionId = readNonEmptyString(record.sessionId)
+  if (directSessionId) return directSessionId
+
+  const nestedCandidates = [
+    normalizeIpcRecord(record.event),
+    normalizeIpcRecord(record.toolCall),
+    normalizeIpcRecord(record.task),
+    normalizeIpcRecord(record.snapshot),
+    normalizeIpcRecord(record.patch)
+  ]
+
+  for (const candidate of nestedCandidates) {
+    const sessionId = readNonEmptyString(candidate.sessionId)
+    if (sessionId) return sessionId
+  }
+
+  return null
+}
+
+function isUsableSyncWindow(window: BrowserWindow | null | undefined): window is BrowserWindow {
+  return (
+    !!window &&
+    !window.isDestroyed() &&
+    !window.webContents.isDestroyed() &&
+    !window.webContents.isCrashed()
+  )
+}
+
+function addRuntimeSyncTarget(
+  targets: Map<number, BrowserWindow>,
+  window: BrowserWindow | null | undefined
+): void {
+  if (isUsableSyncWindow(window)) {
+    targets.set(window.id, window)
+  }
+}
+
+function getSessionRuntimeSyncTargets(sessionId: string): BrowserWindow[] {
+  const targets = new Map<number, BrowserWindow>()
+  const visibleWindowIds = visibleSessionWindowIds.get(sessionId)
+
+  if (visibleWindowIds) {
+    for (const windowId of Array.from(visibleWindowIds)) {
+      const window = BrowserWindow.fromId(windowId)
+      if (isUsableSyncWindow(window)) {
+        targets.set(window.id, window)
+      } else {
+        visibleWindowIds.delete(windowId)
+      }
+    }
+    if (visibleWindowIds.size === 0) {
+      visibleSessionWindowIds.delete(sessionId)
+    }
+  }
+
+  addRuntimeSyncTarget(targets, getAttachedDetachedSessionWindow(sessionId))
+  return Array.from(targets.values())
+}
+
+function getGlobalRuntimeSyncTargets(): BrowserWindow[] {
+  const targets = new Map<number, BrowserWindow>()
+  addRuntimeSyncTarget(targets, mainWindow)
+  for (const window of detachedSessionWindows.values()) {
+    addRuntimeSyncTarget(targets, window)
+  }
+  return Array.from(targets.values())
+}
+
+function forgetVisibleSessionWindow(windowId: number): void {
+  for (const [sessionId, windowIds] of visibleSessionWindowIds) {
+    windowIds.delete(windowId)
+    if (windowIds.size === 0) {
+      visibleSessionWindowIds.delete(sessionId)
+    }
+  }
+}
+
+function rememberVisibleSessionWindow(
+  event: IpcMainEvent,
+  payload: { sessionId?: string; visible?: boolean } | undefined
+): void {
+  const sessionId = readNonEmptyString(payload?.sessionId)
+  if (!sessionId) return
+  const window = BrowserWindow.fromWebContents(event.sender)
+  if (!isUsableSyncWindow(window)) return
+
+  if (payload?.visible === true) {
+    let windowIds = visibleSessionWindowIds.get(sessionId)
+    if (!windowIds) {
+      windowIds = new Set()
+      visibleSessionWindowIds.set(sessionId, windowIds)
+    }
+    windowIds.add(window.id)
+    return
+  }
+
+  const windowIds = visibleSessionWindowIds.get(sessionId)
+  if (!windowIds) return
+  windowIds.delete(window.id)
+  if (windowIds.size === 0) {
+    visibleSessionWindowIds.delete(sessionId)
+  }
+}
+
+function routeRuntimeSync(event: IpcMainEvent, channel: string, payload: unknown): void {
+  const sessionId = readRuntimePayloadSessionId(payload)
+  const targets = sessionId
+    ? getSessionRuntimeSyncTargets(sessionId)
+    : getGlobalRuntimeSyncTargets()
+
+  for (const window of targets) {
+    if (window.webContents.id === event.sender.id) continue
+    safeSendToWindow(window, channel, payload)
+  }
+}
+
 function focusDetachedSessionWindow(sessionId: string): boolean {
   const window = getAttachedDetachedSessionWindow(sessionId)
   if (!window) return false
@@ -579,7 +726,7 @@ async function openDetachedSessionWindow(
   }
 }
 
-function getTrayIcon() {
+function getTrayIcon(): ReturnType<typeof nativeImage.createFromPath> {
   if (process.platform === 'darwin') {
     const image = nativeImage.createFromPath(icon_mac)
     const resized = image.resize({ width: 18, height: 18 })
@@ -589,6 +736,16 @@ function getTrayIcon() {
 
   const image = nativeImage.createFromPath(icon)
   return image
+}
+
+function setMacDockIcon(): void {
+  if (process.platform !== 'darwin' || !app.dock) return
+
+  try {
+    app.dock.setIcon(nativeImage.createFromPath(icon_mac))
+  } catch (error) {
+    console.warn('[Main] Failed to set macOS dock icon:', error)
+  }
 }
 
 function createTray(): void {
@@ -664,31 +821,18 @@ function registerWindowControlHandlers(): void {
     return { handled: focusDetachedSessionWindow(sessionId) }
   })
 
+  ipcMain.on('agent:session-visibility', rememberVisibleSessionWindow)
+
   ipcMain.on('session-runtime:sync', (event, payload: unknown) => {
-    for (const window of BrowserWindow.getAllWindows()) {
-      if (window.isDestroyed() || window.webContents.id === event.sender.id) {
-        continue
-      }
-      safeSendToWindow(window, 'session-runtime:sync', payload)
-    }
+    routeRuntimeSync(event, 'session-runtime:sync', payload)
   })
 
   ipcMain.on('session-control:sync', (event, payload: unknown) => {
-    for (const window of BrowserWindow.getAllWindows()) {
-      if (window.isDestroyed() || window.webContents.id === event.sender.id) {
-        continue
-      }
-      safeSendToWindow(window, 'session-control:sync', payload)
-    }
+    routeRuntimeSync(event, 'session-control:sync', payload)
   })
 
   ipcMain.on('agent-runtime:sync', (event, payload: unknown) => {
-    for (const window of BrowserWindow.getAllWindows()) {
-      if (window.isDestroyed() || window.webContents.id === event.sender.id) {
-        continue
-      }
-      safeSendToWindow(window, 'agent-runtime:sync', payload)
-    }
+    routeRuntimeSync(event, 'agent-runtime:sync', payload)
   })
 }
 
@@ -713,6 +857,7 @@ function configureAppWindow(
   })
 
   window.on('closed', () => {
+    forgetVisibleSessionWindow(window.id)
     options?.onClosed?.()
   })
 
@@ -867,6 +1012,7 @@ app.on('child-process-gone', (_event, details) => {
 
 app.on('before-quit', () => {
   isQuiting = true
+  flushBuiltInBrowserStorage()
   flushSettingsSync()
 })
 
@@ -897,17 +1043,19 @@ if (gotSingleInstanceLock) {
 
   app.whenReady().then(async () => {
     // Import @electron-toolkit/utils after app is ready
-    const utils = require('@electron-toolkit/utils')
+    const utils = await import('@electron-toolkit/utils')
     electronApp = utils.electronApp
     optimizer = utils.optimizer
     is = utils.is
 
     await syncMacOSShellEnvironment()
     await configureSystemProxy()
+    const browserEmulationStatus = configureBuiltInBrowserSession()
 
     recordCrash('app_started', {
       userDataPath: app.getPath('userData'),
-      crashLogDir: getCrashLogDir()
+      crashLogDir: getCrashLogDir(),
+      browserEmulation: browserEmulationStatus
     })
     console.log(`[CrashLogger] Logs will be written to ${getCrashLogDir()}`)
 
@@ -950,6 +1098,7 @@ if (gotSingleInstanceLock) {
     registerSettingsHandlers()
 
     registerSkillsHandlers()
+    registerSoulsHandlers()
     registerAgentsHandlers()
     registerPromptsHandlers()
     registerCommandsHandlers()
@@ -960,6 +1109,8 @@ if (gotSingleInstanceLock) {
         closeDetachedSessionWindow(sessionId)
       }
     })
+    registerGoalRuntimeHandlers()
+    registerMemoryAutomationHandlers()
     registerConfigHandlers()
     registerSshHandlers()
     registerChannelHandlers(channelManager)
@@ -976,6 +1127,7 @@ if (gotSingleInstanceLock) {
     registerGitHandlers()
     registerWikiHandlers()
     registerMigrationHandlers()
+    registerSyncHandlers()
     registerSidecarHandlers()
     registerTeamRuntimeHandlers()
     registerTeamWorkerHandlers()
@@ -1110,6 +1262,7 @@ if (gotSingleInstanceLock) {
     void autoStartChannels(channelManager)
     void autoConnectMcpServers(mcpManager)
 
+    setMacDockIcon()
     createWindow()
 
     createTray()

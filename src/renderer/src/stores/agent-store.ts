@@ -36,6 +36,9 @@ const MAX_BACKGROUND_PROCESS_ENTRIES = 60
 const MAX_RUN_CHANGESETS = 40
 const BACKGROUND_PROCESS_OUTPUT_FLUSH_MS = 80
 const MAX_SUBAGENT_TRANSCRIPT_MESSAGES = 120
+const AGENT_STORE_STORAGE_KEY = 'opencowork-agent'
+const AGENT_HISTORY_STORAGE_KEY = 'opencowork-agent-history'
+const AGENT_HISTORY_PERSIST_DEBOUNCE_MS = 500
 
 function truncateText(value: string, max: number): string {
   if (value.length <= max) return value
@@ -89,7 +92,13 @@ function limitToolResultContent(
     | { type: 'text'; text: string }
     | {
         type: 'image'
-        source: { type: 'base64' | 'url'; mediaType?: string; data?: string; url?: string }
+        source: {
+          type: 'base64' | 'url'
+          mediaType?: string
+          data?: string
+          url?: string
+          filePath?: string
+        }
       }
   > = []
   let totalChars = 0
@@ -114,6 +123,16 @@ function limitToolResultContent(
       block.source.data &&
       block.source.data.length > MAX_IMAGE_BASE64_CHARS
     ) {
+      const sourceWithoutData = { ...block.source }
+      delete sourceWithoutData.data
+      if (sourceWithoutData.filePath || sourceWithoutData.url) {
+        normalized.push({
+          type: 'image',
+          source: sourceWithoutData
+        })
+        continue
+      }
+
       normalized.push({
         type: 'text',
         text: `[image data omitted, ${block.source.data.length} base64 chars]`
@@ -188,7 +207,7 @@ function trimToolCallArray(toolCalls: ToolCallState[]): void {
 
 type SubAgentReportStatus = 'pending' | 'submitted' | 'retrying' | 'fallback' | 'missing'
 
-interface SubAgentState {
+export interface SubAgentState {
   name: string
   displayName?: string
   toolUseId: string
@@ -273,9 +292,25 @@ function finalizeAssistantMessage(
   if (providerResponseId) {
     message.providerResponseId = providerResponseId
   }
+  let changed = Boolean(usage || providerResponseId)
+  if (Array.isArray(message.content)) {
+    for (const block of message.content) {
+      if (block.type === 'thinking' && !block.completedAt) {
+        block.completedAt = Date.now()
+        changed = true
+      }
+    }
+  }
+  if (changed) {
+    bumpMessageRevision(message)
+  }
   if (clearCurrentMessage) {
     sa.currentAssistantMessageId = null
   }
+}
+
+function bumpMessageRevision(message: UnifiedMessage): void {
+  message._revision = (message._revision ?? 0) + 1
 }
 
 function trimCompletedSubAgentsMap(map: Record<string, SubAgentState>): void {
@@ -292,9 +327,21 @@ function trimSubAgentHistory(history: SubAgentState[]): void {
   history.splice(0, history.length - MAX_SUBAGENT_HISTORY)
 }
 
-const MAX_HISTORY_TRANSCRIPT_MESSAGES = 20
+const MAX_HISTORY_TRANSCRIPT_MESSAGES = MAX_SUBAGENT_TRANSCRIPT_MESSAGES
 const MAX_HISTORY_TOOL_CALLS = 30
 const MAX_HISTORY_REPORT_CHARS = 4_000
+
+function compactSubAgentTranscriptForHistory(transcript: UnifiedMessage[]): UnifiedMessage[] {
+  if (transcript.length <= MAX_HISTORY_TRANSCRIPT_MESSAGES) return transcript
+
+  const first = transcript[0]
+  const tail = transcript.slice(-(MAX_HISTORY_TRANSCRIPT_MESSAGES - 1))
+  if (!first || tail.some((message) => message.id === first.id)) {
+    return transcript.slice(-MAX_HISTORY_TRANSCRIPT_MESSAGES)
+  }
+
+  return [first, ...tail]
+}
 
 function compactSubAgentForHistory(sa: SubAgentState): SubAgentState {
   return {
@@ -308,10 +355,7 @@ function compactSubAgentForHistory(sa: SubAgentState): SubAgentState {
       sa.toolCalls.length > MAX_HISTORY_TOOL_CALLS
         ? sa.toolCalls.slice(-MAX_HISTORY_TOOL_CALLS)
         : sa.toolCalls,
-    transcript:
-      sa.transcript.length > MAX_HISTORY_TRANSCRIPT_MESSAGES
-        ? sa.transcript.slice(-MAX_HISTORY_TRANSCRIPT_MESSAGES)
-        : sa.transcript
+    transcript: compactSubAgentTranscriptForHistory(sa.transcript)
   }
 }
 
@@ -374,6 +418,7 @@ function getCurrentAssistantBlocks(sa: SubAgentState): ContentBlock[] | null {
   if (!assistant) return null
   if (!Array.isArray(assistant.content)) {
     assistant.content = []
+    bumpMessageRevision(assistant)
   }
   return assistant.content
 }
@@ -381,12 +426,15 @@ function getCurrentAssistantBlocks(sa: SubAgentState): ContentBlock[] | null {
 function appendThinkingToSubAgent(sa: SubAgentState, thinking: string): void {
   const blocks = getCurrentAssistantBlocks(sa)
   if (!blocks) return
+  const assistant = sa.transcript.find((message) => message.id === sa.currentAssistantMessageId)
   const last = blocks[blocks.length - 1]
   if (last?.type === 'thinking') {
     last.thinking += thinking
+    if (assistant) bumpMessageRevision(assistant)
     return
   }
   blocks.push({ type: 'thinking', thinking })
+  if (assistant) bumpMessageRevision(assistant)
 }
 
 function appendThinkingEncryptedToSubAgent(
@@ -396,6 +444,7 @@ function appendThinkingEncryptedToSubAgent(
 ): void {
   const blocks = getCurrentAssistantBlocks(sa)
   if (!blocks || !encryptedContent) return
+  const assistant = sa.transcript.find((message) => message.id === sa.currentAssistantMessageId)
 
   let target: Extract<ContentBlock, { type: 'thinking' }> | null = null
   let providerMatchedTarget: Extract<ContentBlock, { type: 'thinking' }> | null = null
@@ -415,6 +464,7 @@ function appendThinkingEncryptedToSubAgent(
   if (target) {
     target.encryptedContent = encryptedContent
     target.encryptedContentProvider = provider
+    if (assistant) bumpMessageRevision(assistant)
     return
   }
 
@@ -424,23 +474,29 @@ function appendThinkingEncryptedToSubAgent(
     encryptedContent,
     encryptedContentProvider: provider
   })
+  if (assistant) bumpMessageRevision(assistant)
 }
 
 function appendTextToSubAgent(sa: SubAgentState, text: string): void {
   const blocks = getCurrentAssistantBlocks(sa)
   if (!blocks) return
+  const assistant = sa.transcript.find((message) => message.id === sa.currentAssistantMessageId)
   const last = blocks[blocks.length - 1]
   if (last?.type === 'text') {
     last.text += text
+    if (assistant) bumpMessageRevision(assistant)
     return
   }
   blocks.push({ type: 'text', text })
+  if (assistant) bumpMessageRevision(assistant)
 }
 
 function appendBlockToSubAgent(sa: SubAgentState, block: ContentBlock): void {
   const blocks = getCurrentAssistantBlocks(sa)
   if (!blocks) return
   blocks.push(block)
+  const assistant = sa.transcript.find((message) => message.id === sa.currentAssistantMessageId)
+  if (assistant) bumpMessageRevision(assistant)
 }
 
 function upsertToolUseBlockInSubAgent(
@@ -449,12 +505,15 @@ function upsertToolUseBlockInSubAgent(
 ): void {
   const blocks = getCurrentAssistantBlocks(sa)
   if (!blocks) return
+  const assistant = sa.transcript.find((message) => message.id === sa.currentAssistantMessageId)
   const existing = blocks.findIndex((item) => item.type === 'tool_use' && item.id === block.id)
   if (existing !== -1) {
     blocks[existing] = block
+    if (assistant) bumpMessageRevision(assistant)
     return
   }
   blocks.push(block)
+  if (assistant) bumpMessageRevision(assistant)
 }
 
 function updateToolUseInputInSubAgent(
@@ -470,6 +529,8 @@ function updateToolUseInputInSubAgent(
   )
   if (toolUseBlock) {
     toolUseBlock.input = partialInput
+    const assistant = sa.transcript.find((message) => message.id === sa.currentAssistantMessageId)
+    if (assistant) bumpMessageRevision(assistant)
   }
 }
 
@@ -538,6 +599,202 @@ interface SessionToolCallCache {
 interface SessionSubAgentLiveState {
   active: Record<string, SubAgentState>
   completed: Record<string, SubAgentState>
+}
+
+interface PersistedAgentHistoryState {
+  subAgentHistory: SubAgentState[]
+  sessionSubAgentSummaries: Record<string, SubAgentState[]>
+}
+
+let agentHistoryPersistenceHydrated = false
+let agentHistoryPersistencePending = false
+let agentHistoryPersistenceInFlight = false
+let agentHistoryPersistenceTimer: ReturnType<typeof setTimeout> | null = null
+
+function ensureSessionSubAgentLiveState(
+  state: { sessionSubAgentLiveCache: Record<string, SessionSubAgentLiveState> },
+  sessionId: string
+): SessionSubAgentLiveState {
+  const existing = state.sessionSubAgentLiveCache[sessionId]
+  if (existing) return existing
+  const created: SessionSubAgentLiveState = { active: {}, completed: {} }
+  state.sessionSubAgentLiveCache[sessionId] = created
+  return created
+}
+
+function syncSessionSubAgentState(
+  state: { sessionSubAgentLiveCache: Record<string, SessionSubAgentLiveState> },
+  sessionId: string | undefined,
+  id: string,
+  subAgent: SubAgentState
+): void {
+  if (!sessionId) return
+  const liveState = ensureSessionSubAgentLiveState(state, sessionId)
+  if (subAgent.isRunning) {
+    liveState.active[id] = subAgent
+    delete liveState.completed[id]
+    return
+  }
+
+  delete liveState.active[id]
+  liveState.completed[id] = subAgent
+  trimCompletedSubAgentsMap(liveState.completed)
+}
+
+function findSubAgentState(
+  state: {
+    activeSubAgents: Record<string, SubAgentState>
+    completedSubAgents: Record<string, SubAgentState>
+    sessionSubAgentLiveCache: Record<string, SessionSubAgentLiveState>
+  },
+  id: string,
+  sessionId?: string
+): SubAgentState | null {
+  const direct = state.activeSubAgents[id] ?? state.completedSubAgents[id]
+  if (direct) {
+    syncSessionSubAgentState(state, sessionId, id, direct)
+    return direct
+  }
+
+  if (!sessionId) return null
+  const liveState = ensureSessionSubAgentLiveState(state, sessionId)
+  return liveState.active[id] ?? liveState.completed[id] ?? null
+}
+
+function normalizePersistedAgentRecord(raw: string | null): Record<string, unknown> | null {
+  if (!raw) return null
+  try {
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+    const record = parsed as Record<string, unknown>
+    if (record.state && typeof record.state === 'object' && !Array.isArray(record.state)) {
+      return record.state as Record<string, unknown>
+    }
+    return record
+  } catch {
+    return null
+  }
+}
+
+function normalizePersistedSubAgentList(value: unknown): SubAgentState[] {
+  if (!Array.isArray(value)) return []
+  return compactSubAgentListForPersistence(value as SubAgentState[])
+}
+
+function normalizePersistedSessionSummaries(value: unknown): Record<string, SubAgentState[]> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  const next: Record<string, SubAgentState[]> = {}
+  for (const [sessionId, summaries] of Object.entries(value as Record<string, unknown>)) {
+    const key = sessionId.trim()
+    if (!key) continue
+    next[key] = normalizePersistedSubAgentList(summaries)
+  }
+  return next
+}
+
+function hasAgentHistoryPayload(record: Record<string, unknown> | null): boolean {
+  return Boolean(record && ('subAgentHistory' in record || 'sessionSubAgentSummaries' in record))
+}
+
+async function readPersistedAgentHistory(): Promise<{
+  snapshot: PersistedAgentHistoryState | null
+  migratedFromLegacy: boolean
+}> {
+  const primaryRaw = await ipcStorage.getItem(AGENT_HISTORY_STORAGE_KEY)
+  const primaryRecord = normalizePersistedAgentRecord(primaryRaw)
+  if (primaryRaw !== null) {
+    return {
+      snapshot: {
+        subAgentHistory: normalizePersistedSubAgentList(primaryRecord?.subAgentHistory),
+        sessionSubAgentSummaries: normalizePersistedSessionSummaries(
+          primaryRecord?.sessionSubAgentSummaries
+        )
+      },
+      migratedFromLegacy: false
+    }
+  }
+
+  const legacyRecord = normalizePersistedAgentRecord(
+    await ipcStorage.getItem(AGENT_STORE_STORAGE_KEY)
+  )
+  if (!hasAgentHistoryPayload(legacyRecord)) {
+    return { snapshot: null, migratedFromLegacy: false }
+  }
+
+  return {
+    snapshot: {
+      subAgentHistory: normalizePersistedSubAgentList(legacyRecord?.subAgentHistory),
+      sessionSubAgentSummaries: normalizePersistedSessionSummaries(
+        legacyRecord?.sessionSubAgentSummaries
+      )
+    },
+    migratedFromLegacy: true
+  }
+}
+
+function buildAgentHistoryPersistenceSnapshot(): PersistedAgentHistoryState {
+  const state = useAgentStore.getState()
+  return {
+    subAgentHistory: compactSubAgentListForPersistence(state.subAgentHistory),
+    sessionSubAgentSummaries: compactSessionSubAgentSummariesForPersistence(
+      state.sessionSubAgentSummaries
+    )
+  }
+}
+
+async function flushAgentHistoryPersistence(): Promise<void> {
+  if (!agentHistoryPersistenceHydrated) return
+  if (agentHistoryPersistenceInFlight) {
+    agentHistoryPersistencePending = true
+    return
+  }
+
+  agentHistoryPersistenceInFlight = true
+  agentHistoryPersistencePending = false
+  try {
+    await ipcStorage.setItem(
+      AGENT_HISTORY_STORAGE_KEY,
+      JSON.stringify(buildAgentHistoryPersistenceSnapshot())
+    )
+  } finally {
+    agentHistoryPersistenceInFlight = false
+    if (agentHistoryPersistencePending) {
+      queueAgentHistoryPersistence()
+    }
+  }
+}
+
+function queueAgentHistoryPersistence(): void {
+  agentHistoryPersistencePending = true
+  if (!agentHistoryPersistenceHydrated) return
+  if (agentHistoryPersistenceTimer) return
+
+  agentHistoryPersistenceTimer = setTimeout(() => {
+    agentHistoryPersistenceTimer = null
+    void flushAgentHistoryPersistence()
+  }, AGENT_HISTORY_PERSIST_DEBOUNCE_MS)
+}
+
+async function hydrateAgentHistoryPersistence(): Promise<void> {
+  try {
+    const { snapshot, migratedFromLegacy } = await readPersistedAgentHistory()
+    if (snapshot) {
+      useAgentStore.setState({
+        subAgentHistory: snapshot.subAgentHistory,
+        sessionSubAgentSummaries: snapshot.sessionSubAgentSummaries
+      })
+    }
+    agentHistoryPersistenceHydrated = true
+    if (migratedFromLegacy || agentHistoryPersistencePending) {
+      queueAgentHistoryPersistence()
+    }
+  } catch (error) {
+    console.warn('[AgentStore] Failed to hydrate sub-agent history:', error)
+    agentHistoryPersistenceHydrated = true
+    if (agentHistoryPersistencePending) {
+      queueAgentHistoryPersistence()
+    }
+  }
 }
 
 function cloneToolCallArray(toolCalls: ToolCallState[]): ToolCallState[] {
@@ -680,8 +937,6 @@ function applyProcessOutputEvent(
   return next
 }
 
-export type { SubAgentState }
-
 export interface AgentFileSnapshot {
   exists: boolean
   text?: string
@@ -703,20 +958,18 @@ export interface AgentRunFileChange {
   transport: 'local' | 'ssh'
   connectionId?: string
   op: 'create' | 'modify'
-  status: 'open' | 'accepted' | 'reverted' | 'conflicted'
+  status: 'open' | 'reverted'
   before: AgentFileSnapshot
   after: AgentFileSnapshot
   createdAt: number
-  acceptedAt?: number
   revertedAt?: number
-  conflict?: string
 }
 
 export interface AgentRunChangeSet {
   runId: string
   sessionId?: string
   assistantMessageId: string
-  status: 'open' | 'partial' | 'accepted' | 'reverting' | 'reverted' | 'conflicted'
+  status: 'open' | 'reverted'
   changes: AgentRunFileChange[]
   createdAt: number
   updatedAt: number
@@ -953,10 +1206,8 @@ interface AgentStore {
     sessionId: string,
     query?: { assistantMessageIds?: string[]; toolUseIds?: string[] }
   ) => Promise<void>
-  acceptRunChanges: (runId: string) => Promise<{ error?: string }>
-  acceptFileChange: (runId: string, changeId: string) => Promise<{ error?: string }>
-  rollbackRunChanges: (runId: string) => Promise<{ error?: string }>
-  rollbackFileChange: (runId: string, changeId: string) => Promise<{ error?: string }>
+  undoRunChanges: (runId: string) => Promise<{ error?: string }>
+  undoFileChange: (runId: string, changeId: string) => Promise<{ error?: string }>
   clearToolCalls: () => void
   abort: () => void
 
@@ -1126,6 +1377,7 @@ export const useAgentStore = create<AgentStore>()(
           state.completedSubAgents = {}
           rebuildRunningSubAgentDerived(state)
         })
+        queueAgentHistoryPersistence()
       },
 
       addToolCall: (tc, sessionId) => {
@@ -1432,33 +1684,21 @@ export const useAgentStore = create<AgentStore>()(
           state.sessionSubAgentSummaries = {}
           state.sessionBackgroundProcessSummaries = {}
         })
+        queueAgentHistoryPersistence()
       },
 
       refreshRunChanges: async (runId, query) => {
         if (!runId) return
-        try {
-          const result = await ipcClient.invoke(IPC.AGENT_CHANGES_LIST, { runId, ...query })
-          if (isAgentChangeError(result)) return
-          set((state) => {
-            if (result && typeof result === 'object' && 'runId' in result) {
-              const changeSet = result as AgentRunChangeSet
-              cacheRunChangeSet(state.runChangesByRunId, changeSet, runId)
-              trimRunChangesMap(state.runChangesByRunId)
-            } else {
-              delete state.runChangesByRunId[runId]
-            }
-          })
-        } catch {
-          // ignore fetch failures for ephemeral change journal state
-        }
+        const sessionId = query?.sessionId?.trim()
+        if (!sessionId) return
+        await get().refreshSessionRunChanges(sessionId)
       },
 
-      refreshSessionRunChanges: async (sessionId, query) => {
+      refreshSessionRunChanges: async (sessionId) => {
         if (!sessionId) return
         try {
           const result = await ipcClient.invoke(IPC.AGENT_CHANGES_LIST_SESSION, {
-            sessionId,
-            ...query
+            sessionId
           })
           if (isAgentChangeError(result) || !Array.isArray(result)) return
           set((state) => {
@@ -1475,10 +1715,10 @@ export const useAgentStore = create<AgentStore>()(
         }
       },
 
-      acceptRunChanges: async (runId) => {
+      undoRunChanges: async (runId) => {
         if (!runId) return { error: 'runId is required' }
         try {
-          const result = await ipcClient.invoke(IPC.AGENT_CHANGES_ACCEPT, { runId })
+          const result = await ipcClient.invoke(IPC.AGENT_CHANGES_UNDO_RUN, { runId })
           if (isAgentChangeError(result)) return { error: result.error }
           const changeset =
             result && typeof result === 'object' && 'changeset' in result
@@ -1496,52 +1736,10 @@ export const useAgentStore = create<AgentStore>()(
         }
       },
 
-      acceptFileChange: async (runId, changeId) => {
+      undoFileChange: async (runId, changeId) => {
         if (!runId || !changeId) return { error: 'runId and changeId are required' }
         try {
-          const result = await ipcClient.invoke(IPC.AGENT_CHANGES_ACCEPT_FILE, { runId, changeId })
-          if (isAgentChangeError(result)) return { error: result.error }
-          const changeset =
-            result && typeof result === 'object' && 'changeset' in result
-              ? (result as { changeset?: AgentRunChangeSet }).changeset
-              : undefined
-          set((state) => {
-            if (changeset) {
-              cacheRunChangeSet(state.runChangesByRunId, changeset, runId)
-              trimRunChangesMap(state.runChangesByRunId)
-            }
-          })
-          return {}
-        } catch (error) {
-          return { error: error instanceof Error ? error.message : String(error) }
-        }
-      },
-
-      rollbackRunChanges: async (runId) => {
-        if (!runId) return { error: 'runId is required' }
-        try {
-          const result = await ipcClient.invoke(IPC.AGENT_CHANGES_ROLLBACK, { runId })
-          if (isAgentChangeError(result)) return { error: result.error }
-          const changeset =
-            result && typeof result === 'object' && 'changeset' in result
-              ? (result as { changeset?: AgentRunChangeSet }).changeset
-              : undefined
-          set((state) => {
-            if (changeset) {
-              cacheRunChangeSet(state.runChangesByRunId, changeset, runId)
-              trimRunChangesMap(state.runChangesByRunId)
-            }
-          })
-          return {}
-        } catch (error) {
-          return { error: error instanceof Error ? error.message : String(error) }
-        }
-      },
-
-      rollbackFileChange: async (runId, changeId) => {
-        if (!runId || !changeId) return { error: 'runId and changeId are required' }
-        try {
-          const result = await ipcClient.invoke(IPC.AGENT_CHANGES_ROLLBACK_FILE, {
+          const result = await ipcClient.invoke(IPC.AGENT_CHANGES_UNDO_FILE, {
             runId,
             changeId
           })
@@ -1563,9 +1761,10 @@ export const useAgentStore = create<AgentStore>()(
       },
 
       handleSubAgentEvent: (event, sessionId) => {
+        let shouldPersistSubAgentHistory = false
         set((state) => {
           const id = event.toolUseId
-          const existing = state.activeSubAgents[id] ?? state.completedSubAgents[id]
+          const existing = findSubAgentState(state, id, sessionId)
           switch (event.type) {
             case 'sub_agent_start': {
               if (existing?.isRunning) return
@@ -1597,17 +1796,19 @@ export const useAgentStore = create<AgentStore>()(
                 completedAt: null
               }
               if (sessionId) {
+                syncSessionSubAgentState(state, sessionId, id, state.activeSubAgents[id])
                 const previous = state.sessionSubAgentSummaries[sessionId] ?? []
                 state.sessionSubAgentSummaries[sessionId] = [
                   buildSubAgentSummary(state.activeSubAgents[id]),
                   ...previous.filter((item) => item.toolUseId !== id)
                 ].slice(0, MAX_SUBAGENT_HISTORY)
+                shouldPersistSubAgentHistory = true
               }
               rebuildRunningSubAgentDerived(state)
               break
             }
             case 'sub_agent_iteration': {
-              const sa = state.activeSubAgents[id] ?? state.completedSubAgents[id]
+              const sa = findSubAgentState(state, id, sessionId)
               if (sa) {
                 sa.iteration = event.iteration
                 const currentAssistant = sa.currentAssistantMessageId
@@ -1621,12 +1822,12 @@ export const useAgentStore = create<AgentStore>()(
               break
             }
             case 'sub_agent_thinking_delta': {
-              const sa = state.activeSubAgents[id] ?? state.completedSubAgents[id]
+              const sa = findSubAgentState(state, id, sessionId)
               if (sa) appendThinkingToSubAgent(sa, event.thinking)
               break
             }
             case 'sub_agent_thinking_encrypted': {
-              const sa = state.activeSubAgents[id] ?? state.completedSubAgents[id]
+              const sa = findSubAgentState(state, id, sessionId)
               if (sa) {
                 appendThinkingEncryptedToSubAgent(
                   sa,
@@ -1637,7 +1838,7 @@ export const useAgentStore = create<AgentStore>()(
               break
             }
             case 'sub_agent_tool_use_streaming_start': {
-              const sa = state.activeSubAgents[id] ?? state.completedSubAgents[id]
+              const sa = findSubAgentState(state, id, sessionId)
               if (sa) {
                 upsertToolUseBlockInSubAgent(sa, {
                   type: 'tool_use',
@@ -1652,22 +1853,22 @@ export const useAgentStore = create<AgentStore>()(
               break
             }
             case 'sub_agent_tool_use_args_delta': {
-              const sa = state.activeSubAgents[id] ?? state.completedSubAgents[id]
+              const sa = findSubAgentState(state, id, sessionId)
               if (sa) updateToolUseInputInSubAgent(sa, event.toolCallId, event.partialInput)
               break
             }
             case 'sub_agent_tool_use_generated': {
-              const sa = state.activeSubAgents[id] ?? state.completedSubAgents[id]
+              const sa = findSubAgentState(state, id, sessionId)
               if (sa) upsertToolUseBlockInSubAgent(sa, event.toolUseBlock)
               break
             }
             case 'sub_agent_image_generated': {
-              const sa = state.activeSubAgents[id] ?? state.completedSubAgents[id]
+              const sa = findSubAgentState(state, id, sessionId)
               if (sa) appendBlockToSubAgent(sa, event.imageBlock)
               break
             }
             case 'sub_agent_image_error': {
-              const sa = state.activeSubAgents[id] ?? state.completedSubAgents[id]
+              const sa = findSubAgentState(state, id, sessionId)
               if (sa) {
                 appendBlockToSubAgent(sa, {
                   type: 'image_error',
@@ -1678,7 +1879,7 @@ export const useAgentStore = create<AgentStore>()(
               break
             }
             case 'sub_agent_message_end': {
-              const sa = state.activeSubAgents[id] ?? state.completedSubAgents[id]
+              const sa = findSubAgentState(state, id, sessionId)
               if (sa) {
                 finalizeAssistantMessage(sa, event.usage, event.providerResponseId, false)
                 if (event.usage) {
@@ -1688,37 +1889,49 @@ export const useAgentStore = create<AgentStore>()(
               break
             }
             case 'sub_agent_tool_result_message': {
-              const sa = state.activeSubAgents[id] ?? state.completedSubAgents[id]
+              const sa = findSubAgentState(state, id, sessionId)
               if (sa) {
                 sa.transcript.push(event.message)
                 trimSubAgentTranscript(sa)
                 upsertSubAgentHistory(state.subAgentHistory, sa)
+                shouldPersistSubAgentHistory = true
               }
               break
             }
             case 'sub_agent_user_message': {
-              const sa = state.activeSubAgents[id] ?? state.completedSubAgents[id]
+              const sa = findSubAgentState(state, id, sessionId)
               if (sa) {
                 finalizeAssistantMessage(sa)
                 sa.transcript.push(event.message)
                 trimSubAgentTranscript(sa)
                 upsertSubAgentHistory(state.subAgentHistory, sa)
+                shouldPersistSubAgentHistory = true
               }
               break
             }
             case 'sub_agent_report_update': {
-              const sa = state.activeSubAgents[id] ?? state.completedSubAgents[id]
+              const sa = findSubAgentState(state, id, sessionId)
               if (sa) {
                 sa.report = event.report
                 sa.reportStatus = event.status
                 upsertSubAgentHistory(state.subAgentHistory, sa)
+                shouldPersistSubAgentHistory = true
               }
               break
             }
             case 'sub_agent_tool_call': {
-              const sa = state.activeSubAgents[id] ?? state.completedSubAgents[id]
+              const sa = findSubAgentState(state, id, sessionId)
               if (sa) {
                 const normalizedToolCall = normalizeToolCall(event.toolCall)
+                upsertToolUseBlockInSubAgent(sa, {
+                  type: 'tool_use',
+                  id: normalizedToolCall.id,
+                  name: normalizedToolCall.name,
+                  input: normalizedToolCall.input,
+                  ...(normalizedToolCall.extraContent
+                    ? { extraContent: normalizedToolCall.extraContent }
+                    : {})
+                })
                 const existing = sa.toolCalls.find((t) => t.id === normalizedToolCall.id)
                 if (existing) {
                   Object.assign(existing, normalizedToolCall)
@@ -1732,7 +1945,7 @@ export const useAgentStore = create<AgentStore>()(
               break
             }
             case 'sub_agent_text_delta': {
-              const sa = state.activeSubAgents[id] ?? state.completedSubAgents[id]
+              const sa = findSubAgentState(state, id, sessionId)
               if (sa) {
                 sa.streamingText = truncateText(
                   sa.streamingText + event.text,
@@ -1743,7 +1956,7 @@ export const useAgentStore = create<AgentStore>()(
               break
             }
             case 'sub_agent_end': {
-              const sa = state.activeSubAgents[id] ?? state.completedSubAgents[id]
+              const sa = findSubAgentState(state, id, sessionId)
               if (sa) {
                 sa.isRunning = false
                 sa.success = event.result.success
@@ -1756,14 +1969,17 @@ export const useAgentStore = create<AgentStore>()(
                 sa.usage = event.result.usage
                 sa.reportStatus = sa.report.trim() ? 'submitted' : 'missing'
                 state.completedSubAgents[id] = sa
-                if (sa.sessionId) {
-                  const previous = state.sessionSubAgentSummaries[sa.sessionId] ?? []
-                  state.sessionSubAgentSummaries[sa.sessionId] = [
+                const targetSessionId = sa.sessionId ?? sessionId
+                if (targetSessionId) {
+                  syncSessionSubAgentState(state, targetSessionId, id, sa)
+                  const previous = state.sessionSubAgentSummaries[targetSessionId] ?? []
+                  state.sessionSubAgentSummaries[targetSessionId] = [
                     buildSubAgentSummary(sa),
                     ...previous.filter((item) => item.toolUseId !== id)
                   ].slice(0, MAX_SUBAGENT_HISTORY)
                 }
                 upsertSubAgentHistory(state.subAgentHistory, sa)
+                shouldPersistSubAgentHistory = true
                 trimCompletedSubAgentsMap(state.completedSubAgents)
                 delete state.activeSubAgents[id]
                 rebuildRunningSubAgentDerived(state)
@@ -1772,6 +1988,9 @@ export const useAgentStore = create<AgentStore>()(
             }
           }
         })
+        if (shouldPersistSubAgentHistory) {
+          queueAgentHistoryPersistence()
+        }
         if (!isAgentRuntimeSyncSuppressed()) {
           emitAgentRuntimeSync({ kind: 'subagent_event', event, sessionId })
         }
@@ -1844,6 +2063,7 @@ export const useAgentStore = create<AgentStore>()(
           }
           delete state.sessionBackgroundProcessSummaries[sessionId]
         })
+        queueAgentHistoryPersistence()
         for (const id of processIdsToKill) {
           ipcClient.invoke(IPC.PROCESS_KILL, { id }).catch(() => {})
         }
@@ -1878,6 +2098,7 @@ export const useAgentStore = create<AgentStore>()(
             }
           }
         })
+        queueAgentHistoryPersistence()
       },
 
       clearPendingApprovals: () => {
@@ -1951,16 +2172,24 @@ export const useAgentStore = create<AgentStore>()(
       }
     })),
     {
-      name: 'opencowork-agent',
+      name: AGENT_STORE_STORAGE_KEY,
       storage: createJSONStorage(() => ipcStorage),
+      merge: (persisted, current) => {
+        const record =
+          persisted && typeof persisted === 'object' ? (persisted as Partial<AgentStore>) : {}
+        return {
+          ...current,
+          approvedToolNames: Array.isArray(record.approvedToolNames)
+            ? record.approvedToolNames.filter((name): name is string => typeof name === 'string')
+            : current.approvedToolNames
+        }
+      },
       partialize: (state) => ({
-        approvedToolNames: state.approvedToolNames,
-        subAgentHistory: compactSubAgentListForPersistence(state.subAgentHistory),
-        sessionSubAgentSummaries: compactSessionSubAgentSummariesForPersistence(
-          state.sessionSubAgentSummaries
-        )
+        approvedToolNames: state.approvedToolNames
       }),
       onRehydrateStorage: () => () => {}
     }
   )
 )
+
+void hydrateAgentHistoryPersistence()

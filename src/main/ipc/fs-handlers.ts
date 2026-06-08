@@ -40,7 +40,8 @@ const MAX_FILE_READ_BYTES = 50 * 1024 * 1024 // 50 MB
 const MAX_IMAGE_READ_BYTES = 20 * 1024 * 1024 // 20 MB
 const MAX_LIST_DIR_ITEMS = 1_000
 const MAX_GLOB_MATCHES = 1_000
-const SEARCH_TOOL_MAX_RESULTS = 20
+const SEARCH_TOOL_MAX_RESULTS = 100
+const MAX_RECURSIVE_DIR_WATCHERS = 2_000
 
 async function assertFileSize(filePath: string, limit: number): Promise<number> {
   const stat = await fs.promises.stat(filePath)
@@ -59,11 +60,14 @@ const fileSearchCache = new Map<string, { expiresAt: number; files: string[] }>(
 const FILE_OPERATION_RETRY_DELAYS_MS = [40, 120, 250, 500, 1_000]
 
 type GrepMatchKind = 'match' | 'context'
-type GrepOutputMode = 'matches' | 'files_with_matches' | 'count'
+type GrepOutputMode = 'matches' | 'files_with_matches' | 'files_without_matches' | 'count'
 type GrepPathStyle = 'relative' | 'absolute'
+type GrepPatternMode = 'fixed' | 'basic' | 'extended' | 'perl'
+type GrepPatternOperator = 'or' | 'and'
 type GrepResultItem = {
   file: string
   line?: number
+  column?: number
   text?: string
   kind?: GrepMatchKind
   count?: number
@@ -71,9 +75,11 @@ type GrepResultItem = {
 type GrepLimitReason = 'max_results' | 'max_output_bytes' | 'timeout' | null
 type SearchBackend = 'local' | 'ssh' | 'cron'
 type SearchPathStyle = 'absolute' | 'relative_to_search_root'
+type SearchEngine = 'git_grep' | 'sidecar' | 'ripgrep' | 'node_fallback'
 
 type SearchMeta = {
   backend: SearchBackend
+  engine?: SearchEngine
   searchRoot: string
   pathStyle: SearchPathStyle
   truncated: boolean
@@ -109,11 +115,13 @@ type GrepToolResult = {
   matches: Array<{
     path: string
     line?: number
+    column?: number
     text?: string
     kind?: GrepMatchKind
     count?: number
   }>
   meta: SearchMeta
+  output?: string
   error?: string
 }
 
@@ -121,7 +129,13 @@ type FileOperationError = NodeJS.ErrnoException & { message: string }
 
 interface GrepCollector {
   results: GrepResultItem[]
-  append: (filePath: string, line: number, text: string, kind?: GrepMatchKind) => boolean
+  append: (
+    filePath: string,
+    line: number,
+    text: string,
+    kind?: GrepMatchKind,
+    column?: number
+  ) => boolean
   appendFile: (filePath: string) => boolean
   appendCount: (filePath: string, count: number) => boolean
   readonly limitReason: GrepLimitReason
@@ -130,6 +144,11 @@ interface GrepCollector {
 
 type GrepSearchOptions = {
   pattern: string
+  patternMode: GrepPatternMode
+  patterns: string[]
+  notPatterns: string[]
+  patternOperator: GrepPatternOperator
+  allMatch: boolean
   include?: string
   exclude?: string
   includePatterns: string[]
@@ -140,17 +159,40 @@ type GrepSearchOptions = {
   word: boolean
   line: boolean
   invertMatch: boolean
+  onlyMatching: boolean
+  column: boolean
   beforeContext: number
   afterContext: number
   maxResults: number
   maxOutputBytes: number
   maxLineLength: number
+  maxCount: number | null
   maxDepth: number | null
   hidden: boolean
   respectGitignore: boolean
+  excludeStandard: boolean
   followSymlinks: boolean
   outputMode: GrepOutputMode
   pathStyle: GrepPathStyle
+  untracked: boolean
+  cached: boolean
+  noIndex: boolean
+  index: boolean
+  text: boolean
+  textconv: boolean
+  threads: number | null
+  pathspecs: string[]
+  pathspecIncludePatterns: string[]
+  pathspecExcludePatterns: string[]
+  typeFilters: string[]
+  multiline: boolean
+}
+
+type ProcessTextResult = {
+  code: number | null
+  stdout: string
+  stderr: string
+  timedOut: boolean
 }
 
 const GREP_IGNORE_DIR_NAMES = [
@@ -206,6 +248,13 @@ function buildGlobIgnorePatterns(pattern: string): string[] {
 
 function isDefaultIgnoredDirName(name: string): boolean {
   return GREP_IGNORE_DIRS.has(name.toLowerCase())
+}
+
+function formatLocalDateFolderName(date = new Date()): string {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
 }
 
 function includesDefaultIgnoredDir(filePath: string, searchRoot: string): boolean {
@@ -267,11 +316,79 @@ const GREP_MAX_OUTPUT_BYTES = 64 * 1024
 const GREP_MAX_CONTEXT_LINES = 20
 const GREP_MAX_DEPTH = 50
 
-function parseGlobPatterns(value?: string): string[] {
-  return (value ?? '')
+function parseDelimitedPatterns(value?: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => parseDelimitedPatterns(item))
+  }
+
+  return (typeof value === 'string' ? value : '')
     .split(',')
     .map((pattern) => pattern.trim())
     .filter(Boolean)
+}
+
+function parsePatternList(value?: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .flatMap((item) => {
+        if (typeof item === 'string') return [item]
+        if (
+          item &&
+          typeof item === 'object' &&
+          typeof (item as { pattern?: unknown }).pattern === 'string'
+        ) {
+          return [(item as { pattern: string }).pattern]
+        }
+        return []
+      })
+      .map((pattern) => pattern.trim())
+      .filter(Boolean)
+  }
+
+  return typeof value === 'string' && value.trim() ? [value.trim()] : []
+}
+
+function parseGlobPatterns(value?: unknown): string[] {
+  return parseDelimitedPatterns(value)
+}
+
+function parseTypeFilters(value?: unknown): string[] {
+  return parseDelimitedPatterns(value).map((item) => item.replace(/^--?type=/, '').trim())
+}
+
+const GREP_TYPE_GLOBS: Record<string, string[]> = {
+  c: ['*.c', '*.h'],
+  cpp: ['*.cc', '*.cpp', '*.cxx', '*.hpp', '*.hxx'],
+  cs: ['*.cs'],
+  css: ['*.css'],
+  go: ['*.go'],
+  html: ['*.html', '*.htm'],
+  java: ['*.java'],
+  js: ['*.js', '*.jsx', '*.mjs', '*.cjs'],
+  json: ['*.json'],
+  jsx: ['*.jsx'],
+  kt: ['*.kt', '*.kts'],
+  md: ['*.md', '*.mdx'],
+  php: ['*.php'],
+  py: ['*.py', '*.pyw'],
+  rb: ['*.rb'],
+  rs: ['*.rs'],
+  rust: ['*.rs'],
+  scss: ['*.scss'],
+  sh: ['*.sh', '*.bash', '*.zsh'],
+  sql: ['*.sql'],
+  svelte: ['*.svelte'],
+  swift: ['*.swift'],
+  ts: ['*.ts', '*.tsx'],
+  tsx: ['*.tsx'],
+  vue: ['*.vue'],
+  xml: ['*.xml'],
+  yaml: ['*.yaml', '*.yml'],
+  yml: ['*.yaml', '*.yml']
+}
+
+function typeFiltersToIncludePatterns(typeFilters: string[]): string[] {
+  return typeFilters.flatMap((item) => GREP_TYPE_GLOBS[item.toLowerCase()] ?? [])
 }
 
 function normalizeGrepLine(text: string, maxLineLength: number): string {
@@ -343,6 +460,110 @@ function normalizeRipgrepGlob(pattern: string): string {
   return normalized
 }
 
+function normalizeGitPathspecPath(filePath: string): string {
+  return filePath.replace(/\\/g, '/').replace(/\/+$/, '')
+}
+
+function splitGitPathspecMagic(pathspec: string): {
+  pattern: string
+  exclude: boolean
+  hasMagic: boolean
+} {
+  const normalized = normalizeGitPathspecPath(pathspec.trim())
+  if (!normalized) return { pattern: '', exclude: false, hasMagic: false }
+  if (normalized.startsWith(':!') || normalized.startsWith(':^')) {
+    return { pattern: normalized.slice(2), exclude: true, hasMagic: true }
+  }
+  if (!normalized.startsWith(':(')) {
+    return { pattern: normalized, exclude: false, hasMagic: false }
+  }
+
+  const closeIndex = normalized.indexOf(')')
+  if (closeIndex === -1) return { pattern: normalized, exclude: false, hasMagic: true }
+  const magic = normalized
+    .slice(2, closeIndex)
+    .split(',')
+    .map((item) => item.trim())
+  return {
+    pattern: normalized.slice(closeIndex + 1),
+    exclude: magic.includes('exclude'),
+    hasMagic: true
+  }
+}
+
+function normalizeGitPathspecArgument(pathspec: string, forceExclude = false): string | null {
+  const trimmed = normalizeGitPathspecPath(pathspec.trim())
+  if (!trimmed) return null
+  const parsed = splitGitPathspecMagic(trimmed)
+  const exclude = forceExclude || parsed.exclude
+  if (trimmed.startsWith(':(')) {
+    if (!exclude || parsed.exclude) return trimmed
+    return `:(exclude)${parsed.pattern}`
+  }
+  if (trimmed.startsWith(':!') || trimmed.startsWith(':^')) {
+    return `:(exclude)${parsed.pattern}`
+  }
+  return exclude ? `:(exclude,glob)${trimmed}` : trimmed
+}
+
+function normalizeGitPathspecGlob(pattern: string): string {
+  let normalized = pattern.replace(/\\/g, '/').trim()
+  if (normalized.startsWith('./')) normalized = normalized.slice(2)
+  if (!normalized.includes('*') && !normalized.includes('?') && normalized.startsWith('.')) {
+    normalized = `*${normalized}`
+  }
+  return normalized
+}
+
+function joinGitPathspecGlob(base: string, globPattern: string): string {
+  const normalizedBase = normalizeGitPathspecPath(base)
+  const normalizedPattern = normalizeGitPathspecGlob(globPattern)
+  const pattern = normalizedPattern.startsWith('**/')
+    ? normalizedPattern.slice(3)
+    : normalizedPattern
+
+  if (!normalizedBase || normalizedBase === '.') {
+    return pattern.includes('/') ? pattern : `**/${pattern}`
+  }
+
+  return pattern.includes('/') ? `${normalizedBase}/${pattern}` : `${normalizedBase}/**/${pattern}`
+}
+
+function buildGitGrepPathspecs(args: {
+  repoRoot: string
+  searchTarget: string
+  targetIsDirectory: boolean
+  options: GrepSearchOptions
+}): string[] {
+  const relativeTarget = normalizeGitPathspecPath(path.relative(args.repoRoot, args.searchTarget))
+  const targetPathspec = relativeTarget || '.'
+  const includePatterns = [...args.options.includePatterns, ...args.options.pathspecIncludePatterns]
+  const excludePatterns = [...args.options.excludePatterns, ...args.options.pathspecExcludePatterns]
+  const explicitPathspecs = args.options.pathspecs
+    .map((pattern) => normalizeGitPathspecArgument(pattern))
+    .filter((pattern): pattern is string => !!pattern)
+
+  const pathspecs =
+    args.targetIsDirectory && includePatterns.length > 0
+      ? includePatterns.map((pattern) => `:(glob)${joinGitPathspecGlob(targetPathspec, pattern)}`)
+      : [targetPathspec]
+
+  pathspecs.push(...explicitPathspecs)
+
+  for (const pattern of excludePatterns) {
+    pathspecs.push(`:(exclude,glob)${joinGitPathspecGlob(targetPathspec, pattern)}`)
+  }
+
+  for (const pattern of args.options.pathspecs) {
+    const parsed = splitGitPathspecMagic(pattern)
+    if (!parsed.exclude) continue
+    const normalized = normalizeGitPathspecArgument(pattern, true)
+    if (normalized) pathspecs.push(normalized)
+  }
+
+  return pathspecs
+}
+
 function clampGrepNumber(value: unknown, fallback: number, max: number): number {
   if (!Number.isFinite(value)) return fallback
   const normalized = Math.floor(Number(value))
@@ -368,46 +589,202 @@ function normalizeBoolean(value: unknown, fallback: boolean): boolean {
   return typeof value === 'boolean' ? value : fallback
 }
 
+function normalizeOptionalBoolean(value: unknown): boolean | null {
+  return typeof value === 'boolean' ? value : null
+}
+
 function normalizeGrepOutputMode(value: unknown): GrepOutputMode {
-  return value === 'files_with_matches' || value === 'count' ? value : 'matches'
+  if (value === 'content' || value === 'matches') return 'matches'
+  if (value === 'files_with_matches' || value === 'files_without_matches' || value === 'count') {
+    return value
+  }
+  return 'files_with_matches'
 }
 
 function normalizeGrepPathStyle(value: unknown): GrepPathStyle {
   return value === 'absolute' ? 'absolute' : 'relative'
 }
 
+function normalizeGrepPatternMode(args: {
+  literal?: unknown
+  fixed?: unknown
+  fixedStrings?: unknown
+  basic?: unknown
+  basicRegexp?: unknown
+  extended?: unknown
+  extendedRegexp?: unknown
+  perl?: unknown
+  perlRegexp?: unknown
+  patternMode?: unknown
+  regexpType?: unknown
+  regexMode?: unknown
+}): GrepPatternMode {
+  const mode = args.patternMode ?? args.regexpType ?? args.regexMode
+  if (mode === 'fixed' || mode === 'literal' || mode === 'fixed_strings') return 'fixed'
+  if (mode === 'basic' || mode === 'basic_regexp') return 'basic'
+  if (mode === 'extended' || mode === 'extended_regexp') return 'extended'
+  if (mode === 'perl' || mode === 'perl_regexp' || mode === 'pcre') return 'perl'
+  if (args.literal === true || args.fixed === true || args.fixedStrings === true) {
+    return 'fixed'
+  }
+  if (args.basic === true || args.basicRegexp === true) return 'basic'
+  if (args.extended === true || args.extendedRegexp === true) return 'extended'
+  if (args.perl === true || args.perlRegexp === true) return 'perl'
+  return 'extended'
+}
+
+function normalizeGrepPatternOperator(value: unknown): GrepPatternOperator {
+  return value === 'and' || value === 'AND' ? 'and' : 'or'
+}
+
+function normalizeGrepThreads(value: unknown): number | null {
+  if (!Number.isFinite(value)) return null
+  const normalized = Math.floor(Number(value))
+  if (normalized <= 0) return null
+  return Math.min(normalized, 64)
+}
+
+function normalizeGrepPatternInputs(args: {
+  pattern?: unknown
+  patterns?: unknown
+  andPatterns?: unknown
+  orPatterns?: unknown
+  notPatterns?: unknown
+}): { patterns: string[]; notPatterns: string[]; operator: GrepPatternOperator } {
+  const positives: string[] = []
+  const negatives: string[] = []
+
+  const addPattern = (value: unknown, negated = false): void => {
+    if (typeof value === 'string') {
+      const trimmed = value.trim()
+      if (!trimmed) return
+      const target = negated ? negatives : positives
+      target.push(trimmed)
+      return
+    }
+
+    if (!value || typeof value !== 'object') return
+    const record = value as {
+      pattern?: unknown
+      value?: unknown
+      not?: unknown
+      negated?: unknown
+      invert?: unknown
+    }
+    const pattern = typeof record.pattern === 'string' ? record.pattern : record.value
+    const patternNegated =
+      negated || record.not === true || record.negated === true || record.invert === true
+    addPattern(pattern, patternNegated)
+  }
+
+  if (args.patterns !== undefined) {
+    if (Array.isArray(args.patterns)) {
+      args.patterns.forEach((item) => addPattern(item))
+    } else {
+      addPattern(args.patterns)
+    }
+  } else {
+    addPattern(args.pattern)
+  }
+
+  parsePatternList(args.orPatterns).forEach((pattern) => positives.push(pattern))
+  const andPatterns = parsePatternList(args.andPatterns)
+  parsePatternList(args.notPatterns).forEach((pattern) => negatives.push(pattern))
+
+  if (andPatterns.length > 0) {
+    positives.push(...andPatterns)
+    return { patterns: positives, notPatterns: negatives, operator: 'and' }
+  }
+
+  return { patterns: positives, notPatterns: negatives, operator: 'or' }
+}
+
 function normalizeGrepOptions(args: {
   pattern?: unknown
+  patterns?: unknown
+  andPatterns?: unknown
+  orPatterns?: unknown
+  notPatterns?: unknown
+  glob?: unknown
+  type?: unknown
   include?: unknown
   exclude?: unknown
+  pathspec?: unknown
+  pathspecs?: unknown
+  pathspecInclude?: unknown
+  pathspecIncludes?: unknown
+  pathspecExclude?: unknown
+  pathspecExcludes?: unknown
+  includes?: unknown
+  excludes?: unknown
+  ignoreCase?: unknown
   caseSensitive?: unknown
   smartCase?: unknown
   literal?: unknown
+  fixed?: unknown
+  fixedStrings?: unknown
+  basic?: unknown
+  basicRegexp?: unknown
+  extended?: unknown
+  extendedRegexp?: unknown
+  perl?: unknown
+  perlRegexp?: unknown
+  patternMode?: unknown
+  regexpType?: unknown
+  regexMode?: unknown
+  patternOperator?: unknown
+  operator?: unknown
+  combine?: unknown
+  matchOperator?: unknown
+  allMatch?: unknown
   word?: unknown
   line?: unknown
   invertMatch?: unknown
+  onlyMatching?: unknown
+  column?: unknown
   context?: unknown
   beforeContext?: unknown
   afterContext?: unknown
+  maxCount?: unknown
   maxResults?: unknown
+  head_limit?: unknown
+  headLimit?: unknown
   limit?: unknown
   maxOutputBytes?: unknown
   maxLineLength?: unknown
   maxDepth?: unknown
   hidden?: unknown
   respectGitignore?: unknown
+  excludeStandard?: unknown
   followSymlinks?: unknown
   outputMode?: unknown
+  output_mode?: unknown
   pathStyle?: unknown
+  filesWithMatches?: unknown
+  filesWithoutMatches?: unknown
+  count?: unknown
+  untracked?: unknown
+  cached?: unknown
+  noIndex?: unknown
+  index?: unknown
+  text?: unknown
+  textconv?: unknown
+  threads?: unknown
+  multiline?: unknown
 }): GrepSearchOptions {
   const pattern = String(args.pattern ?? '')
+  const patternMode = normalizeGrepPatternMode(args)
+  const normalizedPatterns = normalizeGrepPatternInputs(args)
   const smartCase = normalizeBoolean(args.smartCase, false)
+  const ignoreCase = normalizeOptionalBoolean(args.ignoreCase)
   const hasExplicitCaseSensitive = typeof args.caseSensitive === 'boolean'
   const caseSensitive = hasExplicitCaseSensitive
     ? Boolean(args.caseSensitive)
-    : smartCase
-      ? /[A-Z]/.test(pattern)
-      : false
+    : ignoreCase !== null
+      ? !ignoreCase
+      : smartCase
+        ? normalizedPatterns.patterns.some((item) => /[A-Z]/.test(item))
+        : true
   const context = clampGrepContext(args.context)
   const beforeContext =
     args.beforeContext === undefined ? context : clampGrepContext(args.beforeContext)
@@ -415,23 +792,59 @@ function normalizeGrepOptions(args: {
     args.afterContext === undefined ? context : clampGrepContext(args.afterContext)
   const include = typeof args.include === 'string' ? args.include.trim() : undefined
   const exclude = typeof args.exclude === 'string' ? args.exclude.trim() : undefined
+  const codeGlobPatterns = parseGlobPatterns(args.glob)
+  const typeFilters = parseTypeFilters(args.type)
+  const typeIncludePatterns = typeFiltersToIncludePatterns(typeFilters)
+  const pathspecs = [...parsePatternList(args.pathspec), ...parsePatternList(args.pathspecs)]
+  const pathspecIncludePatterns = [
+    ...parseGlobPatterns(args.pathspecInclude),
+    ...parseGlobPatterns(args.pathspecIncludes),
+    ...parseGlobPatterns(args.includes)
+  ]
+  const pathspecExcludePatterns = [
+    ...parseGlobPatterns(args.pathspecExclude),
+    ...parseGlobPatterns(args.pathspecExcludes),
+    ...parseGlobPatterns(args.excludes)
+  ]
+  const requestedOutputMode = normalizeGrepOutputMode(args.output_mode ?? args.outputMode)
+  const outputMode =
+    args.filesWithMatches === true
+      ? 'files_with_matches'
+      : args.filesWithoutMatches === true
+        ? 'files_without_matches'
+        : args.count === true
+          ? 'count'
+          : requestedOutputMode
 
   return {
     pattern,
+    patternMode,
+    patterns: normalizedPatterns.patterns.length > 0 ? normalizedPatterns.patterns : [pattern],
+    notPatterns: normalizedPatterns.notPatterns,
+    patternOperator: normalizeGrepPatternOperator(
+      args.patternOperator ??
+        args.operator ??
+        args.combine ??
+        args.matchOperator ??
+        normalizedPatterns.operator
+    ),
+    allMatch: normalizeBoolean(args.allMatch, false),
     include: include || undefined,
     exclude: exclude || undefined,
-    includePatterns: parseGlobPatterns(include),
+    includePatterns: [...parseGlobPatterns(include), ...codeGlobPatterns, ...typeIncludePatterns],
     excludePatterns: parseGlobPatterns(exclude),
     caseSensitive,
     smartCase,
-    literal: normalizeBoolean(args.literal, false),
+    literal: patternMode === 'fixed',
     word: normalizeBoolean(args.word, false),
     line: normalizeBoolean(args.line, false),
     invertMatch: normalizeBoolean(args.invertMatch, false),
+    onlyMatching: normalizeBoolean(args.onlyMatching, false),
+    column: normalizeBoolean(args.column, false),
     beforeContext,
     afterContext,
     maxResults: clampGrepNumber(
-      args.maxResults ?? args.limit,
+      args.head_limit ?? args.headLimit ?? args.maxResults ?? args.limit,
       GREP_DEFAULT_MAX_RESULTS,
       GREP_MAX_RESULTS
     ),
@@ -445,17 +858,40 @@ function normalizeGrepOptions(args: {
       GREP_DEFAULT_MAX_LINE_LENGTH,
       GREP_MAX_LINE_LENGTH
     ),
+    maxCount: clampGrepOptionalNumber(args.maxCount, GREP_MAX_RESULTS),
     maxDepth: clampGrepOptionalNumber(args.maxDepth, GREP_MAX_DEPTH),
     hidden: normalizeBoolean(args.hidden, true),
     respectGitignore: normalizeBoolean(args.respectGitignore, true),
+    excludeStandard: normalizeBoolean(
+      args.excludeStandard,
+      normalizeBoolean(args.respectGitignore, true)
+    ),
     followSymlinks: normalizeBoolean(args.followSymlinks, false),
-    outputMode: normalizeGrepOutputMode(args.outputMode),
-    pathStyle: normalizeGrepPathStyle(args.pathStyle)
+    outputMode,
+    pathStyle: normalizeGrepPathStyle(args.pathStyle),
+    untracked: normalizeBoolean(args.untracked, true),
+    cached: normalizeBoolean(args.cached, false),
+    noIndex: normalizeBoolean(args.noIndex, false),
+    index: normalizeBoolean(args.index, false),
+    text: normalizeBoolean(args.text, false),
+    textconv: normalizeBoolean(args.textconv, false),
+    threads: normalizeGrepThreads(args.threads),
+    pathspecs,
+    pathspecIncludePatterns,
+    pathspecExcludePatterns,
+    typeFilters,
+    multiline: normalizeBoolean(args.multiline, false)
   }
 }
 
 function isBasicSidecarGrepOptions(options: GrepSearchOptions): boolean {
   return (
+    options.patternMode === 'perl' &&
+    options.patterns.length === 1 &&
+    options.patterns[0] === options.pattern &&
+    options.notPatterns.length === 0 &&
+    options.patternOperator === 'or' &&
+    !options.allMatch &&
     !options.exclude &&
     !options.caseSensitive &&
     !options.smartCase &&
@@ -463,17 +899,43 @@ function isBasicSidecarGrepOptions(options: GrepSearchOptions): boolean {
     !options.word &&
     !options.line &&
     !options.invertMatch &&
+    !options.onlyMatching &&
+    !options.column &&
     options.beforeContext === 0 &&
     options.afterContext === 0 &&
     options.maxResults === GREP_DEFAULT_MAX_RESULTS &&
     options.maxOutputBytes === GREP_DEFAULT_MAX_OUTPUT_BYTES &&
     options.maxLineLength === GREP_DEFAULT_MAX_LINE_LENGTH &&
+    options.maxCount === null &&
     options.maxDepth === null &&
     options.hidden &&
     options.respectGitignore &&
+    options.excludeStandard &&
     !options.followSymlinks &&
     options.outputMode === 'matches' &&
-    options.pathStyle === 'relative'
+    options.pathStyle === 'relative' &&
+    options.untracked &&
+    !options.cached &&
+    !options.noIndex &&
+    !options.index &&
+    !options.text &&
+    !options.textconv &&
+    options.threads === null &&
+    options.pathspecs.length === 0 &&
+    options.pathspecIncludePatterns.length === 0 &&
+    options.pathspecExcludePatterns.length === 0 &&
+    options.typeFilters.length === 0 &&
+    !options.multiline
+  )
+}
+
+function shouldUseGitGrepFirst(options: GrepSearchOptions): boolean {
+  return (
+    options.cached ||
+    options.index ||
+    options.noIndex ||
+    options.textconv ||
+    options.pathspecs.length > 0
   )
 }
 
@@ -487,17 +949,48 @@ function formatGrepResultPath(
   return path.relative(searchRoot, absolutePath) || path.basename(absolutePath)
 }
 
-function buildGrepRegex(options: GrepSearchOptions): RegExp {
-  let source = options.literal ? escapeRegex(options.pattern) : options.pattern
-  if (options.word) source = `\\b(?:${source})\\b`
-  if (options.line) source = `^(?:${source})$`
-  return new RegExp(source, options.caseSensitive ? '' : 'i')
-}
-
 function shouldSkipHiddenPath(filePath: string, searchRoot: string): boolean {
   const relativePath = path.relative(searchRoot, path.resolve(searchRoot, filePath))
   if (!relativePath || relativePath.startsWith('..') || path.isAbsolute(relativePath)) return false
   return relativePath.split(/[\\/]+/).some((part) => part.startsWith('.') && part !== '.')
+}
+
+function buildSearchPathMatchers(
+  searchRoot: string,
+  options: GrepSearchOptions
+): {
+  matchesInclude: (filePath: string) => boolean
+  matchesExclude: (filePath: string) => boolean
+} {
+  const pathspecIncludes: string[] = []
+  const pathspecExcludes: string[] = []
+
+  for (const pathspec of options.pathspecs) {
+    const parsed = splitGitPathspecMagic(pathspec)
+    if (!parsed.pattern) continue
+    if (parsed.exclude) {
+      pathspecExcludes.push(parsed.pattern)
+    } else {
+      pathspecIncludes.push(parsed.pattern)
+    }
+  }
+
+  const includePatterns = [
+    ...options.includePatterns,
+    ...options.pathspecIncludePatterns,
+    ...pathspecIncludes
+  ]
+  const excludePatterns = [
+    ...options.excludePatterns,
+    ...options.pathspecExcludePatterns,
+    ...pathspecExcludes
+  ]
+
+  return {
+    matchesInclude: createIncludeMatcher(searchRoot, includePatterns),
+    matchesExclude:
+      excludePatterns.length > 0 ? createIncludeMatcher(searchRoot, excludePatterns) : () => false
+  }
 }
 
 function createSearchMeta(args: {
@@ -509,6 +1002,7 @@ function createSearchMeta(args: {
   truncated?: boolean
   timedOut?: boolean
   limitReason?: GrepLimitReason
+  engine?: SearchEngine
   searchTime?: number
   warnings?: string[]
   maxDepth?: number | null
@@ -524,6 +1018,7 @@ function createSearchMeta(args: {
 }): SearchMeta {
   return {
     backend: 'local',
+    engine: args.engine,
     searchRoot: args.searchRoot,
     pathStyle: args.pathStyle ?? 'absolute',
     truncated: args.truncated === true,
@@ -555,6 +1050,10 @@ function createGlobToolResult(args: {
   truncated?: boolean
   limitReason?: GrepLimitReason
   warnings?: string[]
+  hiddenIncluded?: boolean
+  respectGitignore?: boolean
+  followSymlinks?: boolean
+  maxDepth?: number | null
   error?: string
 }): GlobToolResult {
   return {
@@ -566,10 +1065,38 @@ function createGlobToolResult(args: {
       truncated: args.truncated,
       limitReason: args.limitReason,
       warnings: args.warnings,
+      hiddenIncluded: args.hiddenIncluded,
+      respectGitignore: args.respectGitignore,
+      followSymlinks: args.followSymlinks,
+      maxDepth: args.maxDepth,
       pathStyle: 'absolute'
     }),
     error: args.error
   }
+}
+
+function formatGrepOutput(
+  matches: GrepToolResult['matches'],
+  outputMode: GrepOutputMode,
+  includeColumn: boolean
+): string {
+  return matches
+    .map((item) => {
+      if (outputMode === 'files_with_matches' || outputMode === 'files_without_matches') {
+        return item.path
+      }
+      if (outputMode === 'count') return `${item.path}:${item.count ?? 0}`
+      if (typeof item.line !== 'number') return item.path
+
+      const separator = item.kind === 'context' ? '-' : ':'
+      if (includeColumn && typeof item.column === 'number' && item.kind !== 'context') {
+        return `${item.path}${separator}${item.line}${separator}${item.column}${separator}${
+          item.text ?? ''
+        }`
+      }
+      return `${item.path}${separator}${item.line}${separator}${item.text ?? ''}`
+    })
+    .join('\n')
 }
 
 function createGrepToolResult(args: {
@@ -581,6 +1108,7 @@ function createGrepToolResult(args: {
   matches: Array<{
     path: string
     line?: number
+    column?: number
     text?: string
     kind?: GrepMatchKind
     count?: number
@@ -588,9 +1116,11 @@ function createGrepToolResult(args: {
   truncated?: boolean
   timedOut?: boolean
   limitReason?: GrepLimitReason
+  engine?: SearchEngine
   searchTime?: number
   warnings?: string[]
   options?: GrepSearchOptions
+  output?: string
   error?: string
 }): GrepToolResult {
   const options = args.options
@@ -606,6 +1136,7 @@ function createGrepToolResult(args: {
       truncated: args.truncated,
       timedOut: args.timedOut,
       limitReason: args.limitReason,
+      engine: args.engine,
       searchTime: args.searchTime,
       warnings: args.warnings,
       pathStyle: options?.pathStyle === 'relative' ? 'relative_to_search_root' : 'absolute',
@@ -619,6 +1150,13 @@ function createGrepToolResult(args: {
       maxOutputBytes: options?.maxOutputBytes,
       maxLineLength: options?.maxLineLength
     }),
+    output:
+      args.output ??
+      formatGrepOutput(
+        args.matches,
+        args.outputMode ?? options?.outputMode ?? 'matches',
+        options?.column === true
+      ),
     error: args.error
   }
 }
@@ -796,10 +1334,17 @@ function createGrepCollector(searchRoot: string, options: GrepSearchOptions): Gr
 
   return {
     results,
-    append(filePath: string, line: number, text: string, kind: GrepMatchKind = 'match'): boolean {
+    append(
+      filePath: string,
+      line: number,
+      text: string,
+      kind: GrepMatchKind = 'match',
+      column?: number
+    ): boolean {
       return appendItem({
         file: formatGrepResultPath(searchRoot, filePath, options.pathStyle),
         line,
+        column,
         text: normalizeGrepLine(text, options.maxLineLength),
         kind
       })
@@ -824,51 +1369,261 @@ function createGrepCollector(searchRoot: string, options: GrepSearchOptions): Gr
   }
 }
 
+type GrepLineMatchPart = {
+  text: string
+  column: number
+}
+
+type CompiledGrepPattern = {
+  pattern: string
+  testRegex: RegExp
+  matchRegex: RegExp
+}
+
+type CompiledGrepMatcher = {
+  positive: CompiledGrepPattern[]
+  negative: CompiledGrepPattern[]
+  warnings: string[]
+  testLine: (line: string) => boolean
+  positiveHits: (line: string) => boolean[]
+  matchingParts: (line: string) => GrepLineMatchPart[]
+  firstColumn: (line: string) => number | undefined
+}
+
+type ScanFileResult = {
+  results: GrepResultItem[]
+  hasMatch: boolean
+  positiveHits: boolean[]
+  count: number
+  timedOut: boolean
+}
+
+function translateBasicRegexpToJavaScript(pattern: string): string {
+  let source = ''
+  for (let index = 0; index < pattern.length; index += 1) {
+    const char = pattern[index]
+    const next = pattern[index + 1]
+    if (char === '\\' && next) {
+      if ('()+?|{}'.includes(next)) {
+        source += next
+        index += 1
+        continue
+      }
+      source += `${char}${next}`
+      index += 1
+      continue
+    }
+
+    if ('()+?|{}'.includes(char)) {
+      source += `\\${char}`
+    } else {
+      source += char
+    }
+  }
+  return source
+}
+
+function buildJavaScriptGrepSource(pattern: string, options: GrepSearchOptions): string {
+  let source =
+    options.patternMode === 'fixed'
+      ? escapeRegex(pattern)
+      : options.patternMode === 'basic'
+        ? translateBasicRegexpToJavaScript(pattern)
+        : pattern
+  if (options.word) source = `\\b(?:${source})\\b`
+  if (options.line) source = `^(?:${source})$`
+  return source
+}
+
+function compileGrepMatcher(options: GrepSearchOptions): CompiledGrepMatcher {
+  const flags = options.caseSensitive ? '' : 'i'
+  const globalFlags = `${flags}g`
+  const warnings: string[] = []
+
+  if (options.patternMode === 'basic') {
+    warnings.push('Node grep approximates POSIX basic-regexp semantics with JavaScript RegExp')
+  } else if (options.patternMode === 'perl') {
+    warnings.push('Node grep uses JavaScript RegExp for perl-regexp fallback matching')
+  }
+
+  const compilePattern = (pattern: string): CompiledGrepPattern => {
+    const source = buildJavaScriptGrepSource(pattern, options)
+    return {
+      pattern,
+      testRegex: new RegExp(source, flags),
+      matchRegex: new RegExp(source, globalFlags)
+    }
+  }
+
+  const positive = options.patterns.map((pattern) => compilePattern(pattern))
+  const negative = options.notPatterns.map((pattern) => compilePattern(pattern))
+
+  const testPattern = (compiled: CompiledGrepPattern, line: string): boolean => {
+    compiled.testRegex.lastIndex = 0
+    return compiled.testRegex.test(line)
+  }
+
+  const collectParts = (compiled: CompiledGrepPattern, line: string): GrepLineMatchPart[] => {
+    const parts: GrepLineMatchPart[] = []
+    compiled.matchRegex.lastIndex = 0
+
+    while (true) {
+      const match = compiled.matchRegex.exec(line)
+      if (!match) break
+      if (match[0].length === 0) {
+        compiled.matchRegex.lastIndex += 1
+        continue
+      }
+      parts.push({ text: match[0], column: match.index + 1 })
+    }
+
+    return parts
+  }
+
+  const positiveHits = (line: string): boolean[] =>
+    positive.map((compiled) => testPattern(compiled, line))
+
+  const testLine = (line: string): boolean => {
+    const hits = positiveHits(line)
+    const positiveMatch =
+      positive.length === 0
+        ? true
+        : options.patternOperator === 'and'
+          ? hits.every(Boolean)
+          : hits.some(Boolean)
+    if (!positiveMatch) return false
+    return !negative.some((compiled) => testPattern(compiled, line))
+  }
+
+  const matchingParts = (line: string): GrepLineMatchPart[] => {
+    const parts = positive
+      .filter((compiled) => testPattern(compiled, line))
+      .flatMap((compiled) => collectParts(compiled, line))
+      .sort((left, right) => left.column - right.column || left.text.localeCompare(right.text))
+
+    const seen = new Set<string>()
+    return parts.filter((part) => {
+      const key = `${part.column}\0${part.text}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+  }
+
+  return {
+    positive,
+    negative,
+    warnings,
+    testLine,
+    positiveHits,
+    matchingParts,
+    firstColumn(line: string): number | undefined {
+      return matchingParts(line)[0]?.column
+    }
+  }
+}
+
 async function scanFileForMatches(
   filePath: string,
-  regex: RegExp,
-  collector: GrepCollector,
+  matcher: CompiledGrepMatcher,
   startTime: number,
   options: GrepSearchOptions
-): Promise<'continue' | 'limit' | 'timeout'> {
+): Promise<ScanFileResult> {
   const stream = fs.createReadStream(filePath, { encoding: 'utf8' })
   const rl = createInterface({ input: stream, crlfDelay: Infinity })
 
   try {
+    const results: GrepResultItem[] = []
     let lineNumber = 0
     let matchedCount = 0
+    let emittedMatchCount = 0
+    let hasMatch = false
     let afterContextRemaining = 0
     const beforeBuffer: Array<{ line: number; text: string }> = []
     const emittedContextLines = new Set<number>()
+    const positiveHits = matcher.positive.map(() => false)
 
-    const appendContext = (line: number, text: string): boolean => {
-      if (emittedContextLines.has(line)) return true
+    const appendContext = (line: number, text: string): void => {
+      if (emittedContextLines.has(line)) return
       emittedContextLines.add(line)
-      return collector.append(filePath, line, text, 'context')
+      results.push({
+        file: filePath,
+        line,
+        text: normalizeGrepLine(text, options.maxLineLength),
+        kind: 'context'
+      })
     }
 
     for await (const line of rl) {
       lineNumber += 1
-      if (Date.now() - startTime > GREP_TIMEOUT_MS) return 'timeout'
-      let matches = regex.test(line)
+      if (Date.now() - startTime > GREP_TIMEOUT_MS) {
+        return { results, hasMatch, positiveHits, count: matchedCount, timedOut: true }
+      }
+
+      matcher.positiveHits(line).forEach((hit, index) => {
+        positiveHits[index] ||= hit
+      })
+
+      let matches = matcher.testLine(line)
       if (options.invertMatch) matches = !matches
 
       if (matches) {
-        matchedCount += 1
+        hasMatch = true
+        if (options.maxCount === null || matchedCount < options.maxCount) {
+          matchedCount += 1
+        }
 
         if (options.outputMode === 'files_with_matches') {
-          return collector.appendFile(filePath) ? 'continue' : 'limit'
+          if (!options.allMatch) {
+            return {
+              results: [{ file: filePath }],
+              hasMatch,
+              positiveHits,
+              count: matchedCount,
+              timedOut: false
+            }
+          }
+          continue
         }
 
-        if (options.outputMode !== 'count') {
-          for (const contextLine of beforeBuffer) {
-            if (!appendContext(contextLine.line, contextLine.text)) return 'limit'
+        if (
+          options.outputMode === 'matches' &&
+          (options.maxCount === null || emittedMatchCount < options.maxCount)
+        ) {
+          if (!options.onlyMatching) {
+            for (const contextLine of beforeBuffer) {
+              appendContext(contextLine.line, contextLine.text)
+            }
           }
-          if (!collector.append(filePath, lineNumber, line, 'match')) return 'limit'
-          afterContextRemaining = options.afterContext
+
+          if (options.onlyMatching) {
+            const parts = matcher.matchingParts(line)
+            const matchingParts = parts.length > 0 ? parts : [{ text: line, column: 1 }]
+            for (const part of matchingParts) {
+              if (options.maxCount !== null && emittedMatchCount >= options.maxCount) break
+              results.push({
+                file: filePath,
+                line: lineNumber,
+                column: options.column ? part.column : undefined,
+                text: normalizeGrepLine(part.text, options.maxLineLength),
+                kind: 'match'
+              })
+              emittedMatchCount += 1
+            }
+          } else {
+            results.push({
+              file: filePath,
+              line: lineNumber,
+              column: options.column ? matcher.firstColumn(line) : undefined,
+              text: normalizeGrepLine(line, options.maxLineLength),
+              kind: 'match'
+            })
+            emittedMatchCount += 1
+            afterContextRemaining = options.afterContext
+          }
         }
       } else if (afterContextRemaining > 0 && options.outputMode === 'matches') {
-        if (!appendContext(lineNumber, line)) return 'limit'
+        appendContext(lineNumber, line)
         afterContextRemaining -= 1
       }
 
@@ -878,10 +1633,15 @@ async function scanFileForMatches(
       }
     }
 
-    if (options.outputMode === 'count' && matchedCount > 0) {
-      return collector.appendCount(filePath, matchedCount) ? 'continue' : 'limit'
+    if (options.outputMode === 'count' && hasMatch) {
+      results.push({ file: filePath, count: matchedCount })
+    } else if (options.outputMode === 'files_with_matches' && hasMatch) {
+      results.push({ file: filePath })
+    } else if (options.outputMode === 'files_without_matches' && !hasMatch) {
+      results.push({ file: filePath })
     }
-    return 'continue'
+
+    return { results, hasMatch, positiveHits, count: matchedCount, timedOut: false }
   } finally {
     rl.close()
     stream.destroy()
@@ -920,6 +1680,421 @@ async function createLocalGitIgnoreContext(
         return null
       }
     }
+  })
+}
+
+async function runProcessText(
+  command: string,
+  args: string[],
+  cwd: string,
+  timeoutMs: number
+): Promise<ProcessTextResult> {
+  return await new Promise((resolve) => {
+    const child = spawn(command, args, { cwd, windowsHide: true })
+    let stdout = ''
+    let stderr = ''
+    let timedOut = false
+    let settled = false
+
+    const finish = (code: number | null): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve({ code, stdout, stderr, timedOut })
+    }
+
+    const timer = setTimeout(() => {
+      timedOut = true
+      child.kill()
+    }, timeoutMs)
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString('utf8')
+    })
+
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString('utf8')
+    })
+
+    child.on('error', () => {
+      finish(null)
+    })
+
+    child.on('close', (code) => {
+      finish(code)
+    })
+  })
+}
+
+async function findGitWorktreeRoot(
+  searchTarget: string,
+  targetIsDirectory: boolean
+): Promise<string | null> {
+  const cwd = targetIsDirectory ? searchTarget : path.dirname(searchTarget)
+  const result = await runProcessText('git', ['rev-parse', '--show-toplevel'], cwd, 5_000)
+  if (result.timedOut || result.code !== 0) return null
+
+  const root = result.stdout.trim().split(/\r?\n/)[0]
+  if (!root) return null
+
+  const resolvedRoot = path.resolve(root)
+  const relative = path.relative(resolvedRoot, searchTarget)
+  if (relative.startsWith('..') || path.isAbsolute(relative)) return null
+
+  return resolvedRoot
+}
+
+function isWithinSearchRoot(searchRoot: string, filePath: string): boolean {
+  const relative = path.relative(searchRoot, path.resolve(filePath))
+  return !!relative && !relative.startsWith('..') && !path.isAbsolute(relative)
+}
+
+function getSearchRootDepth(searchRoot: string, filePath: string): number {
+  const relative = path.relative(searchRoot, path.resolve(filePath))
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) return 0
+  return relative.split(/[\\/]+/).length - 1
+}
+
+function shouldKeepGitGrepPath(
+  absolutePath: string,
+  searchRoot: string,
+  options: GrepSearchOptions,
+  matchesInclude: (filePath: string) => boolean,
+  matchesExclude: (filePath: string) => boolean
+): boolean {
+  if (!isWithinSearchRoot(searchRoot, absolutePath)) return false
+  if (!options.hidden && shouldSkipHiddenPath(absolutePath, searchRoot)) return false
+  if (
+    options.maxDepth !== null &&
+    getSearchRootDepth(searchRoot, absolutePath) > options.maxDepth
+  ) {
+    return false
+  }
+  return matchesInclude(absolutePath) && !matchesExclude(absolutePath)
+}
+
+type GrepBackendResult = {
+  results: GrepResultItem[]
+  truncated: boolean
+  timedOut: boolean
+  limitReason: GrepLimitReason
+  warnings?: string[]
+}
+
+function appendGitPatternExpression(gitArgs: string[], options: GrepSearchOptions): void {
+  if (options.allMatch) gitArgs.push('--all-match')
+  const normalizePattern = (pattern: string): string => {
+    if (!options.line) return pattern
+    if (options.patternMode === 'fixed') return `^${escapeRegex(pattern)}$`
+    if (options.patternMode === 'basic') return `^${pattern}$`
+    return `^(?:${pattern})$`
+  }
+
+  const expression: string[] = []
+  const appendPositives = (target: string[]): void => {
+    options.patterns.forEach((pattern, index) => {
+      if (index > 0) target.push(options.patternOperator === 'and' ? '--and' : '--or')
+      target.push('-e', normalizePattern(pattern))
+    })
+  }
+
+  if (options.patterns.length > 0) {
+    if (options.patterns.length > 1 && options.notPatterns.length > 0) {
+      expression.push('(')
+      appendPositives(expression)
+      expression.push(')')
+    } else {
+      appendPositives(expression)
+    }
+  }
+
+  for (const pattern of options.notPatterns) {
+    if (expression.length > 0) expression.push('--and')
+    expression.push('--not', '-e', normalizePattern(pattern))
+  }
+
+  if (expression.length === 0) expression.push('-e', normalizePattern(options.pattern))
+  gitArgs.push(...expression)
+}
+
+function appendGitGrepModeArgs(gitArgs: string[], options: GrepSearchOptions): void {
+  const patternMode = options.line && options.patternMode === 'fixed' ? 'perl' : options.patternMode
+  if (patternMode === 'fixed') gitArgs.push('--fixed-strings')
+  if (patternMode === 'basic') gitArgs.push('--basic-regexp')
+  if (patternMode === 'extended') gitArgs.push('--extended-regexp')
+  if (patternMode === 'perl') gitArgs.push('--perl-regexp')
+
+  if (options.outputMode === 'files_with_matches') {
+    gitArgs.push('--files-with-matches')
+  } else if (options.outputMode === 'files_without_matches') {
+    gitArgs.push('--files-without-match')
+  } else if (options.outputMode === 'count') {
+    gitArgs.push('--count')
+  } else {
+    if (options.onlyMatching) gitArgs.push('--only-matching')
+    if (options.beforeContext > 0) gitArgs.push('--before-context', String(options.beforeContext))
+    if (options.afterContext > 0) gitArgs.push('--after-context', String(options.afterContext))
+  }
+
+  if (!options.caseSensitive) gitArgs.push('--ignore-case')
+  if (options.word) gitArgs.push('--word-regexp')
+  if (options.invertMatch) gitArgs.push('--invert-match')
+  if (options.column) gitArgs.push('--column')
+  if (options.maxCount !== null) gitArgs.push('--max-count', String(options.maxCount))
+  if (options.maxDepth !== null) gitArgs.push('--max-depth', String(options.maxDepth))
+  if (options.threads !== null) gitArgs.push('--threads', String(options.threads))
+  if (options.text) gitArgs.push('--text')
+  else gitArgs.push('-I')
+  if (options.textconv) gitArgs.push('--textconv')
+}
+
+function stripGitContextSeparator(stdoutBuffer: string): string {
+  let buffer = stdoutBuffer
+  while (buffer.startsWith('--\n') || buffer.startsWith('--\r\n')) {
+    buffer = buffer.startsWith('--\r\n') ? buffer.slice(4) : buffer.slice(3)
+  }
+  return buffer
+}
+
+async function runGitGrepSearch(args: {
+  searchRoot: string
+  searchTarget: string
+  targetIsDirectory: boolean
+  options: GrepSearchOptions
+  startTime: number
+}): Promise<GrepBackendResult | null> {
+  if (args.options.followSymlinks) return null
+
+  const repoRoot = args.options.noIndex
+    ? args.searchRoot
+    : await findGitWorktreeRoot(args.searchTarget, args.targetIsDirectory)
+  if (!repoRoot) return null
+
+  const pathspecs = buildGitGrepPathspecs({
+    repoRoot,
+    searchTarget: args.searchTarget,
+    targetIsDirectory: args.targetIsDirectory,
+    options: args.options
+  })
+  const collector = createGrepCollector(args.searchRoot, args.options)
+  const { matchesInclude, matchesExclude } = buildSearchPathMatchers(args.searchRoot, args.options)
+  let matcher: CompiledGrepMatcher | null = null
+  try {
+    matcher = compileGrepMatcher(args.options)
+  } catch {
+    matcher = null
+  }
+
+  const gitArgs = ['grep', '--line-number', '--null', '--no-color', '--full-name']
+  if (args.options.noIndex) {
+    gitArgs.push('--no-index')
+  } else if (args.options.index) {
+    gitArgs.push('--index')
+  }
+  if (args.options.cached) {
+    gitArgs.push('--cached')
+  } else if (!args.options.noIndex && args.options.untracked) {
+    gitArgs.push('--untracked')
+  }
+  if (args.options.excludeStandard && (args.options.untracked || args.options.noIndex)) {
+    gitArgs.push('--exclude-standard')
+  }
+  appendGitGrepModeArgs(gitArgs, args.options)
+  appendGitPatternExpression(gitArgs, args.options)
+  gitArgs.push('--', ...pathspecs)
+
+  return await new Promise((resolve) => {
+    const child = spawn('git', gitArgs, { cwd: repoRoot, windowsHide: true })
+    let stdoutBuffer = ''
+    let stderr = ''
+    let timedOut = false
+    let settled = false
+
+    const finish = (value: GrepBackendResult | null): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(value)
+    }
+
+    const shouldKeepPath = (rawPath: string): string | null => {
+      if (!rawPath) return null
+      const absolutePath = path.resolve(repoRoot, rawPath)
+      if (
+        !shouldKeepGitGrepPath(
+          absolutePath,
+          args.searchRoot,
+          args.options,
+          matchesInclude,
+          matchesExclude
+        )
+      ) {
+        return null
+      }
+      return absolutePath
+    }
+
+    const appendRecord = (item: GrepResultItem): void => {
+      const absolutePath = shouldKeepPath(item.file)
+      if (!absolutePath) return
+      if (typeof item.count === 'number') {
+        if (item.count <= 0) return
+        if (!collector.appendCount(absolutePath, item.count)) child.kill()
+        return
+      }
+      if (typeof item.line === 'number' && typeof item.text === 'string') {
+        if (!collector.append(absolutePath, item.line, item.text, item.kind, item.column)) {
+          child.kill()
+        }
+        return
+      }
+      if (!collector.appendFile(absolutePath)) child.kill()
+    }
+
+    const appendFile = (rawPath: string): void => {
+      appendRecord({ file: rawPath })
+    }
+
+    const appendCount = (rawPath: string, rawCount: string): void => {
+      const count = Number(rawCount)
+      if (!Number.isFinite(count)) return
+      appendRecord({ file: rawPath, count })
+    }
+
+    const appendMatch = (
+      rawPath: string,
+      rawLine: string,
+      text: string,
+      rawColumn?: string
+    ): void => {
+      const line = Number(rawLine)
+      if (!Number.isFinite(line) || line <= 0) return
+      const column = rawColumn === undefined ? NaN : Number(rawColumn)
+      const hasColumn = Number.isFinite(column) && column > 0
+      const isMatch =
+        hasColumn ||
+        args.options.onlyMatching ||
+        !matcher ||
+        (args.options.invertMatch ? !matcher.testLine(text) : matcher.testLine(text))
+      appendRecord({
+        file: rawPath,
+        line,
+        column: hasColumn ? column : undefined,
+        text,
+        kind: isMatch ? 'match' : 'context'
+      })
+    }
+
+    const flushStdout = (flush = false): void => {
+      stdoutBuffer = stripGitContextSeparator(stdoutBuffer)
+      if (
+        args.options.outputMode === 'files_with_matches' ||
+        args.options.outputMode === 'files_without_matches'
+      ) {
+        let separatorIndex = stdoutBuffer.indexOf('\0')
+        while (separatorIndex !== -1 || (flush && stdoutBuffer.length > 0)) {
+          const endIndex = separatorIndex === -1 ? stdoutBuffer.length : separatorIndex
+          const rawPath = stdoutBuffer.slice(0, endIndex)
+          stdoutBuffer = stdoutBuffer.slice(Math.min(endIndex + 1, stdoutBuffer.length))
+          appendFile(rawPath)
+          if (settled) return
+          separatorIndex = stdoutBuffer.indexOf('\0')
+        }
+        return
+      }
+
+      if (args.options.outputMode === 'count') {
+        let pathEnd = stdoutBuffer.indexOf('\0')
+        let lineEnd = pathEnd === -1 ? -1 : stdoutBuffer.indexOf('\n', pathEnd + 1)
+        while (pathEnd !== -1 && (lineEnd !== -1 || (flush && stdoutBuffer.length > pathEnd))) {
+          const endIndex = lineEnd === -1 ? stdoutBuffer.length : lineEnd
+          appendCount(stdoutBuffer.slice(0, pathEnd), stdoutBuffer.slice(pathEnd + 1, endIndex))
+          stdoutBuffer = stdoutBuffer.slice(Math.min(endIndex + 1, stdoutBuffer.length))
+          if (settled) return
+          pathEnd = stdoutBuffer.indexOf('\0')
+          lineEnd = pathEnd === -1 ? -1 : stdoutBuffer.indexOf('\n', pathEnd + 1)
+        }
+        return
+      }
+
+      let pathEnd = stdoutBuffer.indexOf('\0')
+      let lineEnd = pathEnd === -1 ? -1 : stdoutBuffer.indexOf('\0', pathEnd + 1)
+      let newlineEnd = lineEnd === -1 ? -1 : stdoutBuffer.indexOf('\n', lineEnd + 1)
+      while (
+        pathEnd !== -1 &&
+        lineEnd !== -1 &&
+        (newlineEnd !== -1 || (flush && stdoutBuffer.length > lineEnd))
+      ) {
+        const endIndex = newlineEnd === -1 ? stdoutBuffer.length : newlineEnd
+        const columnEnd = stdoutBuffer.indexOf('\0', lineEnd + 1)
+        const hasColumn = columnEnd !== -1 && columnEnd < endIndex
+        appendMatch(
+          stdoutBuffer.slice(0, pathEnd),
+          stdoutBuffer.slice(pathEnd + 1, lineEnd),
+          stdoutBuffer.slice(hasColumn ? columnEnd + 1 : lineEnd + 1, endIndex).replace(/\r$/, ''),
+          hasColumn ? stdoutBuffer.slice(lineEnd + 1, columnEnd) : undefined
+        )
+        stdoutBuffer = stdoutBuffer.slice(Math.min(endIndex + 1, stdoutBuffer.length))
+        if (settled) return
+        stdoutBuffer = stripGitContextSeparator(stdoutBuffer)
+        pathEnd = stdoutBuffer.indexOf('\0')
+        lineEnd = pathEnd === -1 ? -1 : stdoutBuffer.indexOf('\0', pathEnd + 1)
+        newlineEnd = lineEnd === -1 ? -1 : stdoutBuffer.indexOf('\n', lineEnd + 1)
+      }
+    }
+
+    const remainingTime = Math.max(1000, GREP_TIMEOUT_MS - (Date.now() - args.startTime))
+    const timer = setTimeout(() => {
+      timedOut = true
+      child.kill()
+    }, remainingTime)
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdoutBuffer += chunk.toString('utf8')
+      flushStdout()
+    })
+
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString('utf8')
+    })
+
+    child.on('error', () => {
+      finish(null)
+    })
+
+    child.on('close', (code) => {
+      flushStdout(true)
+      if (settled) return
+
+      if (timedOut || collector.truncated) {
+        finish({
+          results: collector.results,
+          truncated: true,
+          timedOut,
+          limitReason: timedOut ? 'timeout' : collector.limitReason,
+          warnings: matcher
+            ? []
+            : ['Git grep context kind classification used a best-effort parser']
+        })
+        return
+      }
+
+      if (code === 0 || code === 1) {
+        finish({
+          results: collector.results,
+          truncated: false,
+          timedOut: false,
+          limitReason: null,
+          warnings: matcher
+            ? []
+            : ['Git grep context kind classification used a best-effort parser']
+        })
+        return
+      }
+
+      void stderr
+      finish(null)
+    })
   })
 }
 
@@ -986,6 +2161,19 @@ async function runRipgrepSearch(args: {
   timedOut: boolean
   limitReason: GrepLimitReason
 } | null> {
+  if (
+    args.options.patternMode === 'basic' ||
+    args.options.notPatterns.length > 0 ||
+    args.options.patternOperator !== 'or' ||
+    args.options.allMatch ||
+    args.options.pathspecs.length > 0 ||
+    args.options.cached ||
+    args.options.index ||
+    args.options.textconv
+  ) {
+    return null
+  }
+
   const collector = createGrepCollector(args.searchRoot, args.options)
   const rgArgs = [
     '--line-number',
@@ -1006,10 +2194,13 @@ async function runRipgrepSearch(args: {
     }
   } else if (args.options.outputMode === 'files_with_matches') {
     rgArgs.push('--files-with-matches')
+  } else if (args.options.outputMode === 'files_without_matches') {
+    rgArgs.push('--files-without-match')
   } else {
     rgArgs.push('--count')
   }
 
+  if (args.options.patternMode === 'perl') rgArgs.push('--pcre2')
   if (args.options.smartCase) {
     rgArgs.push('--smart-case')
   } else if (!args.options.caseSensitive) {
@@ -1019,10 +2210,21 @@ async function runRipgrepSearch(args: {
   if (args.options.word) rgArgs.push('--word-regexp')
   if (args.options.line) rgArgs.push('--line-regexp')
   if (args.options.invertMatch) rgArgs.push('--invert-match')
+  if (args.options.onlyMatching) rgArgs.push('--only-matching')
+  if (args.options.column) rgArgs.push('--column')
   if (args.options.hidden) rgArgs.push('--hidden')
-  if (!args.options.respectGitignore) rgArgs.push('--no-ignore')
+  if (args.options.respectGitignore) rgArgs.push('--no-require-git')
+  else rgArgs.push('--no-ignore')
   if (args.options.followSymlinks) rgArgs.push('--follow')
   if (args.options.maxDepth !== null) rgArgs.push('--max-depth', String(args.options.maxDepth))
+  if (args.options.maxCount !== null) rgArgs.push('--max-count', String(args.options.maxCount))
+  if (args.options.threads !== null) rgArgs.push('--threads', String(args.options.threads))
+  if (args.options.text) rgArgs.push('--text')
+  if (args.options.multiline) rgArgs.push('--multiline', '--multiline-dotall')
+
+  for (const typeFilter of args.options.typeFilters) {
+    rgArgs.push('--type', typeFilter)
+  }
 
   for (const dir of GREP_IGNORE_DIRS) {
     rgArgs.push('--glob', `!${dir}/**`)
@@ -1032,16 +2234,22 @@ async function runRipgrepSearch(args: {
   for (const includePattern of args.options.includePatterns) {
     rgArgs.push('--glob', normalizeRipgrepGlob(includePattern))
   }
+  for (const includePattern of args.options.pathspecIncludePatterns) {
+    rgArgs.push('--glob', normalizeRipgrepGlob(includePattern))
+  }
 
   for (const excludePattern of args.options.excludePatterns) {
     rgArgs.push('--glob', `!${normalizeRipgrepGlob(excludePattern)}`)
   }
+  for (const excludePattern of args.options.pathspecExcludePatterns) {
+    rgArgs.push('--glob', `!${normalizeRipgrepGlob(excludePattern)}`)
+  }
 
-  rgArgs.push(
-    '--',
-    args.options.pattern,
-    args.targetIsDirectory ? '.' : path.basename(args.searchTarget)
-  )
+  const patterns = args.options.patterns.length > 0 ? args.options.patterns : [args.options.pattern]
+  for (const pattern of patterns) {
+    rgArgs.push('--regexp', pattern)
+  }
+  rgArgs.push('--', args.targetIsDirectory ? '.' : path.basename(args.searchTarget))
 
   return await new Promise((resolve) => {
     const child = spawn('rg', rgArgs, {
@@ -1072,7 +2280,10 @@ async function runRipgrepSearch(args: {
 
       if (args.options.outputMode !== 'matches') {
         const line = rawLine.trimEnd()
-        if (args.options.outputMode === 'files_with_matches') {
+        if (
+          args.options.outputMode === 'files_with_matches' ||
+          args.options.outputMode === 'files_without_matches'
+        ) {
           const absolutePath = path.isAbsolute(line) ? line : path.join(args.searchRoot, line)
           if (includesDefaultIgnoredDir(absolutePath, args.searchRoot)) return
           if (!collector.appendFile(absolutePath)) child.kill()
@@ -1094,7 +2305,12 @@ async function runRipgrepSearch(args: {
       try {
         const parsed = JSON.parse(rawLine) as {
           type?: string
-          data?: { path?: { text?: string }; lines?: { text?: string }; line_number?: number }
+          data?: {
+            path?: { text?: string }
+            lines?: { text?: string }
+            line_number?: number
+            submatches?: Array<{ match?: { text?: string }; start?: number; end?: number }>
+          }
         }
         if (parsed.type !== 'match' && parsed.type !== 'context') return
 
@@ -1107,7 +2323,31 @@ async function runRipgrepSearch(args: {
           ? rawPath
           : path.join(args.searchRoot, rawPath)
         if (includesDefaultIgnoredDir(absolutePath, args.searchRoot)) return
-        if (!collector.append(absolutePath, lineNumber, text, parsed.type as GrepMatchKind)) {
+
+        const submatches = Array.isArray(parsed.data?.submatches) ? parsed.data.submatches : []
+        if (args.options.onlyMatching && parsed.type === 'match' && submatches.length > 0) {
+          for (const submatch of submatches) {
+            const matchText = submatch.match?.text
+            if (typeof matchText !== 'string') continue
+            const column =
+              args.options.column && typeof submatch.start === 'number'
+                ? submatch.start + 1
+                : undefined
+            if (!collector.append(absolutePath, lineNumber, matchText, 'match', column)) {
+              child.kill()
+              break
+            }
+          }
+          return
+        }
+
+        const column =
+          args.options.column && parsed.type === 'match' && typeof submatches[0]?.start === 'number'
+            ? submatches[0].start + 1
+            : undefined
+        if (
+          !collector.append(absolutePath, lineNumber, text, parsed.type as GrepMatchKind, column)
+        ) {
           child.kill()
         }
       } catch {
@@ -1171,6 +2411,204 @@ async function runRipgrepSearch(args: {
   })
 }
 
+interface WatchedFileEntry {
+  watcher: fs.FSWatcher
+  refCount: number
+  windowRefs: Map<number, number>
+  timer: NodeJS.Timeout | null
+}
+
+interface WatchedDirectoryEntry {
+  rootPath: string
+  recursive: boolean
+  refCount: number
+  windowRefs: Map<number, number>
+  watchers: Map<string, fs.FSWatcher>
+  timer: NodeJS.Timeout | null
+  syncTimer: NodeJS.Timeout | null
+  syncing: boolean
+  closed: boolean
+}
+
+function getInvokeWindowId(event: Electron.IpcMainInvokeEvent): number | null {
+  return BrowserWindow.fromWebContents(event.sender)?.id ?? null
+}
+
+function addInvokeWindowSubscription(
+  windowRefs: Map<number, number>,
+  event: Electron.IpcMainInvokeEvent
+): void {
+  const windowId = getInvokeWindowId(event)
+  if (windowId !== null) windowRefs.set(windowId, (windowRefs.get(windowId) ?? 0) + 1)
+}
+
+function removeInvokeWindowSubscription(
+  windowRefs: Map<number, number>,
+  event: Electron.IpcMainInvokeEvent
+): void {
+  const windowId = getInvokeWindowId(event)
+  if (windowId === null) return
+
+  const nextCount = (windowRefs.get(windowId) ?? 0) - 1
+  if (nextCount > 0) {
+    windowRefs.set(windowId, nextCount)
+  } else {
+    windowRefs.delete(windowId)
+  }
+}
+
+function sendToSubscribedWindows(
+  windowRefs: Map<number, number>,
+  channel: string,
+  payload: unknown
+): void {
+  if (windowRefs.size === 0) {
+    for (const win of BrowserWindow.getAllWindows()) {
+      safeSendToWindow(win, channel, payload)
+    }
+    return
+  }
+
+  for (const windowId of windowRefs.keys()) {
+    const win = BrowserWindow.fromId(windowId)
+    if (!win) {
+      windowRefs.delete(windowId)
+      continue
+    }
+    safeSendToWindow(win, channel, payload)
+  }
+}
+
+function directoryWatchKey(dirPath: string, recursive: boolean): string {
+  return `${dirPath}\0${recursive ? 'recursive' : 'direct'}`
+}
+
+function shouldIgnoreWatchedDirectory(dirPath: string, rootPath: string): boolean {
+  const relativePath = path.relative(rootPath, dirPath)
+  if (!relativePath) return false
+  if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) return true
+  return relativePath.split(/[\\/]+/).some((part) => isDefaultIgnoredDirName(part))
+}
+
+function shouldIgnoreWatchedChange(changedPath: string | null, rootPath: string): boolean {
+  if (!changedPath) return false
+  return shouldIgnoreWatchedDirectory(changedPath, rootPath)
+}
+
+async function collectWatchableDirectories(
+  rootPath: string,
+  recursive: boolean
+): Promise<Set<string>> {
+  const directories = new Set<string>([rootPath])
+  if (!recursive) return directories
+
+  const queue = [rootPath]
+  while (queue.length > 0 && directories.size < MAX_RECURSIVE_DIR_WATCHERS) {
+    const current = queue.shift()!
+    let entries: fs.Dirent[]
+    try {
+      entries = await fs.promises.readdir(current, { withFileTypes: true })
+    } catch {
+      continue
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.isSymbolicLink()) continue
+      if (isDefaultIgnoredDirName(entry.name)) continue
+
+      const childPath = path.join(current, entry.name)
+      if (shouldIgnoreWatchedDirectory(childPath, rootPath)) continue
+
+      directories.add(childPath)
+      queue.push(childPath)
+      if (directories.size >= MAX_RECURSIVE_DIR_WATCHERS) break
+    }
+  }
+
+  return directories
+}
+
+function scheduleDirectoryWatcherSync(entry: WatchedDirectoryEntry): void {
+  if (entry.closed) return
+  if (!entry.recursive) return
+  if (entry.syncTimer) clearTimeout(entry.syncTimer)
+
+  entry.syncTimer = setTimeout(() => {
+    entry.syncTimer = null
+    void syncDirectoryWatchers(entry)
+  }, 500)
+}
+
+function scheduleDirectoryChanged(entry: WatchedDirectoryEntry, changedPath: string | null): void {
+  if (entry.closed) return
+  if (shouldIgnoreWatchedChange(changedPath, entry.rootPath)) return
+
+  if (entry.timer) clearTimeout(entry.timer)
+  entry.timer = setTimeout(() => {
+    entry.timer = null
+    sendToSubscribedWindows(entry.windowRefs, 'fs:dir-changed', {
+      path: entry.rootPath,
+      changedPath: changedPath ?? entry.rootPath
+    })
+  }, 300)
+
+  scheduleDirectoryWatcherSync(entry)
+}
+
+function watchDirectoryPath(entry: WatchedDirectoryEntry, dirPath: string): void {
+  if (entry.closed) return
+  if (entry.watchers.has(dirPath)) return
+
+  try {
+    const watcher = fs.watch(dirPath, { recursive: false }, (_eventType, filename) => {
+      const changedPath =
+        typeof filename === 'string' && filename.length > 0 ? path.join(dirPath, filename) : dirPath
+      scheduleDirectoryChanged(entry, changedPath)
+    })
+    watcher.on('error', () => {
+      watcher.close()
+      entry.watchers.delete(dirPath)
+    })
+    entry.watchers.set(dirPath, watcher)
+  } catch {
+    // Directory may disappear between traversal and watch registration.
+  }
+}
+
+async function syncDirectoryWatchers(entry: WatchedDirectoryEntry): Promise<void> {
+  if (entry.closed) return
+  if (entry.syncing) return
+  entry.syncing = true
+  try {
+    const directories = await collectWatchableDirectories(entry.rootPath, entry.recursive)
+    if (entry.closed) return
+
+    for (const dirPath of directories) {
+      watchDirectoryPath(entry, dirPath)
+    }
+
+    for (const [dirPath, watcher] of entry.watchers) {
+      if (directories.has(dirPath)) continue
+      watcher.close()
+      entry.watchers.delete(dirPath)
+    }
+  } finally {
+    entry.syncing = false
+  }
+}
+
+function closeDirectoryWatchEntry(entry: WatchedDirectoryEntry): void {
+  entry.closed = true
+  for (const watcher of entry.watchers.values()) {
+    watcher.close()
+  }
+  entry.watchers.clear()
+  if (entry.timer) clearTimeout(entry.timer)
+  if (entry.syncTimer) clearTimeout(entry.syncTimer)
+  entry.timer = null
+  entry.syncTimer = null
+}
+
 export function registerFsHandlers(): void {
   ipcMain.handle(
     'fs:read-file',
@@ -1218,6 +2656,7 @@ export function registerFsHandlers(): void {
       args: {
         path: string
         content: string
+        beforeContent?: string
         changeMeta?: { runId?: string; sessionId?: string; toolUseId?: string; toolName?: string }
       }
     ) => {
@@ -1229,6 +2668,11 @@ export function registerFsHandlers(): void {
             beforeText = await fs.promises.readFile(args.path, 'utf-8')
           } catch {
             // best-effort: skip diff if read fails
+          }
+        }
+        if (typeof args.beforeContent === 'string' && beforeText !== args.beforeContent) {
+          return {
+            error: 'File changed since it was read. Read the file again before editing or writing.'
           }
         }
         const dir = path.dirname(args.path)
@@ -1249,6 +2693,22 @@ export function registerFsHandlers(): void {
       }
     }
   )
+
+  ipcMain.handle('fs:stat-path', async (_event, args: { path: string }) => {
+    try {
+      const stats = await fs.promises.stat(args.path)
+      return {
+        exists: true,
+        type: stats.isFile() ? 'file' : stats.isDirectory() ? 'directory' : 'other',
+        size: stats.size,
+        mtimeMs: stats.mtimeMs
+      }
+    } catch (err) {
+      const code = err && typeof err === 'object' ? (err as { code?: unknown }).code : undefined
+      if (code === 'ENOENT') return { exists: false, type: null, size: null, mtimeMs: null }
+      return { error: String(err) }
+    }
+  })
 
   ipcMain.handle(
     'fs:list-dir',
@@ -1285,6 +2745,16 @@ export function registerFsHandlers(): void {
     try {
       await fs.promises.mkdir(args.path, { recursive: true })
       return { success: true }
+    } catch (err) {
+      return { error: String(err) }
+    }
+  })
+
+  ipcMain.handle('fs:default-chat-working-folder', async () => {
+    try {
+      const folderPath = path.join(app.getPath('documents'), formatLocalDateFolderName(), 'Chat')
+      await fs.promises.mkdir(folderPath, { recursive: true })
+      return { path: folderPath }
     } catch (err) {
       return { error: String(err) }
     }
@@ -1352,17 +2822,37 @@ export function registerFsHandlers(): void {
 
   ipcMain.handle(
     'fs:glob',
-    async (_event, args: { pattern: string; path?: string; limit?: number }) => {
+    async (
+      _event,
+      args: {
+        pattern: string
+        path?: string
+        limit?: number
+        hidden?: boolean
+        respectGitignore?: boolean
+        followSymlinks?: boolean
+        maxDepth?: number
+      }
+    ) => {
       const cwd = path.resolve(args.path || process.cwd())
       try {
-        const matcher = await createLocalGitIgnoreContext(cwd)
-        const filteredMatches: Array<{ path: string; type?: 'file' | 'directory' }> = []
-        const limit = clampToolResultLimit(args.limit, MAX_GLOB_MATCHES)
+        const hidden = args.hidden !== false
+        const respectGitignore = args.respectGitignore === true
+        const followSymlinks = args.followSymlinks === true
+        const maxDepth = clampGrepOptionalNumber(args.maxDepth, GREP_MAX_DEPTH)
+        const matcher = respectGitignore ? await createLocalGitIgnoreContext(cwd) : null
+        const filteredMatches: Array<{
+          path: string
+          type?: 'file' | 'directory'
+          mtimeMs: number
+        }> = []
+        const limit = clampToolResultLimit(args.limit, MAX_GLOB_MATCHES) ?? 100
         let truncated = false
         const globber = new Glob(args.pattern, {
           cwd,
           mark: true,
-          dot: true,
+          dot: hidden,
+          follow: followSymlinks,
           ignore: buildGlobIgnorePatterns(args.pattern)
         })
 
@@ -1371,27 +2861,47 @@ export function registerFsHandlers(): void {
           const normalizedMatch = match.replace(/[\\/]+$/, '')
           if (!normalizedMatch) continue
           const absolutePath = path.resolve(cwd, normalizedMatch)
-          if (await matcher.ignores(absolutePath, isDir)) continue
-          filteredMatches.push({ path: absolutePath, type: isDir ? 'directory' : 'file' })
+          if (maxDepth !== null && getSearchRootDepth(cwd, absolutePath) > maxDepth) continue
+          if (matcher && (await matcher.ignores(absolutePath, isDir))) continue
+          const stats = await fs.promises.stat(absolutePath).catch(() => null)
+          filteredMatches.push({
+            path: absolutePath,
+            type: isDir ? 'directory' : 'file',
+            mtimeMs: stats?.mtimeMs ?? 0
+          })
 
-          if (limit !== null && filteredMatches.length >= limit) {
+          if (filteredMatches.length >= MAX_GLOB_MATCHES) {
             truncated = true
             break
           }
         }
 
+        filteredMatches.sort(
+          (left, right) =>
+            right.mtimeMs - left.mtimeMs ||
+            left.path.localeCompare(right.path, undefined, { sensitivity: 'base' })
+        )
+        const limitedMatches = filteredMatches.slice(0, limit)
+        if (filteredMatches.length > limitedMatches.length) truncated = true
+
         return createGlobToolResult({
           searchRoot: cwd,
           pattern: args.pattern,
-          matches: filteredMatches,
+          matches: limitedMatches.map(({ path: matchPath, type }) => ({ path: matchPath, type })),
           truncated,
-          limitReason: truncated ? 'max_results' : null
+          limitReason: truncated ? 'max_results' : null,
+          hiddenIncluded: hidden,
+          respectGitignore,
+          followSymlinks,
+          maxDepth
         })
       } catch (err) {
         return createGlobToolResult({
           searchRoot: cwd,
           pattern: args.pattern,
           matches: [],
+          respectGitignore: args.respectGitignore === true,
+          followSymlinks: args.followSymlinks === true,
           error: String(err)
         })
       }
@@ -1453,28 +2963,77 @@ export function registerFsHandlers(): void {
       _event,
       args: {
         pattern: string
+        patterns?: unknown
+        andPatterns?: unknown
+        orPatterns?: unknown
+        notPatterns?: unknown
+        glob?: unknown
+        type?: unknown
         path?: string
         include?: string
         exclude?: string
+        pathspec?: unknown
+        pathspecs?: unknown
+        pathspecInclude?: unknown
+        pathspecIncludes?: unknown
+        pathspecExclude?: unknown
+        pathspecExcludes?: unknown
+        includes?: unknown
+        excludes?: unknown
+        ignoreCase?: boolean
         caseSensitive?: boolean
         smartCase?: boolean
         literal?: boolean
+        fixed?: boolean
+        fixedStrings?: boolean
+        basic?: boolean
+        basicRegexp?: boolean
+        extended?: boolean
+        extendedRegexp?: boolean
+        perl?: boolean
+        perlRegexp?: boolean
+        patternMode?: unknown
+        regexpType?: unknown
+        regexMode?: unknown
+        patternOperator?: unknown
+        operator?: unknown
+        combine?: unknown
+        matchOperator?: unknown
+        allMatch?: boolean
         word?: boolean
         line?: boolean
         invertMatch?: boolean
+        onlyMatching?: boolean
+        column?: boolean
         context?: number
         beforeContext?: number
         afterContext?: number
+        maxCount?: number
         maxResults?: number
+        head_limit?: number
+        headLimit?: number
         limit?: number
         maxOutputBytes?: number
         maxLineLength?: number
         maxDepth?: number
         hidden?: boolean
         respectGitignore?: boolean
+        excludeStandard?: boolean
         followSymlinks?: boolean
+        filesWithMatches?: boolean
+        filesWithoutMatches?: boolean
+        count?: boolean
+        untracked?: boolean
+        cached?: boolean
+        noIndex?: boolean
+        index?: boolean
+        text?: boolean
+        textconv?: boolean
+        threads?: number
         outputMode?: GrepOutputMode
+        output_mode?: string
         pathStyle?: GrepPathStyle
+        multiline?: boolean
       }
     ) => {
       try {
@@ -1499,21 +3058,80 @@ export function registerFsHandlers(): void {
         }
 
         const searchRoot = targetStats.isDirectory() ? searchTarget : path.dirname(searchTarget)
+        const tryGitGrep = async (): Promise<GrepToolResult | null> => {
+          const gitGrepResult = await runGitGrepSearch({
+            searchRoot,
+            searchTarget,
+            targetIsDirectory: targetStats.isDirectory(),
+            options,
+            startTime
+          })
 
-        let regex: RegExp
-        try {
-          regex = buildGrepRegex(options)
-        } catch (err) {
+          if (!gitGrepResult) return null
           return createGrepToolResult({
             searchRoot,
             pattern: options.pattern,
             include: options.include,
             exclude: options.exclude,
             outputMode: options.outputMode,
-            matches: [],
-            options,
-            error: `Invalid regex pattern: ${err}`
+            matches: gitGrepResult.results.map((item) => ({
+              path: item.file,
+              line: item.line,
+              column: item.column,
+              text: item.text,
+              kind: item.kind,
+              count: item.count
+            })),
+            truncated: gitGrepResult.truncated,
+            timedOut: gitGrepResult.timedOut,
+            limitReason: gitGrepResult.limitReason,
+            engine: 'git_grep',
+            searchTime: Date.now() - startTime,
+            warnings: gitGrepResult.warnings,
+            options
           })
+        }
+
+        if (shouldUseGitGrepFirst(options)) {
+          const gitResult = await tryGitGrep()
+          if (gitResult) return gitResult
+        }
+
+        const ripgrepResult = await runRipgrepSearch({
+          searchRoot,
+          searchTarget,
+          targetIsDirectory: targetStats.isDirectory(),
+          options,
+          startTime
+        })
+
+        if (ripgrepResult) {
+          return createGrepToolResult({
+            searchRoot,
+            pattern: options.pattern,
+            include: options.include,
+            exclude: options.exclude,
+            outputMode: options.outputMode,
+            matches: ripgrepResult.results.map((item) => ({
+              path: item.file,
+              line: item.line,
+              column: item.column,
+              text: item.text,
+              kind: item.kind,
+              count: item.count
+            })),
+            truncated: ripgrepResult.truncated,
+            timedOut: ripgrepResult.timedOut,
+            limitReason: ripgrepResult.limitReason,
+            engine: 'ripgrep',
+            searchTime: Date.now() - startTime,
+            options
+          })
+        }
+
+        if (!shouldUseGitGrepFirst(options)) {
+          const gitResult = await tryGitGrep()
+          if (gitResult) return gitResult
         }
 
         if (isBasicSidecarGrepOptions(options)) {
@@ -1541,54 +3159,46 @@ export function registerFsHandlers(): void {
               truncated: sidecarResult.truncated,
               timedOut: sidecarResult.timedOut,
               limitReason: sidecarResult.limitReason,
+              engine: 'sidecar',
               searchTime: sidecarResult.searchTime,
               options
             })
           }
         }
 
-        const matchesInclude = createIncludeMatcher(searchRoot, options.includePatterns)
-        const matchesExclude =
-          options.excludePatterns.length > 0
-            ? createIncludeMatcher(searchRoot, options.excludePatterns)
-            : () => false
-        const gitIgnoreMatcher =
-          options.respectGitignore && targetStats.isDirectory()
-            ? await createLocalGitIgnoreContext(searchRoot)
-            : null
-
-        const ripgrepResult = await runRipgrepSearch({
-          searchRoot,
-          searchTarget,
-          targetIsDirectory: targetStats.isDirectory(),
-          options,
-          startTime
-        })
-
-        if (ripgrepResult) {
+        let matcher: CompiledGrepMatcher
+        try {
+          matcher = compileGrepMatcher(options)
+        } catch (err) {
           return createGrepToolResult({
             searchRoot,
             pattern: options.pattern,
             include: options.include,
             exclude: options.exclude,
             outputMode: options.outputMode,
-            matches: ripgrepResult.results.map((item) => ({
-              path: item.file,
-              line: item.line,
-              text: item.text,
-              kind: item.kind,
-              count: item.count
-            })),
-            truncated: ripgrepResult.truncated,
-            timedOut: ripgrepResult.timedOut,
-            limitReason: ripgrepResult.limitReason,
-            searchTime: Date.now() - startTime,
-            options
+            matches: [],
+            options,
+            error: `Invalid regex pattern: ${err}`
           })
         }
 
+        const { matchesInclude, matchesExclude } = buildSearchPathMatchers(searchRoot, options)
+        const gitIgnoreMatcher =
+          options.respectGitignore && targetStats.isDirectory()
+            ? await createLocalGitIgnoreContext(searchRoot)
+            : null
+
         const collector = createGrepCollector(searchRoot, options)
         let timedOut = false
+        const appendNodeResult = (item: GrepResultItem): boolean => {
+          if (typeof item.count === 'number') {
+            return collector.appendCount(item.file, item.count)
+          }
+          if (typeof item.line === 'number' && typeof item.text === 'string') {
+            return collector.append(item.file, item.line, item.text, item.kind, item.column)
+          }
+          return collector.appendFile(item.file)
+        }
 
         const searchFile = async (filePath: string): Promise<boolean> => {
           try {
@@ -1603,12 +3213,21 @@ export function registerFsHandlers(): void {
             if (!options.hidden && shouldSkipHiddenPath(filePath, searchRoot)) return false
             if (await isBinaryFile(filePath)) return false
 
-            const status = await scanFileForMatches(filePath, regex, collector, startTime, options)
-            if (status === 'timeout') {
+            const scanResult = await scanFileForMatches(filePath, matcher, startTime, options)
+            if (scanResult.timedOut) {
               timedOut = true
               return true
             }
-            return status === 'limit'
+            const hasAllPatternMatches = !options.allMatch || scanResult.positiveHits.every(Boolean)
+            const results = hasAllPatternMatches
+              ? scanResult.results
+              : options.outputMode === 'files_without_matches'
+                ? [{ file: filePath }]
+                : []
+            for (const item of results) {
+              if (!appendNodeResult(item)) return true
+            }
+            return collector.truncated
           } catch {
             return false
           }
@@ -1669,6 +3288,7 @@ export function registerFsHandlers(): void {
           matches: collector.results.map((item) => ({
             path: item.file,
             line: item.line,
+            column: item.column,
             text: item.text,
             kind: item.kind,
             count: item.count
@@ -1676,7 +3296,9 @@ export function registerFsHandlers(): void {
           truncated: collector.truncated || timedOut,
           timedOut,
           limitReason: timedOut ? 'timeout' : collector.limitReason,
+          engine: 'node_fallback',
           searchTime: Date.now() - startTime,
+          warnings: matcher.warnings,
           options
         })
       } catch (err) {
@@ -1756,46 +3378,123 @@ export function registerFsHandlers(): void {
   })
 
   // File watching
-  const watchers = new Map<string, fs.FSWatcher>()
-  const debounceTimers = new Map<string, NodeJS.Timeout>()
+  const fileWatchers = new Map<string, WatchedFileEntry>()
 
-  ipcMain.handle('fs:watch-file', async (_event, args: { path: string }) => {
-    const filePath = args.path
-    if (watchers.has(filePath)) return { success: true }
+  ipcMain.handle('fs:watch-file', async (event, args: { path: string }) => {
+    const filePath = path.resolve(args.path)
+    const existing = fileWatchers.get(filePath)
+    if (existing) {
+      existing.refCount += 1
+      addInvokeWindowSubscription(existing.windowRefs, event)
+      return { success: true }
+    }
+
     try {
+      let watchEntry: WatchedFileEntry | null = null
       const watcher = fs.watch(filePath, () => {
-        const existing = debounceTimers.get(filePath)
-        if (existing) clearTimeout(existing)
-        debounceTimers.set(
-          filePath,
-          setTimeout(() => {
-            debounceTimers.delete(filePath)
-            const win = BrowserWindow.getAllWindows()[0]
-            if (win) {
-              safeSendToWindow(win, 'fs:file-changed', { path: filePath })
-            }
-          }, 300)
-        )
+        if (!watchEntry) return
+        if (watchEntry.timer) clearTimeout(watchEntry.timer)
+        watchEntry.timer = setTimeout(() => {
+          if (!watchEntry) return
+          watchEntry.timer = null
+          sendToSubscribedWindows(watchEntry.windowRefs, 'fs:file-changed', { path: filePath })
+        }, 300)
       })
-      watchers.set(filePath, watcher)
+
+      const entry: WatchedFileEntry = {
+        watcher,
+        refCount: 1,
+        windowRefs: new Map<number, number>(),
+        timer: null
+      }
+      watchEntry = entry
+      addInvokeWindowSubscription(entry.windowRefs, event)
+      entry.watcher.on('error', () => {
+        watchEntry?.watcher.close()
+        if (watchEntry?.timer) clearTimeout(watchEntry.timer)
+        fileWatchers.delete(filePath)
+      })
+      fileWatchers.set(filePath, entry)
       return { success: true }
     } catch (err) {
       return { error: String(err) }
     }
   })
 
-  ipcMain.handle('fs:unwatch-file', async (_event, args: { path: string }) => {
-    const filePath = args.path
-    const watcher = watchers.get(filePath)
-    if (watcher) {
-      watcher.close()
-      watchers.delete(filePath)
+  ipcMain.handle('fs:unwatch-file', async (event, args: { path: string }) => {
+    const filePath = path.resolve(args.path)
+    const entry = fileWatchers.get(filePath)
+    if (!entry) return { success: true }
+
+    entry.refCount -= 1
+    removeInvokeWindowSubscription(entry.windowRefs, event)
+    if (entry.refCount > 0) return { success: true }
+
+    entry.watcher.close()
+    if (entry.timer) clearTimeout(entry.timer)
+    fileWatchers.delete(filePath)
+    return { success: true }
+  })
+
+  // Directory watching
+  const dirWatchers = new Map<string, WatchedDirectoryEntry>()
+
+  ipcMain.handle('fs:watch-dir', async (event, args: { path: string; recursive?: boolean }) => {
+    const dirPath = path.resolve(args.path)
+    const recursive = args.recursive === true
+    const key = directoryWatchKey(dirPath, recursive)
+    const existing = dirWatchers.get(key)
+    if (existing) {
+      existing.refCount += 1
+      addInvokeWindowSubscription(existing.windowRefs, event)
+      return { success: true }
     }
-    const timer = debounceTimers.get(filePath)
-    if (timer) {
-      clearTimeout(timer)
-      debounceTimers.delete(filePath)
+
+    try {
+      const stats = await fs.promises.stat(dirPath)
+      if (!stats.isDirectory()) {
+        return { error: `Path is not a directory: ${dirPath}` }
+      }
+
+      const entry: WatchedDirectoryEntry = {
+        rootPath: dirPath,
+        recursive,
+        refCount: 1,
+        windowRefs: new Map<number, number>(),
+        watchers: new Map<string, fs.FSWatcher>(),
+        timer: null,
+        syncTimer: null,
+        syncing: false,
+        closed: false
+      }
+      addInvokeWindowSubscription(entry.windowRefs, event)
+      await syncDirectoryWatchers(entry)
+      dirWatchers.set(key, entry)
+      return { success: true, recursive, watched: entry.watchers.size }
+    } catch (err) {
+      return { error: String(err) }
     }
+  })
+
+  ipcMain.handle('fs:unwatch-dir', async (event, args: { path: string; recursive?: boolean }) => {
+    const dirPath = path.resolve(args.path)
+    const candidateKeys =
+      typeof args.recursive === 'boolean'
+        ? [directoryWatchKey(dirPath, args.recursive)]
+        : [directoryWatchKey(dirPath, true), directoryWatchKey(dirPath, false)]
+
+    for (const key of candidateKeys) {
+      const entry = dirWatchers.get(key)
+      if (!entry) continue
+
+      entry.refCount -= 1
+      removeInvokeWindowSubscription(entry.windowRefs, event)
+      if (entry.refCount > 0) continue
+
+      closeDirectoryWatchEntry(entry)
+      dirWatchers.delete(key)
+    }
+
     return { success: true }
   })
 

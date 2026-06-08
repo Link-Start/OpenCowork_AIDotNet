@@ -4,9 +4,9 @@ import type { TFunction } from 'i18next'
 import { toast } from 'sonner'
 import {
   AlertTriangle,
-  ChevronUp,
+  ChevronDown,
+  ChevronRight,
   CheckCircle2,
-  Clock,
   Pause,
   Pencil,
   Play,
@@ -41,11 +41,13 @@ import {
   type SessionGoalEvent,
   type SessionGoalEventType
 } from '@renderer/stores/goal-store'
-import { useChatActions } from '@renderer/hooks/use-chat-actions'
+import { abortSession, dispatchNextQueuedMessageForSession } from '@renderer/hooks/use-chat-actions'
 
 const BLOCKER_EVENT_TYPES = new Set<SessionGoalEventType>([
+  'usage_limited',
   'budget_limited',
   'completion_deferred',
+  'blocked',
   'stall_paused',
   'auto_continue_blocked'
 ])
@@ -92,6 +94,10 @@ function statusTone(status?: SessionGoal['status']): string {
       return 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300'
     case 'paused':
       return 'border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-300'
+    case 'blocked':
+      return 'border-orange-500/30 bg-orange-500/10 text-orange-600 dark:text-orange-300'
+    case 'usage_limited':
+      return 'border-rose-500/30 bg-rose-500/10 text-rose-600 dark:text-rose-300'
     case 'budget_limited':
       return 'border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-300'
     case 'complete':
@@ -111,11 +117,18 @@ function GoalStatusBadge({ status }: { status?: SessionGoal['status'] }): React.
   )
 }
 
-function GoalUsageLine({ goal }: { goal?: SessionGoal }): React.JSX.Element {
+function GoalUsageLine({
+  goal,
+  timeUsedSeconds
+}: {
+  goal?: SessionGoal
+  timeUsedSeconds?: number
+}): React.JSX.Element {
   const { t } = useTranslation('chat')
   if (!goal) {
     return <span>{t('goal.noUsage')}</span>
   }
+  const displayTimeUsedSeconds = timeUsedSeconds ?? goal.timeUsedSeconds
   const tokenText =
     goal.tokenBudget !== undefined && goal.tokenBudget !== null
       ? t('goal.tokensWithBudget', {
@@ -125,10 +138,29 @@ function GoalUsageLine({ goal }: { goal?: SessionGoal }): React.JSX.Element {
       : t('goal.tokensOnly', { tokens: formatGoalTokens(goal.tokensUsed) })
   return (
     <>
-      <span>{formatGoalElapsedSeconds(goal.timeUsedSeconds)}</span>
+      <span>{formatGoalElapsedSeconds(displayTimeUsedSeconds)}</span>
       <span>{tokenText}</span>
     </>
   )
+}
+
+function useLiveGoalElapsedSeconds(goal?: SessionGoal, activeRunStartedAt?: number | null): number {
+  const [now, setNow] = React.useState(() => Date.now())
+
+  React.useEffect(() => {
+    if (!activeRunStartedAt) return
+    const tick = (): void => setNow(Date.now())
+    tick()
+    const interval = window.setInterval(tick, 1000)
+    return () => window.clearInterval(interval)
+  }, [activeRunStartedAt])
+
+  if (!goal) return 0
+  const activeRunSeconds =
+    goal.status === 'active' && activeRunStartedAt
+      ? Math.max(0, Math.floor((now - activeRunStartedAt) / 1000))
+      : 0
+  return goal.timeUsedSeconds + activeRunSeconds
 }
 
 function formatGoalEvent(
@@ -239,21 +271,11 @@ function useGoalActions(
 } {
   const { t } = useTranslation('chat')
   const { t: tCommon } = useTranslation('common')
-  const { sendMessage } = useChatActions()
   const [open, setOpen] = React.useState(false)
   const [objectiveDraft, setObjectiveDraft] = React.useState('')
   const [tokenBudgetDraft, setTokenBudgetDraft] = React.useState('')
   const [saving, setSaving] = React.useState(false)
   const [clearing, setClearing] = React.useState(false)
-
-  const continueGoal = React.useCallback(
-    (targetSessionId: string): void => {
-      queueMicrotask(() => {
-        void sendMessage('', undefined, 'continue', targetSessionId, null)
-      })
-    },
-    [sendMessage]
-  )
 
   const openManager = React.useCallback(() => {
     setObjectiveDraft(goal?.objective ?? '')
@@ -291,13 +313,15 @@ function useGoalActions(
         toast.info(t('goal.toasts.budgetStillExhausted'), {
           description: t('goal.toasts.increaseBudget')
         })
-        return
       }
       if (status === 'active' && result.goal?.status === 'active') {
-        continueGoal(sessionId)
+        dispatchNextQueuedMessageForSession(sessionId)
+      }
+      if (status === 'paused' && result.goal?.status === 'paused') {
+        abortSession(sessionId)
       }
     },
-    [continueGoal, sessionId, t]
+    [sessionId, t]
   )
 
   const clearGoal = React.useCallback(async (): Promise<void> => {
@@ -354,10 +378,7 @@ function useGoalActions(
       return
     }
     setOpen(false)
-    if (result.goal?.status === 'active') {
-      continueGoal(sessionId)
-    }
-  }, [continueGoal, goal, objectiveDraft, parseGoalTokenBudget, sessionId, t])
+  }, [goal, objectiveDraft, parseGoalTokenBudget, sessionId, t])
 
   return {
     open,
@@ -397,7 +418,7 @@ function GoalManagerDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Target className="size-4" />
-            {t('goal.managerTitle')}
+            {goal ? t('goal.editTitle', { defaultValue: 'Edit goal' }) : t('goal.managerTitle')}
           </DialogTitle>
         </DialogHeader>
         <div className="space-y-4">
@@ -555,103 +576,127 @@ export function GoalSessionBar({
   const { t } = useTranslation('chat')
   const { goal, events } = useGoalSession(sessionId)
   const actions = useGoalActions(sessionId, goal)
-  const [expanded, setExpanded] = React.useState(false)
+  const [expanded, setExpanded] = React.useState(true)
+  const activeRunStartedAt = useGoalStore((s) => {
+    if (!sessionId || !goal) return null
+    const activeRun = s.activeGoalRunsBySession[sessionId]
+    return activeRun?.goalId === goal.goalId ? activeRun.startedAt : null
+  })
+  const liveTimeUsedSeconds = useLiveGoalElapsedSeconds(goal, activeRunStartedAt)
 
   React.useEffect(() => {
-    setExpanded(false)
+    setExpanded(true)
   }, [sessionId])
 
-  if (!sessionId) return null
+  if (!sessionId || !goal) return null
+
+  const statusTitle =
+    goal.status === 'active'
+      ? t('goal.runningTitle', { defaultValue: 'Pursuing goal' })
+      : goal.status === 'paused'
+        ? t('goal.pausedTitle', { defaultValue: 'Paused goal' })
+        : goal.status === 'blocked'
+          ? t('goal.blockedTitle', { defaultValue: 'Blocked goal' })
+          : goal.status === 'usage_limited'
+            ? t('goal.usageLimitedTitle', { defaultValue: 'Usage-limited goal' })
+            : goal.status === 'complete'
+              ? t('goal.completedTitle', { defaultValue: 'Completed goal' })
+              : t('goal.limitedTitle', { defaultValue: 'Budget-limited goal' })
+  const hasBlockerNotice = events.some((event) => BLOCKER_EVENT_TYPES.has(event.eventType))
 
   return (
     <>
-      <div className={cn('mt-2 flex flex-col items-end gap-2', className)}>
-        {!expanded ? (
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="h-7 max-w-full gap-1.5 rounded-full px-2.5 text-xs text-muted-foreground hover:text-foreground"
-            aria-expanded={false}
-            title={t('goal.show')}
-            onClick={() => setExpanded(true)}
-          >
-            <Target className="size-3.5 shrink-0 text-primary/80" />
-            <span className="shrink-0 font-medium">{t('goal.title')}</span>
-            <GoalStatusBadge status={goal?.status} />
-            <span className="shrink-0 text-[11px]">{t('goal.show')}</span>
-          </Button>
-        ) : (
-          <div className="w-full rounded-lg border border-border/70 bg-background/80 px-3 py-2 shadow-sm">
-            <div className="flex flex-wrap items-center gap-2">
-              <div className="flex min-w-0 flex-1 items-center gap-2">
-                <Target className="size-3.5 shrink-0 text-primary/80" />
-                <span className="shrink-0 text-xs font-medium">{t('goal.title')}</span>
-                <GoalStatusBadge status={goal?.status} />
-                {goal ? (
-                  <span className="min-w-0 truncate text-xs text-foreground/85">
+      <div className={cn('mx-auto w-full max-w-[820px]', className)}>
+        <div className="rounded-2xl border border-border/70 bg-muted/40 px-3 py-2 shadow-sm backdrop-blur">
+          <div className="flex items-start gap-2">
+            <Target className="mt-0.5 size-3.5 shrink-0 text-primary/80" />
+            <div className="min-w-0 flex-1">
+              <div className="flex min-w-0 items-center gap-2">
+                <span className="shrink-0 text-xs font-semibold text-foreground/90">
+                  {statusTitle}
+                </span>
+                {!expanded && (
+                  <span className="min-w-0 truncate text-xs text-muted-foreground">
                     {goal.objective}
                   </span>
-                ) : (
-                  <span className="text-xs text-muted-foreground">{t('goal.noSessionGoal')}</span>
                 )}
+                <span className="shrink-0 text-[11px] text-muted-foreground">
+                  {formatGoalElapsedSeconds(liveTimeUsedSeconds)}
+                </span>
               </div>
-              <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-                <Clock className="size-3" />
-                <GoalUsageLine goal={goal} />
-              </div>
-              <div className="flex items-center gap-1">
-                {goal?.status === 'active' ? (
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="size-7"
-                    title={t('goal.pause')}
-                    onClick={() => void actions.setGoalStatus('paused')}
-                  >
-                    <Pause className="size-3.5" />
-                  </Button>
-                ) : goal && goal.status !== 'complete' ? (
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="size-7"
-                    title={t('goal.resume')}
-                    onClick={() => void actions.setGoalStatus('active')}
-                  >
-                    <Play className="size-3.5" />
-                  </Button>
-                ) : null}
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-7 gap-1.5 px-2 text-xs"
-                  title={goal ? t('goal.manage') : t('goal.set')}
-                  onClick={actions.openManager}
-                >
-                  {goal ? <Pencil className="size-3.5" /> : <Plus className="size-3.5" />}
-                  {goal ? t('goal.manage') : t('goal.set')}
-                </Button>
+              {expanded && (
+                <p className="mt-1 line-clamp-4 whitespace-pre-wrap break-words text-xs leading-5 text-muted-foreground">
+                  {goal.objective}
+                </p>
+              )}
+            </div>
+            <div className="flex shrink-0 items-center gap-0.5 text-muted-foreground">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-7 rounded-md"
+                title={t('goal.manage')}
+                aria-label={t('goal.manage')}
+                onClick={actions.openManager}
+              >
+                <Pencil className="size-3.5" />
+              </Button>
+              {goal.status === 'active' ? (
                 <Button
                   variant="ghost"
                   size="icon"
-                  className="size-7"
-                  title={t('goal.hide')}
-                  aria-label={t('goal.hide')}
-                  aria-expanded={true}
-                  onClick={() => setExpanded(false)}
+                  className="size-7 rounded-md"
+                  title={t('goal.pause')}
+                  aria-label={t('goal.pause')}
+                  onClick={() => void actions.setGoalStatus('paused')}
                 >
-                  <ChevronUp className="size-3.5" />
+                  <Pause className="size-3.5" />
                 </Button>
-              </div>
+              ) : goal.status !== 'complete' ? (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-7 rounded-md"
+                  title={t('goal.resume')}
+                  aria-label={t('goal.resume')}
+                  onClick={() => void actions.setGoalStatus('active')}
+                >
+                  <Play className="size-3.5" />
+                </Button>
+              ) : null}
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-7 rounded-md text-destructive/80"
+                title={t('goal.clear')}
+                aria-label={t('goal.clear')}
+                onClick={() => void actions.clearGoal()}
+              >
+                <Trash2 className="size-3.5" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-7 rounded-md"
+                title={expanded ? t('goal.hide') : t('goal.show')}
+                aria-label={expanded ? t('goal.hide') : t('goal.show')}
+                aria-expanded={expanded}
+                onClick={() => setExpanded((current) => !current)}
+              >
+                {expanded ? (
+                  <ChevronDown className="size-3.5" />
+                ) : (
+                  <ChevronRight className="size-3.5" />
+                )}
+              </Button>
             </div>
-            {goal ? (
-              <div className="mt-2">
-                <LatestGoalNotice events={events} />
-              </div>
-            ) : null}
           </div>
-        )}
+          {expanded && hasBlockerNotice ? (
+            <div className="mt-2">
+              <LatestGoalNotice events={events} />
+            </div>
+          ) : null}
+        </div>
       </div>
       <GoalManagerDialog goal={goal} events={events} actions={actions} />
     </>
@@ -668,6 +713,12 @@ export function GoalPanelCard({
   const { t } = useTranslation('chat')
   const { goal, events } = useGoalSession(sessionId)
   const actions = useGoalActions(sessionId, goal)
+  const activeRunStartedAt = useGoalStore((s) => {
+    if (!sessionId || !goal) return null
+    const activeRun = s.activeGoalRunsBySession[sessionId]
+    return activeRun?.goalId === goal.goalId ? activeRun.startedAt : null
+  })
+  const liveTimeUsedSeconds = useLiveGoalElapsedSeconds(goal, activeRunStartedAt)
 
   if (!sessionId) return null
 
@@ -687,7 +738,7 @@ export function GoalPanelCard({
               {goal.objective}
             </p>
             <div className="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
-              <GoalUsageLine goal={goal} />
+              <GoalUsageLine goal={goal} timeUsedSeconds={liveTimeUsedSeconds} />
             </div>
             <LatestGoalNotice events={events} />
           </>

@@ -2,7 +2,6 @@ import * as React from 'react'
 import { useTranslation } from 'react-i18next'
 import {
   ChevronDown,
-  ChevronRight,
   CheckCircle2,
   XCircle,
   Copy,
@@ -11,6 +10,27 @@ import {
   FileCode,
   Search,
   FolderTree,
+  SquareTerminal,
+  Trash2,
+  ListTodo,
+  CalendarClock,
+  Bell,
+  Globe2,
+  MousePointerClick,
+  Keyboard,
+  ScrollText,
+  Camera,
+  Monitor,
+  Box,
+  Database,
+  Brain,
+  Target,
+  LogIn,
+  LogOut,
+  HelpCircle,
+  Code2,
+  BookOpen,
+  Wrench,
   Folder,
   File,
   Clock,
@@ -21,11 +41,13 @@ import { AnimatePresence, motion } from 'motion/react'
 import { toast } from 'sonner'
 import { cn } from '@renderer/lib/utils'
 import type { ToolCallStatus } from '@renderer/lib/agent/types'
-import type { ToolResultContent } from '@renderer/lib/api/types'
+import type { ImageBlock, TextBlock, ToolResultContent } from '@renderer/lib/api/types'
 import { decodeStructuredToolResult } from '@renderer/lib/tools/tool-result-format'
 import { MONO_FONT } from '@renderer/lib/constants'
 import { estimateTokens, formatTokens } from '@renderer/lib/format-tokens'
 import { writeSvgStringToClipboard } from '@renderer/lib/utils/image-clipboard'
+import { ipcClient } from '@renderer/lib/ipc/ipc-client'
+import { IPC } from '@renderer/lib/ipc/channels'
 import { useAgentStore } from '@renderer/stores/agent-store'
 import { useUIStore } from '@renderer/stores/ui-store'
 import { Button } from '@renderer/components/ui/button'
@@ -33,6 +55,12 @@ import { LazySyntaxHighlighter } from './LazySyntaxHighlighter'
 import { inputSummary } from './tool-call-summary'
 import { useChatActions } from '@renderer/hooks/use-chat-actions'
 import { LocalTerminal } from '@renderer/components/terminal/LocalTerminal'
+import { ImagePreview } from './ImagePreview'
+import {
+  CompactToolCallHeader,
+  type CompactToolHeaderBadge,
+  type CompactToolHeaderModel
+} from './CompactToolCallHeader'
 
 interface ToolCallCardProps {
   toolUseId?: string
@@ -119,6 +147,11 @@ function outputAsString(output: ToolResultContent | undefined): string | undefin
   return texts.join('\n') || undefined
 }
 
+function getSkillNameFromInput(input: Record<string, unknown>): string {
+  const raw = input.SkillName ?? input.skillName ?? input.name
+  return typeof raw === 'string' ? raw.trim() : ''
+}
+
 function deriveOutputError(output: string | undefined): string | null {
   if (!output) return null
   const trimmed = output.trim()
@@ -133,6 +166,50 @@ function deriveOutputError(output: string | undefined): string | null {
   }
 
   return trimmed
+}
+
+function compactWhitespace(value: string): string {
+  return value.replace(/\s+/g, ' ').trim()
+}
+
+function getStringInput(input: Record<string, unknown>, keys: string[]): string {
+  for (const key of keys) {
+    const value = input[key]
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  return ''
+}
+
+function compactPath(value: string, depth = 2): string {
+  const parts = value.split(/[\\/]/).filter(Boolean)
+  if (parts.length === 0) return value
+  return parts.slice(-depth).join('/')
+}
+
+function pathFileName(value: string): string {
+  return compactPath(value, 1)
+}
+
+function pathParent(value: string, depth = 3): string {
+  const parts = value.split(/[\\/]/).filter(Boolean)
+  if (parts.length <= 1) return ''
+  return parts.slice(Math.max(0, parts.length - depth - 1), -1).join('/')
+}
+
+function stripReadLineNumbers(output: string): string {
+  return /^\s*\d+\t/.test(output)
+    ? output
+        .split('\n')
+        .map((line) => line.replace(/^\s*\d+\t/, ''))
+        .join('\n')
+    : output
+}
+
+function getReadOutputLineCount(output: string | undefined): number | null {
+  if (!output?.trim()) return null
+  const decoded = decodeStructuredToolResult(output)
+  if (decoded && !Array.isArray(decoded) && typeof decoded.error === 'string') return null
+  return stripReadLineNumbers(output).split('\n').length
 }
 
 function isErrorOnlyOutput(output: string | undefined): boolean {
@@ -169,6 +246,13 @@ function hasImageBlocks(output: ToolResultContent | undefined): boolean {
   return Array.isArray(output) && output.some((b) => b.type === 'image')
 }
 
+function getImageBlockPreviewSrc(image: ImageBlock): string {
+  if (image.source.type === 'base64' && image.source.data) {
+    return `data:${image.source.mediaType || 'image/png'};base64,${image.source.data}`
+  }
+  return image.source.url ?? ''
+}
+
 function CopyBtn({ text, title }: { text: string; title?: string }): React.JSX.Element {
   const [copied, setCopied] = React.useState(false)
   return (
@@ -189,28 +273,38 @@ function CopyBtn({ text, title }: { text: string; title?: string }): React.JSX.E
 function ImageOutputBlock({ output }: { output: ToolResultContent }): React.JSX.Element | null {
   const { t } = useTranslation('chat')
   if (!Array.isArray(output)) return null
-  const images = output.filter((b) => b.type === 'image')
+  const images = output.filter((b): b is ImageBlock => b.type === 'image')
+  const notes = output.filter((b): b is TextBlock => b.type === 'text' && b.text.trim().length > 0)
   if (images.length === 0) return null
   return (
-    <div className="space-y-2">
+    <div className="space-y-3">
       {images.map((img, i) => {
-        if (img.type !== 'image') return null
-        const src =
-          img.source.url || `data:${img.source.mediaType || 'image/png'};base64,${img.source.data}`
+        const src = getImageBlockPreviewSrc(img)
+        if (!src && !img.source.filePath) return null
         return (
-          <div key={i}>
+          <div
+            key={`${img.source.filePath ?? img.source.url ?? img.source.data?.slice(0, 48) ?? i}-${i}`}
+          >
             <div className="mb-1 flex items-center gap-1.5">
               <p className="text-xs font-medium text-muted-foreground">{t('toolCall.image')}</p>
               <span className="text-[9px] text-muted-foreground/55">{img.source.mediaType}</span>
             </div>
-            <img
-              src={src}
-              alt="Tool output"
-              className="max-h-72 max-w-full rounded-md border object-contain bg-muted/30 dark:bg-zinc-950"
-            />
+            <ImagePreview src={src} alt="Tool output" filePath={img.source.filePath} />
           </div>
         )
       })}
+      {notes.length > 0 && (
+        <div className="space-y-1">
+          {notes.map((note, index) => (
+            <p
+              key={`${note.text}-${index}`}
+              className="rounded-md bg-muted/20 px-2.5 py-2 text-xs leading-relaxed text-muted-foreground whitespace-pre-wrap break-words"
+            >
+              {note.text}
+            </p>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
@@ -223,7 +317,6 @@ interface WidgetToolPayload {
 }
 
 const WIDGET_BRIDGE_SOURCE = 'open_cowork_widget'
-const DEFAULT_WIDGET_LOADING_MESSAGES = ['Rendering widget...']
 
 function normalizeWidgetPayload(input: Record<string, unknown>): WidgetToolPayload | null {
   const title = typeof input.title === 'string' ? input.title.trim() : ''
@@ -247,7 +340,7 @@ function normalizeWidgetPayload(input: Record<string, unknown>): WidgetToolPaylo
 
   return {
     title: title || 'widget',
-    loadingMessages: loadingMessages.length > 0 ? loadingMessages : DEFAULT_WIDGET_LOADING_MESSAGES,
+    loadingMessages,
     widgetCode,
     kind: explicitKind ?? (/^<svg[\s>]/i.test(widgetCode) ? 'svg' : 'html')
   }
@@ -372,6 +465,7 @@ function buildWidgetDocument(payload: WidgetToolPayload): string {
 }
 
 function SvgWidgetCopyButton({ svg }: { svg: string }): React.JSX.Element {
+  const { t } = useTranslation('chat')
   const [copied, setCopied] = React.useState(false)
   const [copying, setCopying] = React.useState(false)
   const resetTimerRef = React.useRef<number | null>(null)
@@ -391,7 +485,7 @@ function SvgWidgetCopyButton({ svg }: { svg: string }): React.JSX.Element {
       setCopying(true)
       await writeSvgStringToClipboard(svg)
       setCopied(true)
-      toast.success('Image copied to clipboard')
+      toast.success(t('toolCall.widget.imageCopied'))
 
       if (resetTimerRef.current != null) {
         window.clearTimeout(resetTimerRef.current)
@@ -402,11 +496,11 @@ function SvgWidgetCopyButton({ svg }: { svg: string }): React.JSX.Element {
       }, 1500)
     } catch (error) {
       console.error('[Widget] Copy SVG image failed:', error)
-      toast.error('Failed to copy image')
+      toast.error(t('toolCall.widget.copyImageFailed'))
     } finally {
       setCopying(false)
     }
-  }, [copying, svg])
+  }, [copying, svg, t])
 
   return (
     <Button
@@ -416,8 +510,8 @@ function SvgWidgetCopyButton({ svg }: { svg: string }): React.JSX.Element {
       className="absolute right-2 top-2 z-20 size-8 border border-border/60 bg-background/85 text-muted-foreground shadow-sm backdrop-blur hover:bg-background hover:text-foreground disabled:opacity-60"
       onClick={() => void handleCopy()}
       disabled={copying || !svg.trim()}
-      title={copied ? 'Copied' : 'Copy image to clipboard'}
-      aria-label={copied ? 'Copied' : 'Copy image to clipboard'}
+      title={copied ? t('toolCall.widget.copied') : t('toolCall.widget.copyImage')}
+      aria-label={copied ? t('toolCall.widget.copied') : t('toolCall.widget.copyImage')}
     >
       {copied ? <Check className="size-3.5 text-green-500" /> : <Copy className="size-3.5" />}
     </Button>
@@ -431,10 +525,15 @@ export function WidgetOutputBlock({
   input: Record<string, unknown>
   status: ToolCallStatus | 'completed'
 }): React.JSX.Element | null {
+  const { t } = useTranslation('chat')
   const isExecuting = status === 'streaming' || status === 'running'
   const payload = normalizeWidgetPayload(input)
   const hasPayload = Boolean(payload)
-  const loadingMessages = payload?.loadingMessages ?? DEFAULT_WIDGET_LOADING_MESSAGES
+  const defaultLoadingMessage = t('toolCall.widget.rendering')
+  const loadingMessages =
+    payload?.loadingMessages && payload.loadingMessages.length > 0
+      ? payload.loadingMessages
+      : [defaultLoadingMessage]
   const iframeRef = React.useRef<HTMLIFrameElement>(null)
   const resizeRafRef = React.useRef<number | null>(null)
   const lastAppliedHeightRef = React.useRef<number>(0)
@@ -545,7 +644,9 @@ export function WidgetOutputBlock({
       <div className="my-2 rounded-md border border-border/70 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
         <div className="font-medium text-foreground/75">{title}</div>
         <div className="mt-0.5 text-[11px]">
-          Rendering widget{chars !== null ? ` (${chars} chars)` : ''}...
+          {chars !== null
+            ? t('toolCall.widget.renderingWithChars', { chars })
+            : t('toolCall.widget.rendering')}
         </div>
       </div>
     )
@@ -554,7 +655,7 @@ export function WidgetOutputBlock({
   if (!payload) return null
 
   const isPending = isExecuting && !loaded && !payload.widgetCode
-  const loadingMessage = loadingMessages[loadingIndex] ?? DEFAULT_WIDGET_LOADING_MESSAGES[0]
+  const loadingMessage = loadingMessages[loadingIndex] ?? defaultLoadingMessage
 
   return (
     <div className="my-2 space-y-2">
@@ -587,7 +688,7 @@ export function WidgetOutputBlock({
           </div>
         ) : (
           <div className="flex h-48 items-center justify-center text-xs text-muted-foreground/60">
-            Waiting for widget code...
+            {t('toolCall.widget.waitingCode')}
           </div>
         )}
         {isPending && (
@@ -642,14 +743,8 @@ function ReadOutputBlock({
 }): React.JSX.Element {
   const { t } = useTranslation('chat')
   const [expanded, setExpanded] = React.useState(false)
-  // Detect line-number prefixed content (e.g. "1\tcode") from fs:read-file with offset/limit
-  const hasLineNums = /^\d+\t/.test(output)
-  const rawContent = hasLineNums
-    ? output
-        .split('\n')
-        .map((l) => l.replace(/^\d+\t/, ''))
-        .join('\n')
-    : output
+  // fs:read-file may prefix each line as "1\tcode"; the visible preview should stay copyable.
+  const rawContent = stripReadLineNumbers(output)
   const lines = rawContent.split('\n')
   const isLong = lines.length > 40
   const displayed = isLong && !expanded ? lines.slice(0, 40).join('\n') : rawContent
@@ -671,7 +766,7 @@ function ReadOutputBlock({
           {filePath.split(/[\\/]/).slice(-2).join('/')}
         </span>
         <span className="text-[9px] text-muted-foreground/55 font-mono">
-          {lang} · {lines.length} lines
+          {lang} · {t('toolCall.lineCount', { count: lines.length })}
         </span>
         <CopyBtn text={rawContent} />
       </div>
@@ -724,6 +819,54 @@ interface ShellOutputSummary {
   aborted?: boolean
 }
 
+type LiveShellStream = 'stdout' | 'stderr'
+
+interface LiveShellOutputState {
+  execId: string | null
+  stdout: string
+  stderr: string
+}
+
+const LIVE_SHELL_OUTPUT_MAX_CHARS = 12_000
+const ANSI_ESCAPE_RE = new RegExp(`${String.fromCharCode(27)}\\[[0-9;?]*[ -/]*[@-~]`, 'g')
+
+function normalizeLiveShellChunk(chunk: string): string {
+  return chunk.replace(ANSI_ESCAPE_RE, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+}
+
+function clampLiveShellText(text: string): string {
+  if (text.length <= LIVE_SHELL_OUTPUT_MAX_CHARS) return text
+  return text.slice(-LIVE_SHELL_OUTPUT_MAX_CHARS)
+}
+
+function appendLiveShellOutput(
+  state: LiveShellOutputState,
+  execId: string,
+  stream: LiveShellStream,
+  chunk: string
+): LiveShellOutputState {
+  const base =
+    state.execId === execId
+      ? state
+      : {
+          execId,
+          stdout: '',
+          stderr: ''
+        }
+  const text = normalizeLiveShellChunk(chunk)
+  if (!text) return base
+  if (stream === 'stderr') {
+    return {
+      ...base,
+      stderr: clampLiveShellText(`${base.stderr}${text}`)
+    }
+  }
+  return {
+    ...base,
+    stdout: clampLiveShellText(`${base.stdout}${text}`)
+  }
+}
+
 function ShellTextPane({
   title,
   text,
@@ -735,6 +878,7 @@ function ShellTextPane({
   expanded: boolean
   tone?: 'default' | 'error'
 }): React.JSX.Element | null {
+  const { t } = useTranslation('chat')
   if (!text) return null
   const isLong = text.length > 1000
   const displayed = isLong && !expanded ? `...\n${text.slice(-1000)}` : text
@@ -764,7 +908,7 @@ function ShellTextPane({
           {title}
         </span>
         <span className="text-[10px] tabular-nums text-muted-foreground/60">
-          {lineCount(text)} lines
+          {t('toolCall.lineCount', { count: lineCount(text) })}
         </span>
       </div>
       <pre
@@ -796,9 +940,38 @@ function BashOutputBlock({
   const sendBackgroundProcessInput = useAgentStore((s) => s.sendBackgroundProcessInput)
   const stopBackgroundProcess = useAgentStore((s) => s.stopBackgroundProcess)
   const abortForegroundShellExec = useAgentStore((s) => s.abortForegroundShellExec)
-  const hasForegroundExec = useAgentStore((s) =>
-    toolUseId ? Boolean(s.foregroundShellExecByToolUseId[toolUseId]) : false
+  const foregroundExecId = useAgentStore((s) =>
+    toolUseId ? s.foregroundShellExecByToolUseId[toolUseId] : undefined
   )
+  const [liveShellOutput, setLiveShellOutput] = React.useState<LiveShellOutputState>({
+    execId: null,
+    stdout: '',
+    stderr: ''
+  })
+
+  React.useEffect(() => {
+    if (!foregroundExecId || status !== 'running') {
+      setLiveShellOutput((current) =>
+        current.execId === null ? current : { execId: null, stdout: '', stderr: '' }
+      )
+      return
+    }
+
+    setLiveShellOutput({ execId: foregroundExecId, stdout: '', stderr: '' })
+    return ipcClient.on(IPC.SHELL_OUTPUT, (payload) => {
+      const data = payload as { execId?: unknown; chunk?: unknown; stream?: unknown }
+      const chunk = data.chunk
+      if (data.execId !== foregroundExecId || typeof chunk !== 'string') return
+      setLiveShellOutput((current) =>
+        appendLiveShellOutput(
+          current,
+          foregroundExecId,
+          data.stream === 'stderr' ? 'stderr' : 'stdout',
+          chunk
+        )
+      )
+    })
+  }, [foregroundExecId, status])
 
   const parsed = React.useMemo(() => {
     const obj = decodeStructuredToolResult(output)
@@ -827,10 +1000,23 @@ function BashOutputBlock({
   const isProcessRunning = process?.status === 'running'
   const exitCode = process?.exitCode ?? parsed?.exitCode
   const statusText = process ? t(`toolCall.processStatus.${process.status}`) : null
-  const canStopForegroundExec = !process && status === 'running' && !!toolUseId && hasForegroundExec
+  const canStopForegroundExec =
+    !process && status === 'running' && !!toolUseId && !!foregroundExecId
 
-  const stdoutText = process ? process.output : (parsed?.stdout ?? parsed?.output ?? '')
-  const stderrText = process ? '' : (parsed?.stderr ?? '')
+  const liveStdoutText = liveShellOutput.execId === foregroundExecId ? liveShellOutput.stdout : ''
+  const liveStderrText = liveShellOutput.execId === foregroundExecId ? liveShellOutput.stderr : ''
+  const storedStdoutText = parsed?.stdout ?? parsed?.output ?? ''
+  const storedStderrText = parsed?.stderr ?? ''
+  const stdoutText = process
+    ? process.output
+    : liveStdoutText.length > storedStdoutText.length
+      ? liveStdoutText
+      : storedStdoutText
+  const stderrText = process
+    ? ''
+    : liveStderrText.length > storedStderrText.length
+      ? liveStderrText
+      : storedStderrText
   const text = process ? process.output : [stderrText, stdoutText].filter(Boolean).join('\n\n')
   const lineCount = text ? text.split('\n').length : 0
   const tokenCount = React.useMemo(() => estimateTokens(text), [text])
@@ -890,7 +1076,8 @@ function BashOutputBlock({
         {(statusText || exitCode !== undefined || lineCount > 0) && (
           <div className="activity-card-divider flex items-center justify-between gap-2 px-3 py-2">
             <span className="text-[10px] text-muted-foreground">
-              {lineCount} lines · {formatTokens(tokenCount)} tokens
+              {t('toolCall.lineCount', { count: lineCount })} ·{' '}
+              {t('toolCall.tokenCount', { value: formatTokens(tokenCount) })}
             </span>
             <div className="flex items-center gap-2 text-[11px]">
               {statusText && exitCode === undefined ? (
@@ -1006,6 +1193,7 @@ function HighlightText({ text, pattern }: { text: string; pattern?: string }): R
 }
 
 type SearchOutputMeta = {
+  engine?: string
   truncated: boolean
   timedOut: boolean
   limitReason?: string | null
@@ -1023,7 +1211,10 @@ function normalizeSearchMeta(decoded: unknown): SearchOutputMeta {
   if (!isRecord(decoded)) {
     return { truncated: false, timedOut: false, warnings: [] }
   }
+  const rawMeta = isRecord(decoded.meta) ? decoded.meta : null
+  const rawEngine = decoded.engine ?? rawMeta?.engine
   return {
+    engine: typeof rawEngine === 'string' ? rawEngine : undefined,
     truncated: decoded.truncated === true,
     timedOut: decoded.timedOut === true,
     limitReason: typeof decoded.limitReason === 'string' ? decoded.limitReason : null,
@@ -1036,30 +1227,44 @@ function normalizeSearchMeta(decoded: unknown): SearchOutputMeta {
   }
 }
 
-function parseLegacyGrepMatch(
-  value: unknown
-): { file: string; line: number; text: string; kind?: 'match' | 'context' } | null {
+function formatSearchEngineLabel(engine: string | undefined): string | null {
+  if (!engine) return null
+  if (engine === 'git_grep') return 'git grep'
+  if (engine === 'ripgrep') return 'ripgrep'
+  if (engine === 'sidecar') return 'sidecar'
+  if (engine === 'node' || engine === 'node_fallback') return 'Node fallback'
+  if (engine === 'remote_rg') return 'remote rg'
+  if (engine === 'remote_grep') return 'remote grep'
+  return engine
+}
+
+type ParsedGrepEntry = {
+  file: string
+  line?: number
+  column?: number
+  text: string
+  kind?: 'match' | 'context'
+  count?: number
+}
+
+function parseLegacyGrepMatch(value: unknown): ParsedGrepEntry | null {
   if (typeof value !== 'string') return null
-  const match = value.match(/^(.+?)([:-])(\d+)\2(.*)$/)
+  const match = value.match(/^(.+?)([:-])(\d+)\2(?:(\d+)\2)?(.*)$/)
   if (!match) return null
   return {
     file: match[1],
     line: Number(match[3]),
-    text: match[4] ?? '',
+    column: match[4] ? Number(match[4]) : undefined,
+    text: match[5] ?? '',
     kind: match[2] === '-' ? 'context' : 'match'
   }
 }
 
-function parseGrepTextMatches(
-  text: string
-): Array<{ file: string; line: number; text: string; kind?: 'match' | 'context' }> {
+function parseGrepTextMatches(text: string): ParsedGrepEntry[] {
   return text
     .split(/\r?\n/)
     .map((line) => parseLegacyGrepMatch(line))
-    .filter(
-      (item): item is { file: string; line: number; text: string; kind?: 'match' | 'context' } =>
-        !!item
-    )
+    .filter((item): item is ParsedGrepEntry => !!item)
 }
 
 function getSearchVisualState(meta: SearchOutputMeta, matchCount: number): SearchVisualState {
@@ -1111,7 +1316,7 @@ function SearchEmptyState(): React.JSX.Element {
 }
 
 function parseGrepOutput(output: string): {
-  matches: Array<{ file: string; line: number; text: string; kind?: 'match' | 'context' }>
+  matches: ParsedGrepEntry[]
   meta: SearchOutputMeta
   output?: string
 } | null {
@@ -1140,16 +1345,14 @@ function parseGrepOutput(output: string): {
                 ? item.path
                 : null
           const line = typeof item.line === 'number' ? item.line : null
+          const column = typeof item.column === 'number' ? item.column : undefined
           const text = typeof item.text === 'string' ? item.text : ''
-          if (!file || line == null) return null
-          return { file, line, text }
+          const count = typeof item.count === 'number' ? item.count : undefined
+          if (!file) return null
+          if (line == null && count === undefined) return { file, text }
+          return { file, line: line ?? undefined, column, text, count }
         })
-        .filter(
-          (
-            item
-          ): item is { file: string; line: number; text: string; kind?: 'match' | 'context' } =>
-            !!item
-        ),
+        .filter((item): item is ParsedGrepEntry => !!item),
       meta: { truncated: false, timedOut: false, warnings: [] }
     }
   }
@@ -1170,19 +1373,27 @@ function parseGrepOutput(output: string): {
       const file =
         typeof item.file === 'string' ? item.file : typeof item.path === 'string' ? item.path : null
       const line = typeof item.line === 'number' ? item.line : null
+      const column = typeof item.column === 'number' ? item.column : undefined
       const text = typeof item.text === 'string' ? item.text : ''
-      if (!file || line == null) return null
+      const count = typeof item.count === 'number' ? item.count : undefined
+      if (!file) return null
+      if (line == null && count === undefined) {
+        return {
+          file,
+          text,
+          kind: item.kind === 'context' ? 'context' : 'match'
+        }
+      }
       return {
         file,
-        line,
+        line: line ?? undefined,
+        column,
         text,
+        count,
         kind: item.kind === 'context' ? 'context' : 'match'
       }
     })
-    .filter(
-      (item): item is { file: string; line: number; text: string; kind?: 'match' | 'context' } =>
-        !!item
-    )
+    .filter((item): item is ParsedGrepEntry => !!item)
   const outputMatches =
     parsedMatches.length === 0 && rawOutput ? parseGrepTextMatches(rawOutput) : []
 
@@ -1258,10 +1469,13 @@ function GrepOutputBlock({
   // Group by file - must be called before early return to maintain hook order
   const groups = React.useMemo(() => {
     if (!parsed) return []
-    const map = new Map<string, Array<{ line: number; text: string }>>()
+    const map = new Map<
+      string,
+      Array<{ line?: number; column?: number; text: string; count?: number }>
+    >()
     for (const r of parsed.matches) {
       const list = map.get(r.file) ?? []
-      list.push({ line: r.line, text: r.text })
+      list.push({ line: r.line, column: r.column, text: r.text, count: r.count })
       map.set(r.file, list)
     }
     return Array.from(map.entries())
@@ -1275,6 +1489,7 @@ function GrepOutputBlock({
 
   const matchCount = parsed.matches.length
   const visualState = getSearchVisualState(parsed.meta, matchCount)
+  const engineLabel = formatSearchEngineLabel(parsed.meta.engine)
   const copyText = output
 
   return (
@@ -1283,6 +1498,11 @@ function GrepOutputBlock({
         <Search className="size-3 text-amber-500 dark:text-amber-400" />
         <p className="text-xs font-medium text-muted-foreground">{t('toolCall.grepResults')}</p>
         <SearchStateBadge state={visualState} />
+        {engineLabel && (
+          <span className="rounded border border-border/70 bg-muted/40 px-1.5 py-0.5 text-[9px] text-muted-foreground">
+            {engineLabel}
+          </span>
+        )}
         {pattern && (
           <span className="text-[9px] font-mono text-amber-600/70 dark:text-amber-400/50">
             /{pattern}/
@@ -1305,7 +1525,7 @@ function GrepOutputBlock({
             <div key={file} className="px-2 py-1.5">
               <div
                 className="text-sky-600 truncate mb-0.5 cursor-pointer hover:text-sky-700 transition-colors dark:text-blue-400/70 dark:hover:text-blue-300"
-                title={`Click to insert: ${file}`}
+                title={t('toolCall.clickToInsert', { path: file })}
                 onClick={() => {
                   const short = file.split(/[\\/]/).slice(-2).join('/')
                   import('@renderer/stores/ui-store').then(({ useUIStore }) =>
@@ -1317,11 +1537,17 @@ function GrepOutputBlock({
               </div>
               {matches.map((m, i) => (
                 <div key={i} className="flex gap-2 text-foreground/70 dark:text-zinc-400">
-                  <span className="w-5 shrink-0 select-none text-right text-muted-foreground/70 dark:text-zinc-600">
-                    {m.line}
+                  <span className="w-12 shrink-0 select-none text-right text-muted-foreground/70 dark:text-zinc-600">
+                    {typeof m.count === 'number'
+                      ? m.count
+                      : typeof m.line === 'number'
+                        ? m.column
+                          ? `${m.line}:${m.column}`
+                          : m.line
+                        : ''}
                   </span>
                   <span className="truncate">
-                    <HighlightText text={m.text} pattern={pattern} />
+                    {m.text ? <HighlightText text={m.text} pattern={pattern} /> : null}
                   </span>
                 </div>
               ))}
@@ -1367,7 +1593,7 @@ function GlobOutputBlock({ output }: { output: string }): React.JSX.Element {
             <div
               key={i}
               className="truncate cursor-pointer text-sky-600 transition-colors hover:text-sky-700 dark:text-sky-300 dark:hover:text-sky-200"
-              title={`Click to insert: ${p}`}
+              title={t('toolCall.clickToInsert', { path: p })}
               onClick={() => {
                 const short = p.split(/[\\/]/).slice(-2).join('/')
                 import('@renderer/stores/ui-store').then(({ useUIStore }) =>
@@ -1389,14 +1615,29 @@ function GlobOutputBlock({ output }: { output: string }): React.JSX.Element {
   )
 }
 
+type LsEntry = { name: string; type: string; path?: string }
+
+function parseLsEntries(output: string | undefined): LsEntry[] | null {
+  if (!output?.trim()) return null
+  const decoded = decodeStructuredToolResult(output)
+  if (!Array.isArray(decoded)) return null
+  return decoded
+    .map((entry): LsEntry | null => {
+      if (!isRecord(entry) || typeof entry.name !== 'string' || typeof entry.type !== 'string') {
+        return null
+      }
+      return {
+        name: entry.name,
+        type: entry.type,
+        path: typeof entry.path === 'string' ? entry.path : undefined
+      }
+    })
+    .filter((entry): entry is LsEntry => !!entry)
+}
+
 function LSOutputBlock({ output }: { output: string }): React.JSX.Element {
   const { t } = useTranslation('chat')
-  const parsed = React.useMemo(() => {
-    const decoded = decodeStructuredToolResult(output)
-    return Array.isArray(decoded)
-      ? (decoded as Array<{ name: string; type: string; path: string }>)
-      : null
-  }, [output])
+  const parsed = React.useMemo(() => parseLsEntries(output), [output])
   if (!parsed || !Array.isArray(parsed)) return <OutputBlock output={output} />
 
   const dirs = parsed.filter((e) => e.type === 'directory')
@@ -1431,7 +1672,7 @@ function LSOutputBlock({ output }: { output: string }): React.JSX.Element {
           <div
             key={e.name}
             className="flex cursor-pointer items-center gap-1.5 text-foreground/70 transition-colors hover:text-sky-600 dark:text-zinc-400 dark:hover:text-blue-400"
-            title={`Click to insert: ${e.path || e.name}`}
+            title={t('toolCall.clickToInsert', { path: e.path || e.name })}
             onClick={() => {
               const short = (e.path || e.name).split(/[\\/]/).slice(-2).join('/')
               import('@renderer/stores/ui-store').then(({ useUIStore }) =>
@@ -1532,16 +1773,21 @@ function EditPayloadPane({
       : tone === 'new'
         ? 'text-green-400/80'
         : 'text-muted-foreground/60'
+  const { t } = useTranslation('chat')
 
   return (
     <div className={cn('rounded-md border bg-muted/20 dark:bg-zinc-950/70', borderTone)}>
       <div className="flex items-center gap-1.5 border-b border-border/50 px-2.5 py-1.5 text-[10px] uppercase tracking-wide">
         <span className={headerTone}>{label}</span>
-        <span className="text-muted-foreground/55">{lineCount(value)} lines</span>
-        <span className="text-muted-foreground/55">{value.length} chars</span>
+        <span className="text-muted-foreground/55">
+          {t('toolCall.lineCount', { count: lineCount(value) })}
+        </span>
+        <span className="text-muted-foreground/55">
+          {t('toolCall.charCount', { count: value.length })}
+        </span>
         {truncated && (
           <span className="rounded bg-muted px-1 py-0.5 text-[9px] normal-case text-muted-foreground/60">
-            preview
+            {t('toolCall.preview')}
           </span>
         )}
         <CopyBtn text={value} />
@@ -1638,6 +1884,7 @@ function SubmitReportInputBlock({
   input: Record<string, unknown>
   status?: ToolCallCardProps['status']
 }): React.JSX.Element {
+  const { t } = useTranslation('chat')
   const report = getSubmitReportText(input)
   const isLive = status === 'streaming' || status === 'running'
   const isComplete = status === 'completed'
@@ -1662,17 +1909,19 @@ function SubmitReportInputBlock({
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
               <span className="text-[12px] font-semibold text-foreground/90">
-                {isComplete ? 'Report submitted' : 'Submitting report'}
+                {isComplete
+                  ? t('toolCall.submitReport.submitted')
+                  : t('toolCall.submitReport.submitting')}
               </span>
               {isLive ? (
                 <span className="inline-flex items-center gap-1 rounded-full border border-violet-400/25 bg-violet-400/10 px-1.5 py-0.5 text-[9px] text-violet-200">
                   <span className="size-1.5 rounded-full bg-violet-300 animate-pulse" />
-                  live
+                  {t('toolCall.submitReport.live')}
                 </span>
               ) : null}
               {report.truncated ? (
                 <span className="rounded-full border border-border/60 bg-background/60 px-1.5 py-0.5 text-[9px] text-muted-foreground/70">
-                  preview
+                  {t('toolCall.submitReport.preview')}
                 </span>
               ) : null}
             </div>
@@ -1683,14 +1932,14 @@ function SubmitReportInputBlock({
               />
             </div>
           </div>
-          {copyText ? <CopyBtn text={copyText} title="Copy report" /> : null}
+          {copyText ? <CopyBtn text={copyText} title={t('toolCall.submitReport.copy')} /> : null}
         </div>
 
         <div className="mt-2 grid grid-cols-3 gap-1.5">
           {[
-            ['chars', report.chars.toLocaleString()],
-            ['lines', report.lines.toLocaleString()],
-            ['blocks', blockCount.toLocaleString()]
+            [t('toolCall.submitReport.chars'), report.chars.toLocaleString()],
+            [t('toolCall.submitReport.lines'), report.lines.toLocaleString()],
+            [t('toolCall.submitReport.blocks'), blockCount.toLocaleString()]
           ].map(([label, value]) => (
             <div
               key={label}
@@ -1728,14 +1977,14 @@ function SubmitReportInputBlock({
             ))}
             {(report.truncated || report.text.split('\n').length > visibleLines.length) && (
               <div className="pt-1 text-[10px] text-muted-foreground/60">
-                Preview continues as the report streams in...
+                {t('toolCall.submitReport.previewContinues')}
               </div>
             )}
           </div>
         ) : (
           <div className="flex items-center gap-2 text-[11px] text-muted-foreground/65">
             <span className="size-1.5 rounded-full bg-violet-300 animate-pulse" />
-            Waiting for report text...
+            {t('toolCall.submitReport.waiting')}
           </div>
         )}
       </div>
@@ -1846,11 +2095,23 @@ function StructuredInput({
 }): React.JSX.Element {
   const { t } = useTranslation('chat')
 
-  // Bash: command in terminal-style block + description/timeout as fields
-  if (name === 'Bash') {
-    const command = String(input.command ?? '')
+  if (name === 'Skill') {
+    return <></>
+  }
+
+  // Shell-like tools: command in terminal-style block + compact execution metadata.
+  if (COMMAND_TOOL_NAMES.has(name)) {
+    const command =
+      typeof input.command === 'string'
+        ? input.command
+        : typeof input.command_preview === 'string'
+          ? input.command_preview
+          : ''
     const description = input.description ? String(input.description) : null
     const timeout = input.timeout ? String(input.timeout) : null
+    const commandChars = typeof input.command_chars === 'number' ? input.command_chars : null
+    const commandLines = typeof input.command_lines === 'number' ? input.command_lines : null
+    const commandTruncated = input.command_truncated === true
     return (
       <div className="space-y-0.5">
         <div className="flex items-start gap-1.5 text-xs">
@@ -1862,11 +2123,32 @@ function StructuredInput({
             {command}
           </span>
         </div>
-        {(description || timeout) && (
+        {(description ||
+          timeout ||
+          commandChars !== null ||
+          commandLines !== null ||
+          commandTruncated) && (
           <div className="flex flex-wrap items-center gap-2 pl-[18px]">
             {description && <p className="text-[10px] text-muted-foreground/60">{description}</p>}
+            {commandLines !== null && (
+              <span className="text-[10px] text-muted-foreground/55">
+                {t('toolCall.lineCount', { count: commandLines })}
+              </span>
+            )}
+            {commandChars !== null && (
+              <span className="text-[10px] text-muted-foreground/55">
+                {t('toolCall.charCount', { count: commandChars })}
+              </span>
+            )}
+            {commandTruncated && (
+              <span className="rounded border border-amber-500/20 bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-medium text-amber-600 dark:text-amber-300">
+                {t('toolCall.preview')}
+              </span>
+            )}
             {timeout && (
-              <span className="text-[10px] text-muted-foreground/55">timeout: {timeout}ms</span>
+              <span className="text-[10px] text-muted-foreground/55">
+                {t('toolCall.timeoutMs', { value: timeout })}
+              </span>
             )}
           </div>
         )}
@@ -1950,15 +2232,17 @@ function StructuredInput({
           oldCharTotal !== null ||
           newCharTotal !== null) && (
           <div className="pl-[18px] text-[10px] text-muted-foreground/55">
-            {oldLineTotal !== null ? `-${oldLineTotal} lines` : '-? lines'}
-            {' / '}
-            {newLineTotal !== null ? `+${newLineTotal} lines` : '+? lines'}
+            {t('toolCall.lineDelta', {
+              old: oldLineTotal !== null ? oldLineTotal : '?',
+              next: newLineTotal !== null ? newLineTotal : '?'
+            })}
             {(oldCharTotal !== null || newCharTotal !== null) && (
               <>
                 {' · '}
-                {oldCharTotal !== null ? `-${oldCharTotal} chars` : '-? chars'}
-                {' / '}
-                {newCharTotal !== null ? `+${newCharTotal} chars` : '+? chars'}
+                {t('toolCall.charDelta', {
+                  old: oldCharTotal !== null ? oldCharTotal : '?',
+                  next: newCharTotal !== null ? newCharTotal : '?'
+                })}
               </>
             )}
           </div>
@@ -2019,9 +2303,9 @@ function StructuredInput({
           )}
           {(lineTotal !== null || charTotal !== null) && (
             <div className="pl-[18px] text-[10px] text-muted-foreground/55">
-              {lineTotal !== null ? `${lineTotal} lines` : ''}
+              {lineTotal !== null ? t('toolCall.lineCount', { count: lineTotal }) : ''}
               {lineTotal !== null && charTotal !== null ? ' · ' : ''}
-              {charTotal !== null ? `${charTotal} chars` : ''}
+              {charTotal !== null ? t('toolCall.charCount', { count: charTotal }) : ''}
             </div>
           )}
           {visiblePreview && (
@@ -2125,7 +2409,7 @@ function StructuredInput({
                 className="text-[10px] text-muted-foreground/55 font-mono"
                 style={{ fontFamily: MONO_FONT }}
               >
-                in {path}
+                {t('toolCall.searchInPath', { path })}
               </span>
             )}
             {include && (
@@ -2133,7 +2417,7 @@ function StructuredInput({
                 className="text-[10px] text-muted-foreground/55 font-mono"
                 style={{ fontFamily: MONO_FONT }}
               >
-                include: {include}
+                {t('toolCall.includeGlob', { include })}
               </span>
             )}
           </div>
@@ -2360,55 +2644,461 @@ export function ToolStatusDot({
   }
 }
 
-function compactToolPrimaryText(
-  name: string,
+const COMMAND_TOOL_NAMES = new Set(['Bash', 'PowerShell'])
+const COMPACT_BUILTIN_TOOL_NAMES = new Set([
+  'Agent',
+  'AskUserQuestion',
+  'Bash',
+  'BrowserClick',
+  'BrowserGetContent',
+  'BrowserNavigate',
+  'BrowserScreenshot',
+  'BrowserScroll',
+  'BrowserSnapshot',
+  'BrowserType',
+  'CronAdd',
+  'CronCreate',
+  'CronDelete',
+  'CronList',
+  'CronRemove',
+  'CronUpdate',
+  'Delete',
+  'Edit',
+  'EnterPlanMode',
+  'ExitPlanMode',
+  'Glob',
+  'Grep',
+  'LS',
+  'ListMcpResourcesTool',
+  'MemoryList',
+  'MemoryRead',
+  'MemorySearch',
+  'Monitor',
+  'MultiEdit',
+  'NotebookEdit',
+  'Notify',
+  'PowerShell',
+  'Read',
+  'ReadMcpResourceTool',
+  'SavePlan',
+  'TaskCreate',
+  'TaskGet',
+  'TaskList',
+  'TaskUpdate',
+  'TodoWrite',
+  'ToolSearch',
+  'WebFetch',
+  'WebSearch',
+  'WikiGetDocumentByName',
+  'WikiListDocuments',
+  'Write',
+  'create_goal',
+  'get_goal',
+  'update_goal',
+  'visualize_show_widget'
+])
+
+function compactStatusLabel(
+  status: ToolCallCardProps['status'],
+  t: (key: string, options?: Record<string, unknown>) => string
+): string | null {
+  if (status === 'streaming') return t('toolCall.receivingArgs')
+  if (status === 'running') return t('toolCall.executing')
+  if (status === 'pending_approval') return t('permission.title')
+  if (status === 'error') return t('error.label')
+  return null
+}
+
+function lineRangeBadge(
   input: Record<string, unknown>,
-  fallback?: string
+  t: (key: string, options?: Record<string, unknown>) => string
+): string | null {
+  const rawOffset = input.offset
+  const rawLimit = input.limit
+  const offset = typeof rawOffset === 'number' && Number.isFinite(rawOffset) ? rawOffset : null
+  const limit = typeof rawLimit === 'number' && Number.isFinite(rawLimit) ? rawLimit : null
+  if (offset === null) return null
+  if (limit === null || limit <= 0) return t('toolCall.lineRangeFrom', { start: offset })
+  return t('toolCall.lineRange', { start: offset, end: offset + limit - 1 })
+}
+
+function searchScopeText(
+  input: Record<string, unknown>,
+  t: (key: string, options?: Record<string, unknown>) => string
 ): string {
-  if (name === 'Bash') {
-    const command =
-      typeof input.command === 'string' ? input.command.replace(/\s+/g, ' ').trim() : ''
-    return command || fallback || ''
+  const path = getStringInput(input, ['path'])
+  const include = getStringInput(input, ['include'])
+  const exclude = getStringInput(input, ['exclude'])
+  return [
+    path ? t('toolCall.searchInPath', { path: compactPath(path, 3) }) : null,
+    include ? t('toolCall.includeGlob', { include }) : null,
+    exclude ? t('toolCall.excludeGlob', { exclude }) : null
+  ]
+    .filter((item): item is string => !!item)
+    .join(' · ')
+}
+
+function bashOutputStats(outputText: string | undefined): {
+  lines: number | null
+  exitCode: number | null
+} {
+  if (!outputText?.trim()) return { lines: null, exitCode: null }
+  const decoded = decodeStructuredToolResult(outputText)
+  if (decoded && !Array.isArray(decoded)) {
+    const stdout =
+      typeof decoded.stdout === 'string'
+        ? decoded.stdout
+        : typeof decoded.output === 'string'
+          ? decoded.output
+          : ''
+    const stderr = typeof decoded.stderr === 'string' ? decoded.stderr : ''
+    const text = [stderr, stdout].filter(Boolean).join('\n\n')
+    return {
+      lines: text ? lineCount(text) : null,
+      exitCode: typeof decoded.exitCode === 'number' ? decoded.exitCode : null
+    }
+  }
+  return { lines: lineCount(outputText), exitCode: null }
+}
+
+function firstStringInput(input: Record<string, unknown>, keys: string[]): string {
+  for (const key of keys) {
+    const value = input[key]
+    if (typeof value === 'string' && value.trim()) return value.trim()
+    if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  }
+  return ''
+}
+
+function fileToolPath(input: Record<string, unknown>): string {
+  return firstStringInput(input, [
+    'file_path',
+    'path',
+    'notebook_path',
+    'notebook',
+    'targetPath',
+    'target_path'
+  ])
+}
+
+function compactToolPathSummary(value: string): {
+  primary: string
+  secondary?: string
+} {
+  return {
+    primary: pathFileName(value),
+    secondary: value ? pathParent(value) || compactPath(value, 2) : undefined
+  }
+}
+
+function genericCompactToolHeaderModel({
+  icon,
+  primary,
+  secondary,
+  displayName
+}: {
+  icon: React.ReactNode
+  primary?: string
+  secondary?: string
+  displayName: string
+}): CompactToolHeaderModel {
+  return {
+    icon,
+    primary: primary || displayName,
+    secondary,
+    badges: [],
+    title: [primary, secondary].filter(Boolean).join('\n') || displayName
+  }
+}
+
+function getBuiltinToolIcon(name: string): React.ReactNode {
+  if (['Write', 'SavePlan'].includes(name)) return <FileCode className="size-3.5" />
+  if (['Edit', 'MultiEdit', 'NotebookEdit'].includes(name)) return <FileCode className="size-3.5" />
+  if (name === 'Delete') return <Trash2 className="size-3.5" />
+  if (name.startsWith('Task') || name === 'TodoWrite') return <ListTodo className="size-3.5" />
+  if (name.startsWith('Cron')) return <CalendarClock className="size-3.5" />
+  if (name === 'Notify') return <Bell className="size-3.5" />
+  if (name === 'AskUserQuestion') return <HelpCircle className="size-3.5" />
+  if (name === 'visualize_show_widget') return <Code2 className="size-3.5" />
+  if (name === 'WebSearch' || name === 'WebFetch' || name.startsWith('Browser')) {
+    if (name === 'BrowserClick') return <MousePointerClick className="size-3.5" />
+    if (name === 'BrowserType') return <Keyboard className="size-3.5" />
+    if (name === 'BrowserScroll') return <ScrollText className="size-3.5" />
+    if (name === 'BrowserScreenshot') return <Camera className="size-3.5" />
+    if (name === 'BrowserSnapshot') return <Monitor className="size-3.5" />
+    return <Globe2 className="size-3.5" />
+  }
+  if (name.includes('McpResource')) return <Database className="size-3.5" />
+  if (name === 'ToolSearch') return <Wrench className="size-3.5" />
+  if (name === 'Agent') return <Brain className="size-3.5" />
+  if (name === 'Monitor') return <SquareTerminal className="size-3.5" />
+  if (name === 'EnterPlanMode') return <LogIn className="size-3.5" />
+  if (name === 'ExitPlanMode') return <LogOut className="size-3.5" />
+  if (name.endsWith('goal')) return <Target className="size-3.5" />
+  if (name.startsWith('Memory')) return <Database className="size-3.5" />
+  if (name.startsWith('Wiki')) return <BookOpen className="size-3.5" />
+  return <Box className="size-3.5" />
+}
+
+function buildCompactToolHeaderModel({
+  name,
+  input,
+  output,
+  outputText,
+  displayName,
+  summary,
+  t
+}: {
+  name: string
+  input: Record<string, unknown>
+  output?: ToolResultContent
+  outputText?: string
+  displayName: string
+  summary?: string | null
+  t: (key: string, options?: Record<string, unknown>) => string
+}): CompactToolHeaderModel {
+  if (COMMAND_TOOL_NAMES.has(name)) {
+    const command = compactWhitespace(getStringInput(input, ['command', 'command_preview']))
+    const description = getStringInput(input, ['description'])
+    const stats = bashOutputStats(outputText)
+    const badges: CompactToolHeaderBadge[] = []
+    if (stats.exitCode !== null)
+      badges.push({ label: t('toolCall.exitCode', { code: stats.exitCode }) })
+    if (stats.lines !== null) {
+      badges.push({ label: t('toolCall.outputLineCount', { count: stats.lines }), tone: 'blue' })
+    }
+    const commandLines = typeof input.command_lines === 'number' ? input.command_lines : null
+    if (commandLines !== null && stats.lines === null) {
+      badges.push({ label: t('toolCall.lineCount', { count: commandLines }), tone: 'blue' })
+    }
+    return {
+      icon: <SquareTerminal className="size-3.5" />,
+      primary: command || summary || t('toolCall.receivingArgs'),
+      secondary: description || undefined,
+      badges,
+      title: command || summary || displayName
+    }
+  }
+
+  if (name === 'Read') {
+    const filePath = getStringInput(input, ['file_path', 'path'])
+    const lines = getReadOutputLineCount(outputText)
+    const range = lineRangeBadge(input, t)
+    const badges: CompactToolHeaderBadge[] = []
+    if (lines !== null)
+      badges.push({ label: t('toolCall.lineCount', { count: lines }), tone: 'blue' })
+    if (range) badges.push({ label: range })
+    if (hasImageBlocks(output)) badges.push({ label: t('toolCall.imageFile'), tone: 'blue' })
+    return {
+      icon: <FileCode className="size-3.5" />,
+      primary: pathFileName(filePath) || summary || t('toolCall.receivingArgs'),
+      secondary: filePath ? pathParent(filePath) || compactPath(filePath, 2) : undefined,
+      badges,
+      title: filePath || summary || displayName
+    }
+  }
+
+  if (['Write', 'Edit', 'Delete', 'MultiEdit', 'NotebookEdit', 'SavePlan'].includes(name)) {
+    const targetPath = fileToolPath(input)
+    const pathSummary = compactToolPathSummary(targetPath)
+    const badges: CompactToolHeaderBadge[] = []
+    const lineTotal =
+      typeof input.content_lines === 'number'
+        ? input.content_lines
+        : typeof input.old_string_lines === 'number' || typeof input.new_string_lines === 'number'
+          ? Math.max(
+              typeof input.old_string_lines === 'number' ? input.old_string_lines : 0,
+              typeof input.new_string_lines === 'number' ? input.new_string_lines : 0
+            )
+          : null
+    const editCount = Array.isArray(input.edits) ? input.edits.length : null
+    if (editCount !== null) badges.push({ label: t('toolCall.pathCount', { count: editCount }) })
+    if (lineTotal !== null) {
+      badges.push({ label: t('toolCall.lineCount', { count: lineTotal }), tone: 'blue' })
+    }
+    if (
+      input.content_truncated === true ||
+      input.old_string_truncated === true ||
+      input.new_string_truncated === true
+    ) {
+      badges.push({ label: t('toolCall.preview'), tone: 'amber' })
+    }
+    return {
+      icon: getBuiltinToolIcon(name),
+      primary: pathSummary.primary || summary || displayName,
+      secondary: pathSummary.secondary,
+      badges,
+      title: targetPath || summary || displayName
+    }
+  }
+
+  if (name === 'Grep') {
+    const pattern = getStringInput(input, ['pattern'])
+    const parsed = outputText ? parseGrepOutput(outputText) : null
+    const matchCount = parsed?.matches.length ?? null
+    const fileCount = parsed ? new Set(parsed.matches.map((match) => match.file)).size : null
+    const badges: CompactToolHeaderBadge[] = []
+    if (matchCount !== null && fileCount !== null) {
+      badges.push({
+        label: t('toolCall.matchesInFiles', { matches: matchCount, files: fileCount }),
+        tone: matchCount > 0 ? 'amber' : 'default'
+      })
+    }
+    return {
+      icon: <Search className="size-3.5" />,
+      primary: pattern ? `/${pattern}/` : summary || t('toolCall.receivingArgs'),
+      secondary: searchScopeText(input, t) || undefined,
+      badges,
+      statusBadge: parsed ? (
+        <SearchStateBadge state={getSearchVisualState(parsed.meta, parsed.matches.length)} />
+      ) : undefined,
+      title: [pattern ? `/${pattern}/` : '', searchScopeText(input, t)].filter(Boolean).join('\n')
+    }
   }
 
   if (name === 'Glob') {
-    const pattern = typeof input.pattern === 'string' ? input.pattern.trim() : ''
-    const path = typeof input.path === 'string' ? input.path.trim() : ''
-    return pattern || path || fallback || ''
+    const pattern = getStringInput(input, ['pattern'])
+    const path = getStringInput(input, ['path'])
+    const parsed = outputText ? parseGlobOutput(outputText) : null
+    const badges: CompactToolHeaderBadge[] = []
+    if (parsed) {
+      badges.push({
+        label: t('toolCall.pathCount', { count: parsed.matches.length }),
+        tone: parsed.matches.length > 0 ? 'green' : 'default'
+      })
+    }
+    return {
+      icon: <Search className="size-3.5" />,
+      primary: pattern || summary || t('toolCall.receivingArgs'),
+      secondary: path ? t('toolCall.searchInPath', { path: compactPath(path, 3) }) : undefined,
+      badges,
+      statusBadge: parsed ? (
+        <SearchStateBadge state={getSearchVisualState(parsed.meta, parsed.matches.length)} />
+      ) : undefined,
+      title: [pattern, path].filter(Boolean).join('\n') || summary || displayName
+    }
   }
 
-  return fallback || ''
-}
-
-function compactToolTitle(name: string, input: Record<string, unknown>, fallback?: string): string {
-  if (name === 'Bash') {
-    const command = typeof input.command === 'string' ? input.command : ''
-    return command || fallback || name
+  if (name === 'LS') {
+    const path = getStringInput(input, ['path'])
+    const parsed = parseLsEntries(outputText)
+    const dirs = parsed?.filter((entry) => entry.type === 'directory').length ?? null
+    const files = parsed?.filter((entry) => entry.type === 'file').length ?? null
+    const badges: CompactToolHeaderBadge[] = []
+    if (dirs !== null && files !== null) {
+      badges.push({ label: t('toolCall.foldersAndFiles', { folders: dirs, files }) })
+    }
+    return {
+      icon: <FolderTree className="size-3.5" />,
+      primary: compactPath(path, 3) || summary || t('toolCall.receivingArgs'),
+      secondary: path && compactPath(path, 3) !== path ? path : undefined,
+      badges,
+      title: path || summary || displayName
+    }
   }
 
-  if (name === 'Glob') {
-    const pattern = typeof input.pattern === 'string' ? input.pattern : ''
-    const path = typeof input.path === 'string' ? input.path : ''
-    return [pattern, path].filter(Boolean).join('\n') || fallback || name
+  if (name.startsWith('Task') || name === 'TodoWrite') {
+    const taskTitle = firstStringInput(input, ['title', 'subject', 'name', 'content'])
+    const taskId = firstStringInput(input, ['taskId', 'task_id', 'id'])
+    const taskStatus = firstStringInput(input, ['status', 'state'])
+    return genericCompactToolHeaderModel({
+      icon: getBuiltinToolIcon(name),
+      primary: taskTitle || (taskId ? `#${taskId}` : summary || displayName),
+      secondary: taskStatus || undefined,
+      displayName
+    })
   }
 
-  return fallback || name
-}
+  if (name.startsWith('Cron')) {
+    const cronName = firstStringInput(input, ['name', 'title', 'id', 'cronId'])
+    const schedule = firstStringInput(input, ['expr', 'cron', 'schedule', 'rrule'])
+    return genericCompactToolHeaderModel({
+      icon: getBuiltinToolIcon(name),
+      primary: cronName || summary || displayName,
+      secondary: schedule || undefined,
+      displayName
+    })
+  }
 
-function compactToolPrefixKey(name: string): string | null {
-  switch (name) {
-    case 'Bash':
-      return 'toolCall.compactPrefix.bash'
-    case 'Read':
-      return 'toolCall.compactPrefix.read'
-    case 'Grep':
-      return 'toolCall.compactPrefix.grep'
-    case 'Glob':
-      return 'toolCall.compactPrefix.glob'
-    case 'LS':
-      return 'toolCall.compactPrefix.ls'
-    default:
-      return null
+  if (name === 'AskUserQuestion') {
+    const questions = Array.isArray(input.questions) ? input.questions.length : null
+    return {
+      icon: getBuiltinToolIcon(name),
+      primary: summary || displayName,
+      secondary: questions ? t('toolCall.pathCount', { count: questions }) : undefined,
+      badges: [],
+      title: summary || displayName
+    }
+  }
+
+  if (name === 'visualize_show_widget') {
+    const title = firstStringInput(input, ['title', 'name'])
+    const chars =
+      typeof input.widget_code_chars === 'number'
+        ? input.widget_code_chars
+        : typeof input.widget_code === 'string'
+          ? input.widget_code.length
+          : null
+    return {
+      icon: getBuiltinToolIcon(name),
+      primary: title || summary || displayName,
+      badges:
+        chars !== null ? [{ label: t('toolCall.charCount', { count: chars }), tone: 'blue' }] : [],
+      title: title || summary || displayName
+    }
+  }
+
+  if (name.startsWith('Browser') || name === 'WebFetch' || name === 'WebSearch') {
+    const target = firstStringInput(input, ['url', 'query', 'selector', 'text'])
+    return genericCompactToolHeaderModel({
+      icon: getBuiltinToolIcon(name),
+      primary: target || summary || displayName,
+      displayName
+    })
+  }
+
+  if (
+    [
+      'Notify',
+      'Agent',
+      'ListMcpResourcesTool',
+      'ReadMcpResourceTool',
+      'ToolSearch',
+      'Monitor',
+      'EnterPlanMode',
+      'ExitPlanMode',
+      'get_goal',
+      'create_goal',
+      'update_goal',
+      'MemoryList',
+      'MemoryRead',
+      'MemorySearch',
+      'WikiListDocuments',
+      'WikiGetDocumentByName'
+    ].includes(name)
+  ) {
+    const primary = firstStringInput(input, [
+      'message',
+      'objective',
+      'query',
+      'name',
+      'uri',
+      'path',
+      'command',
+      'reason'
+    ])
+    return genericCompactToolHeaderModel({
+      icon: getBuiltinToolIcon(name),
+      primary: primary || summary || displayName,
+      displayName
+    })
+  }
+
+  return {
+    icon: getBuiltinToolIcon(name),
+    primary: summary || displayName,
+    badges: [],
+    title: summary || displayName
   }
 }
 
@@ -2435,14 +3125,20 @@ function ToolCallCardInner({
   const { t } = useTranslation('chat')
   const isProcessing = status === 'streaming' || status === 'running'
   const isActive = isProcessing || status === 'pending_approval'
-  const [open, setOpen] = React.useState(isActive)
+  const hasVisualOutput = hasImageBlocks(output)
+  const [open, setOpen] = React.useState(isActive || hasVisualOutput)
   const prevIsActiveRef = React.useRef(isActive)
   React.useEffect(() => {
+    if (hasVisualOutput) {
+      setOpen(true)
+      prevIsActiveRef.current = isActive
+      return
+    }
     if (prevIsActiveRef.current && !isActive) {
       setOpen(false)
     }
     prevIsActiveRef.current = isActive
-  }, [isActive])
+  }, [hasVisualOutput, isActive])
   const outputText = React.useMemo(() => outputAsString(output), [output])
   const summary = React.useMemo(
     () => inputSummary(name, input, outputText),
@@ -2483,26 +3179,63 @@ function ToolCallCardInner({
     !!(input.content || input.content_preview)
   const elapsed =
     startedAt && completedAt ? ((completedAt - startedAt) / 1000).toFixed(1) + 's' : null
-  const useCompactToolHeader = !isActive && ['Bash', 'Read', 'Grep', 'Glob', 'LS'].includes(name)
-  const compactPrimary = React.useMemo(
-    () => compactToolPrimaryText(name, input, summary ?? undefined),
-    [input, name, summary]
+  const useCompactToolHeader = COMPACT_BUILTIN_TOOL_NAMES.has(name)
+  const compactHeader = React.useMemo(
+    () =>
+      buildCompactToolHeaderModel({
+        name,
+        input,
+        output,
+        outputText,
+        displayName,
+        summary,
+        t
+      }),
+    [displayName, input, name, output, outputText, summary, t]
   )
-  const compactTitle = React.useMemo(
-    () => compactToolTitle(name, input, summary ?? undefined),
-    [input, name, summary]
-  )
-  const compactPrefixKey = compactToolPrefixKey(name)
+  const compactStatus = compactStatusLabel(status, t)
   const compactHeaderError = Boolean(displayError) || (status === 'error' && !!outputError)
-  const settledBashHasFocusedOutput =
+  const bashHasFocusedOutput =
     shouldRenderOutputPanels &&
     name === 'Bash' &&
-    !isActive &&
-    Boolean(outputText || getBashInputTerminalId(input))
+    Boolean(status === 'running' || outputText || getBashInputTerminalId(input))
   const hasFocusedOutput =
     shouldRenderOutputPanels &&
-    (hasFocusedExpandedOutput(name, output, outputText) || settledBashHasFocusedOutput)
+    (hasFocusedExpandedOutput(name, output, outputText) || bashHasFocusedOutput)
   const shouldShowStructuredInput = !(showSettledWriteContent || hasFocusedOutput)
+
+  if (name === 'Skill') {
+    const skillName = getSkillNameFromInput(input)
+    return (
+      <div className="my-2 min-w-0 overflow-hidden">
+        <div className="inline-flex max-w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-xs text-muted-foreground">
+          <ToolStatusDot status={status} />
+          <FileText className="size-3 shrink-0 text-emerald-500 dark:text-emerald-400" />
+          <span className="shrink-0 font-medium text-foreground/80">
+            {isProcessing ? t('toolCall.skillLoading') : t('toolCall.skillUsed')}
+          </span>
+          {skillName ? (
+            <span
+              className="min-w-0 truncate rounded-md border border-emerald-500/15 bg-emerald-500/10 px-1.5 py-0.5 font-mono text-[11px] text-emerald-700 dark:text-emerald-300"
+              title={skillName}
+            >
+              {skillName}
+            </span>
+          ) : null}
+          {elapsed ? (
+            <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground/55">
+              {elapsed}
+            </span>
+          ) : null}
+        </div>
+        {displayError ? (
+          <div className="mt-1.5 max-w-xl rounded-md border border-destructive/20 bg-destructive/[0.035] px-3 py-2 text-xs text-destructive">
+            {displayError}
+          </div>
+        ) : null}
+      </div>
+    )
+  }
 
   return (
     <div
@@ -2520,39 +3253,15 @@ function ToolCallCardInner({
         )}
       >
         {useCompactToolHeader ? (
-          <div
-            className="flex items-center gap-1.5 rounded-md px-1.5 py-1 text-muted-foreground transition-colors group-hover:text-foreground"
-            title={compactTitle}
-          >
-            {compactPrefixKey ? (
-              <span className="shrink-0 text-[11px] font-medium text-muted-foreground/85">
-                {t(compactPrefixKey)}
-              </span>
-            ) : (
-              <span className="shrink-0 text-[10px] font-medium text-muted-foreground/85">
-                {displayName}
-              </span>
-            )}
-            <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-foreground/80 transition-colors group-hover:text-foreground">
-              {compactPrimary || t('toolCall.receivingArgs')}
-            </span>
-            {compactHeaderError ? (
-              <span
-                className="size-1.5 shrink-0 rounded-full bg-red-500 dark:bg-red-400"
-                title={displayError ?? outputError ?? t('error.label')}
-              />
-            ) : null}
-            {elapsed && (
-              <span className="shrink-0 text-[9px] tabular-nums text-muted-foreground/60">
-                {elapsed}
-              </span>
-            )}
-            {open ? (
-              <ChevronDown className="size-3 shrink-0 text-muted-foreground/60" />
-            ) : (
-              <ChevronRight className="size-3 shrink-0 text-muted-foreground/60" />
-            )}
-          </div>
+          <CompactToolCallHeader
+            model={compactHeader}
+            status={status}
+            statusLabel={compactStatus}
+            hasError={compactHeaderError}
+            errorTitle={displayError ?? outputError ?? t('error.label')}
+            elapsed={elapsed}
+            open={open}
+          />
         ) : (
           <>
             <ToolStatusDot status={status} />
@@ -2567,7 +3276,7 @@ function ToolCallCardInner({
                       .slice(-2)
                       .join('/')}
                     {typeof input.content_lines === 'number'
-                      ? ` (${input.content_lines} lines)`
+                      ? ` (${t('toolCall.lineCount', { count: input.content_lines })})`
                       : ''}
                   </span>
                 ) : name === 'Edit' && (input.file_path || input.path) ? (
@@ -2580,7 +3289,9 @@ function ToolCallCardInner({
                   </span>
                 ) : (
                   <span className="text-violet-500/80 text-[10px] animate-pulse dark:text-violet-400/70">
-                    {t('toolCall.receivingArgs')}
+                    {status === 'streaming'
+                      ? t('toolCall.receivingArgs')
+                      : headerSummary || t('toolCall.executing')}
                   </span>
                 )}
               </>
@@ -2626,7 +3337,7 @@ function ToolCallCardInner({
                 <div className="space-y-2">
                   <StructuredInput name={name} input={input} status={status} />
                   <div className="rounded-md border border-border/70 bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground/70">
-                    Detailed Write/Edit content stays hidden until the tool finishes.
+                    {t('toolCall.hiddenLivePayload')}
                   </div>
                 </div>
               ) : (
@@ -2663,11 +3374,13 @@ function ToolCallCardInner({
                             </p>
                             <span className="text-[9px] text-muted-foreground/55 font-mono">
                               {detectLang(String(input.file_path ?? input.path ?? ''))}
-                              {totalLines !== null ? ` · ${totalLines} lines` : ''}
+                              {totalLines !== null
+                                ? ` · ${t('toolCall.lineCount', { count: totalLines })}`
+                                : ''}
                             </span>
                             {isOmitted && (
                               <span className="rounded bg-muted px-1 py-0.5 text-[9px] text-muted-foreground/60">
-                                preview
+                                {t('toolCall.preview')}
                               </span>
                             )}
                             {writeContent && <CopyBtn text={writeContent} />}

@@ -226,6 +226,8 @@ export type AgentStreamEvent =
       type: 'context_compressed'
       originalCount: number
       newCount: number
+      /** Number of older messages that were summarized (kept visible in UI under the new model). */
+      keptMessageCount?: number
       messages?: MessageWire[]
     }
   // Sub-agent events

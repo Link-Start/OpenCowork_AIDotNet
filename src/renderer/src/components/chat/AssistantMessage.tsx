@@ -37,6 +37,7 @@ import { AgentErrorCard } from './AgentErrorCard'
 import { ImagePreview } from './ImagePreview'
 import { ImagePluginToolCard } from './ImagePluginToolCard'
 import { DesktopActionToolCard } from './DesktopActionToolCard'
+import { BrowserToolCard } from './BrowserToolCard'
 import { useChatStore } from '@renderer/stores/chat-store'
 import { useAgentStore } from '@renderer/stores/agent-store'
 import type { AgentRunChangeSet, AgentRunFileChange } from '@renderer/stores/agent-store'
@@ -51,7 +52,6 @@ import { useSettingsStore } from '@renderer/stores/settings-store'
 import { ToolCallCard, WidgetOutputBlock } from './ToolCallCard'
 import { ToolCallGroup } from './ToolCallGroup'
 import { FileChangeCard } from './FileChangeCard'
-import { RunChangeReviewCard } from './RunChangeReviewCard'
 import { SubAgentCard } from './SubAgentCard'
 import { ThinkingBlock } from './ThinkingBlock'
 import { TeamEventCard } from './TeamEventCard'
@@ -87,6 +87,7 @@ import {
   DESKTOP_WAIT_TOOL_NAME,
   IMAGE_GENERATE_TOOL_NAME
 } from '@renderer/lib/app-plugin/types'
+import { isBrowserToolName } from '@renderer/lib/app-plugin/browser-tool-names'
 import { LazySyntaxHighlighter } from './LazySyntaxHighlighter'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@renderer/components/ui/dialog'
 import { aggregateDisplayableRunFileChanges } from './file-change-utils'
@@ -123,6 +124,8 @@ interface AssistantMessageProps {
   liveToolCallMap?: Map<string, ToolCallState> | null
   msgId?: string
   sessionId?: string | null
+  sessionAssistantMessageIds?: readonly string[]
+  sessionToolUseIds?: readonly string[]
   showRetry?: boolean
   showContinue?: boolean
   isLastAssistantMessage?: boolean
@@ -141,6 +144,7 @@ const THINK_OPEN_TAG_RE = /<\s*think\s*>/i
 const SPECIAL_TOOLS = new Set([
   'TaskCreate',
   'TaskUpdate',
+  'Skill',
   'Write',
   'Edit',
   'Delete',
@@ -153,6 +157,7 @@ const SPECIAL_TOOLS = new Set([
   DESKTOP_TYPE_TOOL_NAME
 ])
 const WORKSPACE_PERSISTENT_TOOLS = new Set([
+  'Skill',
   'AskUserQuestion',
   'ExitPlanMode',
   'visualize_show_widget',
@@ -263,7 +268,7 @@ function buildToolCallRenderState(
 }
 
 function shouldShowToolInMessageList(name: string): boolean {
-  return name !== 'TaskCreate' && name !== 'TaskUpdate'
+  return name !== 'TaskCreate' && name !== 'TaskUpdate' && name !== 'TaskList'
 }
 
 function isWorkspaceCollapsibleTool(name: string): boolean {
@@ -1188,6 +1193,50 @@ function resolveRunChangeSetForMessage(
   return bestMatch?.changeSet
 }
 
+function changeSetBelongsToSession(
+  changeSet: AgentRunChangeSet,
+  sessionId?: string | null
+): boolean {
+  if (!sessionId) return false
+  return (
+    changeSet.sessionId === sessionId ||
+    changeSet.changes.some((change) => change.sessionId === sessionId)
+  )
+}
+
+function resolveLatestSessionRunChangeSet(
+  changesByRunId: Record<string, AgentRunChangeSet>,
+  sessionId?: string | null,
+  assistantMessageIds: readonly string[] = [],
+  toolUseIds: readonly string[] = []
+): AgentRunChangeSet | undefined {
+  if (!sessionId) return undefined
+
+  const uniqueChangeSets = new Map<string, AgentRunChangeSet>()
+  for (const changeSet of Object.values(changesByRunId)) {
+    uniqueChangeSets.set(changeSet.runId, changeSet)
+  }
+
+  const assistantMessageIdSet = new Set(assistantMessageIds)
+  const toolUseIdSet = new Set(toolUseIds)
+  let latest: AgentRunChangeSet | undefined
+  for (const changeSet of uniqueChangeSets.values()) {
+    const matchesSession =
+      changeSetBelongsToSession(changeSet, sessionId) ||
+      assistantMessageIdSet.has(changeSet.assistantMessageId) ||
+      assistantMessageIdSet.has(changeSet.runId) ||
+      changeSet.changes.some((change) => change.toolUseId && toolUseIdSet.has(change.toolUseId))
+
+    if (!matchesSession) continue
+    if (aggregateDisplayableRunFileChanges(changeSet.changes).length === 0) continue
+    if (!latest || changeSet.updatedAt > latest.updatedAt) {
+      latest = changeSet
+    }
+  }
+
+  return latest
+}
+
 export function AssistantMessage({
   content,
   isStreaming,
@@ -1196,6 +1245,8 @@ export function AssistantMessage({
   liveToolCallMap,
   msgId,
   sessionId,
+  sessionAssistantMessageIds = [],
+  sessionToolUseIds = [],
   showRetry,
   showContinue,
   isLastAssistantMessage,
@@ -1301,17 +1352,33 @@ export function AssistantMessage({
       )
       .map((block) => block.id)
   }, [normalizedContent])
-  const runChangeSet = useAgentStore((s) =>
-    isLiveMode
-      ? resolveRunChangeSetForMessage(s.runChangesByRunId, msgId, sessionId, messageToolUseIds)
+  const runChangeSet = useAgentStore((s) => {
+    if (!isLiveMode) return undefined
+
+    const directChangeSet = resolveRunChangeSetForMessage(
+      s.runChangesByRunId,
+      msgId,
+      sessionId,
+      messageToolUseIds
+    )
+
+    if (directChangeSet) return directChangeSet
+
+    return isLastAssistantMessage
+      ? resolveLatestSessionRunChangeSet(
+          s.runChangesByRunId,
+          sessionId,
+          sessionAssistantMessageIds,
+          sessionToolUseIds
+        )
       : undefined
-  )
+  })
   const visibleRunChanges = useMemo(
     () => (runChangeSet ? aggregateDisplayableRunFileChanges(runChangeSet.changes) : []),
     [runChangeSet]
   )
-  const visibleRunChangeCount = visibleRunChanges.length
   const refreshRunChanges = useAgentStore((s) => s.refreshRunChanges)
+  const refreshSessionRunChanges = useAgentStore((s) => s.refreshSessionRunChanges)
 
   const liveToolCallIds = useMemo(() => {
     if (!isStreaming) return []
@@ -1408,7 +1475,26 @@ export function AssistantMessage({
       ...(sessionId ? { sessionId } : {}),
       ...(messageToolUseIds.length > 0 ? { toolUseIds: messageToolUseIds } : {})
     })
-  }, [isLiveMode, isStreaming, messageToolUseIds, msgId, refreshRunChanges, sessionId])
+    if (isLastAssistantMessage && sessionId) {
+      void refreshSessionRunChanges(sessionId, {
+        ...(sessionAssistantMessageIds.length > 0
+          ? { assistantMessageIds: [...sessionAssistantMessageIds] }
+          : {}),
+        ...(sessionToolUseIds.length > 0 ? { toolUseIds: [...sessionToolUseIds] } : {})
+      })
+    }
+  }, [
+    isLastAssistantMessage,
+    isLiveMode,
+    isStreaming,
+    messageToolUseIds,
+    msgId,
+    refreshRunChanges,
+    refreshSessionRunChanges,
+    sessionAssistantMessageIds,
+    sessionId,
+    sessionToolUseIds
+  ])
 
   const renderItems = useMemo(() => {
     if (!normalizedContent) return []
@@ -1446,7 +1532,7 @@ export function AssistantMessage({
       (typeof content === 'string' && content.length === 0) ||
       (Array.isArray(normalizedContent) && normalizedContent.length === 0)
     const generatingImagePreviewSrc =
-      generatingImagePreview?.source.type === 'base64'
+      generatingImagePreview?.source.type === 'base64' && generatingImagePreview.source.data
         ? `data:${generatingImagePreview.source.mediaType || 'image/png'};base64,${generatingImagePreview.source.data}`
         : (generatingImagePreview?.source.url ?? '')
 
@@ -1474,8 +1560,8 @@ export function AssistantMessage({
       )
     }
 
-    // Show thinking indicator when streaming just started
-    if (isStreaming && typeof content === 'string' && content.length === 0) {
+    // Show thinking indicator when streaming starts with no displayable content yet.
+    if (isStreaming && hasEmptyContent) {
       return (
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
           <span className="flex gap-1">
@@ -1495,6 +1581,10 @@ export function AssistantMessage({
           <span className="text-xs text-muted-foreground/60">{t('thinking.thinkingEllipsis')}</span>
         </div>
       )
+    }
+
+    if (hasEmptyContent) {
+      return <></>
     }
 
     if (typeof content === 'string') {
@@ -1650,6 +1740,7 @@ export function AssistantMessage({
               input={block.input}
               output={result?.content}
               isLive={!!isStreaming}
+              sessionId={sessionId}
             />
           </ScaleIn>
         )
@@ -1690,6 +1781,25 @@ export function AssistantMessage({
           </ScaleIn>
         )
       }
+      if (isBrowserToolName(block.name)) {
+        if (toolsCollapsed) return null
+        const toolCallState = buildToolCallRenderState(block, {
+          isStreaming,
+          toolResults,
+          liveToolCallMap: effectiveLiveToolCallMap
+        })
+        return (
+          <ScaleIn key={key} className={liveScaleInClassName}>
+            <BrowserToolCard
+              name={toolCallState.name}
+              input={toolCallState.input}
+              output={toolCallState.output}
+              status={toolCallState.status}
+              error={toolCallState.error}
+            />
+          </ScaleIn>
+        )
+      }
       if (
         block.name === DESKTOP_SCREENSHOT_TOOL_NAME ||
         block.name === DESKTOP_CLICK_TOOL_NAME ||
@@ -1709,6 +1819,27 @@ export function AssistantMessage({
               output={liveTc?.output ?? result?.content}
               status={statusValue}
               error={liveTc?.error}
+            />
+          </ScaleIn>
+        )
+      }
+      if (block.name === 'Skill') {
+        const toolCallState = buildToolCallRenderState(block, {
+          isStreaming,
+          toolResults,
+          liveToolCallMap: effectiveLiveToolCallMap
+        })
+        return (
+          <ScaleIn key={key} className={liveScaleInClassName}>
+            <ToolCallCard
+              toolUseId={toolCallState.toolUseId}
+              name={toolCallState.name}
+              input={toolCallState.input}
+              output={toolCallState.output}
+              status={toolCallState.status}
+              error={toolCallState.error}
+              startedAt={toolCallState.startedAt}
+              completedAt={toolCallState.completedAt}
             />
           </ScaleIn>
         )
@@ -1838,10 +1969,10 @@ export function AssistantMessage({
               case 'image': {
                 const imgBlock = block as Extract<ContentBlock, { type: 'image' }>
                 const imgSrc =
-                  imgBlock.source.type === 'base64'
+                  imgBlock.source.type === 'base64' && imgBlock.source.data
                     ? `data:${imgBlock.source.mediaType || 'image/png'};base64,${imgBlock.source.data}`
                     : (imgBlock.source.url ?? '')
-                if (!imgSrc) return null
+                if (!imgSrc && !imgBlock.source.filePath) return null
                 const editableImage = imageBlockToAttachment(imgBlock)
                 const actions =
                   canEditGeneratedImages && sessionId && editableImage
@@ -1936,6 +2067,18 @@ export function AssistantMessage({
                 collapsible={groupBlocks.length > 1}
               >
                 {groupToolCalls.map((toolCall) => {
+                  if (isBrowserToolName(toolCall.name)) {
+                    return (
+                      <BrowserToolCard
+                        key={toolCall.toolUseId}
+                        name={toolCall.name}
+                        input={toolCall.input}
+                        output={toolCall.output}
+                        status={toolCall.status}
+                        error={toolCall.error}
+                      />
+                    )
+                  }
                   return (
                     <ToolCallCard
                       key={toolCall.toolUseId}
@@ -2124,9 +2267,6 @@ export function AssistantMessage({
         ) : (
           <>
             {renderContent()}
-            {!isStreaming && runChangeSet && visibleRunChangeCount > 0 && (
-              <RunChangeReviewCard runId={runChangeSet.runId} changeSet={runChangeSet} />
-            )}
             {!isStreaming && plainText && (
               <p className="mt-1 text-[10px] text-muted-foreground/55 tabular-nums">
                 {usage

@@ -7,6 +7,7 @@ export const DEFAULT_COMMAND_TIMEOUT_MS = 600_000
 export interface CommandExecutionInput {
   command: string
   timeout?: number
+  cwd?: string
 }
 
 export interface CommandExecutionResult {
@@ -22,9 +23,15 @@ function shellEscape(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`
 }
 
+function shellPathExpr(value: string): string {
+  if (value === '~') return '"$HOME"'
+  if (value.startsWith('~/')) return `"$HOME"${shellEscape(value.slice(1))}`
+  return shellEscape(value)
+}
+
 function withRemoteWorkingDirectory(command: string, workingFolder?: string): string {
   const folder = workingFolder?.trim()
-  return folder ? `cd ${shellEscape(folder)} && ${command}` : command
+  return folder ? `cd ${shellPathExpr(folder)} && ${command}` : command
 }
 
 export function createSshCommandExecutor(ctx: ToolContext): CommandExecutor | null {
@@ -36,7 +43,7 @@ export function createSshCommandExecutor(ctx: ToolContext): CommandExecutor | nu
     executeForeground: async (input) => {
       const result = (await ctx.ipc.invoke(IPC.SSH_EXEC, {
         connectionId,
-        command: withRemoteWorkingDirectory(input.command, ctx.workingFolder),
+        command: withRemoteWorkingDirectory(input.command, input.cwd ?? ctx.workingFolder),
         timeout: input.timeout ?? DEFAULT_COMMAND_TIMEOUT_MS
       })) as { exitCode?: number; stdout?: string; stderr?: string; error?: string }
 

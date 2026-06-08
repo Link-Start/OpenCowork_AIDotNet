@@ -8,7 +8,7 @@ interface ReadTextFileResult {
 
 export const PROJECT_MEMORY_DIRNAME = '.agents'
 
-export type SessionMemoryScope = 'main' | 'shared'
+export type SessionMemoryScope = 'main' | 'shared' | 'channel'
 export type ProjectMemoryPathSource = 'agents-dir' | 'workspace-root'
 
 export interface GlobalMemorySnapshot {
@@ -38,6 +38,8 @@ export interface LayeredMemorySnapshot {
   projectUser?: MemoryLayerEntry
   globalMemory?: MemoryLayerEntry
   projectMemory?: MemoryLayerEntry
+  globalMemorySummary?: MemoryLayerEntry
+  projectMemorySummary?: MemoryLayerEntry
   globalDailyMemory: DailyMemoryEntry[]
   projectDailyMemory: DailyMemoryEntry[]
   version: number
@@ -66,6 +68,7 @@ let cachedLayeredSnapshot: LayeredMemorySnapshot = {
 let cachedLayerSshConnectionId: string | undefined
 let watchedLayerPath: string | undefined
 let watchedLayerPathKey: string | undefined
+let cachedLayerScope: SessionMemoryScope = 'main'
 let layeredMemoryWatchCleanup: (() => void) | null = null
 let layeredMemoryVersion = 0
 let layeredMemoryUpdatedAt: number | undefined
@@ -405,6 +408,9 @@ async function buildLayeredMemorySnapshot(
   const globalSoulPath = globalHomePath ? joinFsPath(globalHomePath, 'SOUL.md') : undefined
   const globalUserPath = globalHomePath ? joinFsPath(globalHomePath, 'USER.md') : undefined
   const globalMemoryPath = globalHomePath ? joinFsPath(globalHomePath, 'MEMORY.md') : undefined
+  const globalMemorySummaryPath = globalHomePath
+    ? joinFsPath(globalHomePath, 'memory_summary.md')
+    : undefined
 
   const [
     projectAgentsFile,
@@ -414,6 +420,8 @@ async function buildLayeredMemorySnapshot(
     projectUserFile,
     globalMemoryContent,
     projectMemoryFile,
+    globalMemorySummaryContent,
+    projectMemorySummaryFile,
     globalDailyMemory,
     projectDailyMemory
   ] = await Promise.all([
@@ -425,10 +433,10 @@ async function buildLayeredMemorySnapshot(
           'AGENTS.md'
         )
       : Promise.resolve(undefined),
-    scope === 'main' && globalSoulPath
+    scope !== 'shared' && globalSoulPath
       ? loadOptionalMemoryFile(ipc, globalSoulPath)
       : Promise.resolve(undefined),
-    scope === 'main' && projectRootPath
+    scope !== 'shared' && projectRootPath
       ? resolveProjectMemoryTextFileForTarget(
           ipc,
           projectRootPath,
@@ -456,6 +464,17 @@ async function buildLayeredMemorySnapshot(
           projectRootPath,
           projectSshConnectionId,
           'MEMORY.md'
+        )
+      : Promise.resolve(undefined),
+    scope === 'main' && globalMemorySummaryPath
+      ? loadOptionalMemoryFile(ipc, globalMemorySummaryPath)
+      : Promise.resolve(undefined),
+    scope === 'main' && projectRootPath
+      ? resolveProjectMemoryTextFileForTarget(
+          ipc,
+          projectRootPath,
+          projectSshConnectionId,
+          'memory_summary.md'
         )
       : Promise.resolve(undefined),
     scope === 'main' ? loadDailyMemoryEntries(ipc, globalHomePath) : Promise.resolve([]),
@@ -487,6 +506,13 @@ async function buildLayeredMemorySnapshot(
     projectMemory:
       projectMemoryFile && !projectMemoryFile.error
         ? toOptionalEntry(projectMemoryFile.path, projectMemoryFile.content)
+        : undefined,
+    globalMemorySummary: globalMemorySummaryPath
+      ? toOptionalEntry(globalMemorySummaryPath, globalMemorySummaryContent)
+      : undefined,
+    projectMemorySummary:
+      projectMemorySummaryFile && !projectMemorySummaryFile.error
+        ? toOptionalEntry(projectMemorySummaryFile.path, projectMemorySummaryFile.content)
         : undefined,
     globalDailyMemory,
     projectDailyMemory,
@@ -524,17 +550,7 @@ async function ensurePrimaryMemoryWatcher(
     void loadLayeredMemorySnapshot(ipc, {
       workingFolder: cachedLayeredSnapshot.projectRootPath,
       sshConnectionId: cachedLayerSshConnectionId,
-      scope:
-        cachedLayeredSnapshot.globalSoul ||
-        cachedLayeredSnapshot.globalUser ||
-        cachedLayeredSnapshot.globalMemory ||
-        cachedLayeredSnapshot.projectSoul ||
-        cachedLayeredSnapshot.projectUser ||
-        cachedLayeredSnapshot.projectMemory ||
-        cachedLayeredSnapshot.globalDailyMemory.length > 0 ||
-        cachedLayeredSnapshot.projectDailyMemory.length > 0
-          ? 'main'
-          : 'shared'
+      scope: cachedLayerScope
     })
   })
 }
@@ -550,6 +566,7 @@ export async function loadLayeredMemorySnapshot(
   const nextSnapshot = await buildLayeredMemorySnapshot(ipc, options)
   const previousSnapshot = cachedLayeredSnapshot
   cachedLayerSshConnectionId = options.sshConnectionId?.trim() || undefined
+  cachedLayerScope = options.scope ?? 'main'
 
   const materializedSnapshot: LayeredMemorySnapshot = {
     ...nextSnapshot,

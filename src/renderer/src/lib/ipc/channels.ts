@@ -18,9 +18,11 @@ export const IPC = {
   FS_SELECT_SAVE_FILE: 'fs:select-save-file',
   FS_READ_DOCUMENT: 'fs:read-document',
   FS_READ_FILE: 'fs:read-file',
+  FS_STAT_PATH: 'fs:stat-path',
   FS_WRITE_FILE: 'fs:write-file',
   FS_LIST_DIR: 'fs:list-dir',
   FS_MKDIR: 'fs:mkdir',
+  FS_DEFAULT_CHAT_WORKING_FOLDER: 'fs:default-chat-working-folder',
   FS_DELETE: 'fs:delete',
   FS_MOVE: 'fs:move',
   FS_SELECT_FOLDER: 'fs:select-folder',
@@ -31,6 +33,9 @@ export const IPC = {
   FS_WATCH_FILE: 'fs:watch-file',
   FS_UNWATCH_FILE: 'fs:unwatch-file',
   FS_FILE_CHANGED: 'fs:file-changed',
+  FS_WATCH_DIR: 'fs:watch-dir',
+  FS_UNWATCH_DIR: 'fs:unwatch-dir',
+  FS_DIR_CHANGED: 'fs:dir-changed',
   FS_READ_FILE_BINARY: 'fs:read-file-binary',
   FS_WRITE_FILE_BINARY: 'fs:write-file-binary',
 
@@ -40,6 +45,9 @@ export const IPC = {
   SHELL_STARTED: 'shell:started',
   SHELL_OUTPUT: 'shell:output',
   SHELL_OPEN_PATH: 'shell:openPath',
+  SHELL_SHOW_ITEM_IN_FOLDER: 'shell:showItemInFolder',
+  SHELL_TRASH_PATH: 'shell:trashPath',
+  SHELL_OPEN_WITH_APP: 'shell:openWithApp',
   SHELL_OPEN_EXTERNAL: 'shell:openExternal',
 
   // Local Terminal
@@ -52,14 +60,22 @@ export const IPC = {
   TERMINAL_EXIT: 'terminal:exit',
 
   // Agent Changes
-  AGENT_CHANGES_LIST: 'agent:changes:list',
   AGENT_CHANGES_LIST_SESSION: 'agent:changes:list-session',
   AGENT_CHANGES_DIFF_CONTENT: 'agent:changes:diff-content',
-  AGENT_CHANGES_SNAPSHOT_CONTENT: 'agent:changes:snapshot-content',
-  AGENT_CHANGES_ACCEPT: 'agent:changes:accept',
-  AGENT_CHANGES_ACCEPT_FILE: 'agent:changes:accept-file',
-  AGENT_CHANGES_ROLLBACK: 'agent:changes:rollback',
-  AGENT_CHANGES_ROLLBACK_FILE: 'agent:changes:rollback-file',
+  AGENT_CHANGES_UNDO_RUN: 'agent:changes:undo-run',
+  AGENT_CHANGES_UNDO_FILE: 'agent:changes:undo-file',
+
+  // Memory Automation
+  MEMORY_AUTOMATION_LIST: 'memory-automation:list',
+  MEMORY_AUTOMATION_RECORD: 'memory-automation:record',
+  MEMORY_AUTOMATION_UNDO: 'memory-automation:undo',
+  MEMORY_AUTOMATION_RUN_SESSION: 'memory-automation:run-session',
+  MEMORY_AUTOMATION_RUN_ROLLUP: 'memory-automation:run-rollup',
+  MEMORY_PIPELINE_RUN: 'memory-pipeline:run',
+  MEMORY_PIPELINE_LIST_ROOTS: 'memory-pipeline:list-roots',
+  MEMORY_PIPELINE_LIST_JOBS: 'memory-pipeline:list-jobs',
+  MEMORY_PIPELINE_CLEAR_ROOT: 'memory-pipeline:clear-root',
+  MEMORY_RECORD_CITATION_USAGE: 'memory:record-citation-usage',
 
   // Process Management
   PROCESS_SPAWN: 'process:spawn',
@@ -73,9 +89,29 @@ export const IPC = {
   SETTINGS_GET: 'settings:get',
   SETTINGS_SET: 'settings:set',
 
+  // SOUL Market
+  SOULS_MARKET_LIST: 'souls:market-list',
+  SOULS_CATEGORIES: 'souls:categories',
+  SOULS_DOWNLOAD_REMOTE: 'souls:download-remote',
+  SOULS_GET_TARGET_PATHS: 'souls:get-target-paths',
+  SOULS_INSTALL: 'souls:install',
+
   // Migration
   MIGRATION_PREVIEW: 'migration:preview',
   MIGRATION_APPLY: 'migration:apply',
+
+  // Sync
+  SYNC_CONFIG_GET: 'sync:config:get',
+  SYNC_CONFIG_SET: 'sync:config:set',
+  SYNC_PROVIDERS_LIST: 'sync:providers:list',
+  SYNC_CONNECTION_TEST: 'sync:connection:test',
+  SYNC_STATUS: 'sync:status',
+  SYNC_RUN: 'sync:run',
+  SYNC_CONFLICTS_RESOLVE: 'sync:conflicts:resolve',
+  SYNC_STATUS_CHANGED: 'sync:status-changed',
+  SYNC_RUN_PROGRESS: 'sync:run-progress',
+  SYNC_CONFLICT_FOUND: 'sync:conflict-found',
+  SYNC_RUN_FINISHED: 'sync:run-finished',
 
   // Usage Analytics
   USAGE_EVENTS_ADD: 'usage-events:add',
@@ -298,6 +334,7 @@ export const IPC = {
 
   // Built-in Browser
   BROWSER_CLEAR_COOKIES: 'browser:clear-cookies',
+  BROWSER_EMULATION_STATUS: 'browser:emulation-status',
 
   // OAuth
   OAUTH_START: 'oauth:start',
@@ -327,6 +364,7 @@ export const IPC = {
 
   // SSH File Operations (SFTP)
   SSH_FS_READ_FILE: 'ssh:fs:read-file',
+  SSH_FS_STAT_PATH: 'ssh:fs:stat-path',
   SSH_FS_WRITE_FILE: 'ssh:fs:write-file',
   SSH_FS_READ_FILE_BINARY: 'ssh:fs:read-file-binary',
   SSH_FS_WRITE_FILE_BINARY: 'ssh:fs:write-file-binary',

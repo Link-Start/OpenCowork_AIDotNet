@@ -33,7 +33,15 @@
       "mcp__MCP_DOCKER__browser_network_requests",
       "Bash(python *)",
       "Bash(grep -rn \"input_json_delta\\\\|toolBuffer\\\\|args\\\\s*+=\\\\|input\\\\s*=\\\\s*\\\\`\" D:/code/OpenCowork/src/main/ipc/js-agent-runtime.ts)",
-      "Bash(grep -E \"\\\\.\\(tsx|ts\\)$\")"
+      "Bash(grep -E \"\\\\.\\(tsx|ts\\)$\")",
+      "Bash(sqlite3 *)",
+      "Bash(awk '/^  \"contextCompression\": \\\\{/,/^  \\\\}/' /Users/token/Desktop/code/OpenCowork/src/renderer/src/locales/en/agent.json)",
+      "Bash(awk '/^  \"contextCompression\": \\\\{/,/^  \\\\}/' /Users/token/Desktop/code/OpenCowork/src/renderer/src/locales/zh/agent.json)",
+      "Bash(awk -F: '$2 < 4920 && $2 > 4500')",
+      "Bash(awk 'NR<=4920 && /chatStore = useChatStore/ {print NR\": \"$0}' /Users/token/Desktop/code/OpenCowork/src/renderer/src/hooks/use-chat-actions.ts)",
+      "Bash(awk 'NR<=4914' /Users/token/Desktop/code/OpenCowork/src/renderer/src/hooks/use-chat-actions.ts)",
+      "Bash(grep -nE \"^\\\\s*\\(async function|function|const \\\\w+ = \\(async \\)?\\\\\\(|\\\\}\\\\s*$\\)\")",
+      "Bash(awk 'NR>=2840 && NR<=2855' /Users/token/Desktop/code/OpenCowork/src/renderer/src/hooks/use-chat-actions.ts)"
     ]
   }
 }

@@ -2,6 +2,7 @@ import type { ToolHandler } from '../../../tools/tool-types'
 import { encodeStructuredToolResult, encodeToolError } from '../../../tools/tool-result-format'
 import { teamEvents } from '../events'
 import { createTeamRuntime } from '../runtime-client'
+import { useSettingsStore } from '../../../../stores/settings-store'
 
 export const teamCreateTool: ToolHandler = {
   definition: {
@@ -29,6 +30,10 @@ export const teamCreateTool: ToolHandler = {
     }
   },
   execute: async (input, ctx) => {
+    if (!useSettingsStore.getState().teamToolsEnabled) {
+      return encodeToolError('Team Tools are disabled in Settings.')
+    }
+
     const teamName = String(input.team_name)
     const description = String(input.description)
     const defaultBackend =

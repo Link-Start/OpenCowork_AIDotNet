@@ -41,12 +41,15 @@ export function LLMCopyButton({
 
   return (
     <button
+      type="button"
+      aria-label={checked ? 'Markdown copied' : 'Copy Markdown'}
       disabled={isLoading}
       className={cn(
         buttonVariants({
           color: 'secondary',
           size: 'sm',
-          className: 'gap-2 [&_svg]:size-3.5 [&_svg]:text-fd-muted-foreground'
+          className:
+            'gap-2 border border-fd-border/80 bg-fd-card/80 shadow-sm transition hover:border-cowork-red/50 hover:bg-cowork-red/10 [&_svg]:size-3.5 [&_svg]:text-fd-muted-foreground'
         })
       )}
       onClick={onClick}
@@ -209,25 +212,27 @@ export function ViewOptions({
   return (
     <Popover>
       <PopoverTrigger
+        aria-label="Open page elsewhere"
         className={cn(
           buttonVariants({
             color: 'secondary',
             size: 'sm',
-            className: 'gap-2'
+            className:
+              'gap-2 border border-fd-border/80 bg-fd-card/80 shadow-sm transition hover:border-cowork-red/50 hover:bg-cowork-red/10'
           })
         )}
       >
         Open
         <ChevronDown className="size-3.5 text-fd-muted-foreground" />
       </PopoverTrigger>
-      <PopoverContent className="flex flex-col">
+      <PopoverContent className="flex w-56 flex-col gap-1 border-fd-border bg-fd-popover p-1.5">
         {items.map((item) => (
           <a
             key={item.href}
             href={item.href}
             rel="noreferrer noopener"
             target="_blank"
-            className="text-sm p-2 rounded-lg inline-flex items-center gap-2 hover:text-fd-accent-foreground hover:bg-fd-accent [&_svg]:size-4"
+            className="inline-flex items-center gap-2 rounded-md p-2 text-sm text-fd-muted-foreground transition hover:bg-cowork-red/10 hover:text-fd-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cowork-red/70 [&_svg]:size-4"
           >
             {item.icon}
             {item.title}

@@ -3,6 +3,7 @@ import type { ToolHandler } from '../../../tools/tool-types'
 import { encodeStructuredToolResult, encodeToolError } from '../../../tools/tool-result-format'
 import { teamEvents } from '../events'
 import { useTeamStore } from '../../../../stores/team-store'
+import { useSettingsStore } from '../../../../stores/settings-store'
 import type { TeamMessage, TeamMessageType } from '../types'
 import type {
   TeamRuntimePermissionMode,
@@ -72,6 +73,10 @@ export const sendMessageTool: ToolHandler = {
     }
   },
   execute: async (input) => {
+    if (!useSettingsStore.getState().teamToolsEnabled) {
+      return encodeToolError('Team Tools are disabled in Settings.')
+    }
+
     const team = useTeamStore.getState().activeTeam
     if (!team) {
       return encodeToolError('No active team')

@@ -30,6 +30,7 @@ import {
   Search,
   Settings,
   Server,
+  Sparkles,
   Trash2,
   Upload,
   Wand2,
@@ -340,6 +341,7 @@ export function WorkspaceSidebar(): React.JSX.Element {
   const chatView = useUIStore((state) => state.chatView)
   const settingsPageOpen = useUIStore((state) => state.settingsPageOpen)
   const skillsPageOpen = useUIStore((state) => state.skillsPageOpen)
+  const soulsPageOpen = useUIStore((state) => state.soulsPageOpen)
   const resourcesPageOpen = useUIStore((state) => state.resourcesPageOpen)
   const drawPageOpen = useUIStore((state) => state.drawPageOpen)
   const translatePageOpen = useUIStore((state) => state.translatePageOpen)
@@ -377,7 +379,6 @@ export function WorkspaceSidebar(): React.JSX.Element {
   const updateSessionIcon = useChatStore((state) => state.updateSessionIcon)
   const duplicateSession = useChatStore((state) => state.duplicateSession)
   const clearSessionMessages = useChatStore((state) => state.clearSessionMessages)
-  const clearAllSessions = useChatStore((state) => state.clearAllSessions)
   const togglePinSession = useChatStore((state) => state.togglePinSession)
   const importSession = useChatStore((state) => state.importSession)
   const importProjectArchive = useChatStore((state) => state.importProjectArchive)
@@ -391,8 +392,13 @@ export function WorkspaceSidebar(): React.JSX.Element {
       .join('\u0000')
   )
   const activeTeamSessionId = useTeamStore((state) => state.activeTeam?.sessionId ?? null)
-  const unreadCountsBySession = useBackgroundSessionStore((state) => state.unreadCountsBySession)
-  const blockedCountsBySession = useBackgroundSessionStore((state) => state.blockedCountsBySession)
+  const waitingReplySessionIdsSig = useBackgroundSessionStore((state) => {
+    const ids = new Set<string>()
+    for (const item of state.inboxItems) {
+      if (item.type === 'ask_user') ids.add(item.sessionId)
+    }
+    return [...ids].sort().join('\u0000')
+  })
   const language = useSettingsStore((state) => state.language)
   const importSessionInputRef = useRef<HTMLInputElement>(null)
   const importProjectInputRef = useRef<HTMLInputElement>(null)
@@ -432,6 +438,10 @@ export function WorkspaceSidebar(): React.JSX.Element {
       new Set(runningBackgroundSessionIdsSig ? runningBackgroundSessionIdsSig.split('\u0000') : []),
     [runningBackgroundSessionIdsSig]
   )
+  const waitingReplySessionIds = useMemo(
+    () => new Set(waitingReplySessionIdsSig ? waitingReplySessionIdsSig.split('\u0000') : []),
+    [waitingReplySessionIdsSig]
+  )
   const streamingSessionIds = useMemo(
     () => new Set(streamingSessionIdsSig ? streamingSessionIdsSig.split('\u0000') : []),
     [streamingSessionIdsSig]
@@ -465,11 +475,12 @@ export function WorkspaceSidebar(): React.JSX.Element {
   const chatSurfaceActive =
     !settingsPageOpen &&
     !skillsPageOpen &&
+    !soulsPageOpen &&
     !resourcesPageOpen &&
     !drawPageOpen &&
     !translatePageOpen &&
     !tasksPageOpen
-  const featureMenuActive = resourcesPageOpen || skillsPageOpen || drawPageOpen
+  const featureMenuActive = resourcesPageOpen || skillsPageOpen || soulsPageOpen || drawPageOpen
   const sessionsByProject = useMemo(() => {
     const next = new Map<string, SessionListItem[]>()
     for (const session of sessions) {
@@ -552,16 +563,20 @@ export function WorkspaceSidebar(): React.JSX.Element {
   const openChatHome = useCallback(() => {
     const chatStore = useChatStore.getState()
     const uiStore = useUIStore.getState()
-    chatStore.setActiveSession(null)
+    chatStore.setActiveProject(null)
     uiStore.setMode('chat')
     uiStore.navigateToHome()
   }, [])
 
   const openProjectHome = useCallback((projectId: string) => {
     const chatStore = useChatStore.getState()
+    const uiStore = useUIStore.getState()
     chatStore.setActiveProject(projectId)
     chatStore.setActiveSession(null)
-    useUIStore.getState().navigateToProject(projectId)
+    if (uiStore.mode === 'chat') {
+      uiStore.setMode('cowork')
+    }
+    uiStore.navigateToProject(projectId)
   }, [])
 
   const handleCreateChatSession = useCallback(() => {
@@ -682,8 +697,12 @@ export function WorkspaceSidebar(): React.JSX.Element {
     useUIStore.getState().setChangelogDialogOpen(true)
   }, [])
 
-  const handleClearAllSessions = useCallback(async () => {
-    const total = useChatStore.getState().sessions.length
+  const handleClearChatSessions = useCallback(async () => {
+    const chatSessionIds = useChatStore
+      .getState()
+      .sessions.filter((session) => !session.projectId)
+      .map((session) => session.id)
+    const total = chatSessionIds.length
     if (total === 0) {
       toast.info(t('sidebar.noConversations'))
       return
@@ -693,10 +712,12 @@ export function WorkspaceSidebar(): React.JSX.Element {
       variant: 'destructive'
     })
     if (!ok) return
-    clearAllSessions()
-    useUIStore.getState().navigateToHome()
+    for (const sessionId of chatSessionIds) {
+      clearPendingSessionMessages(sessionId)
+      deleteSession(sessionId)
+    }
     toast.success(t('sidebar_toast.allDeleted'))
-  }, [clearAllSessions, t])
+  }, [deleteSession, t])
 
   const confirmClearSessionMessages = useCallback(() => {
     if (!clearSessionTarget) return
@@ -770,14 +791,7 @@ export function WorkspaceSidebar(): React.JSX.Element {
 
         const titleInput = buildSmartRenameInput(session)
         if (!titleInput) {
-          toast.error(
-            t('sidebar_toast.smartRenameNoContent', {
-              defaultValue:
-                language === 'zh'
-                  ? '会话里还没有可用于重命名的内容'
-                  : 'No conversation content available for renaming'
-            })
-          )
+          toast.error(t('sidebar_toast.smartRenameNoContent'))
           return
         }
 
@@ -785,11 +799,7 @@ export function WorkspaceSidebar(): React.JSX.Element {
         const nextTitle = result?.title.trim()
         const nextIcon = result?.icon.trim()
         if (!nextTitle) {
-          toast.error(
-            t('sidebar_toast.smartRenameFailed', {
-              defaultValue: language === 'zh' ? '智能重命名失败' : 'Smart rename failed'
-            })
-          )
+          toast.error(t('sidebar_toast.smartRenameFailed'))
           return
         }
 
@@ -797,25 +807,16 @@ export function WorkspaceSidebar(): React.JSX.Element {
         if (nextIcon) {
           updateSessionIcon(sessionId, nextIcon)
         }
-        toast.success(
-          t('sidebar_toast.smartRenameSuccess', {
-            defaultValue: language === 'zh' ? '已智能重命名会话' : 'Session renamed intelligently'
-          })
-        )
+        toast.success(t('sidebar_toast.smartRenameSuccess'))
       } catch (error) {
-        toast.error(
-          t('sidebar_toast.smartRenameFailed', {
-            defaultValue: language === 'zh' ? '智能重命名失败' : 'Smart rename failed'
-          }),
-          {
-            description: error instanceof Error ? error.message : String(error)
-          }
-        )
+        toast.error(t('sidebar_toast.smartRenameFailed'), {
+          description: error instanceof Error ? error.message : String(error)
+        })
       } finally {
         setAutoRenamingSessionId((current) => (current === sessionId ? null : current))
       }
     },
-    [autoRenamingSessionId, language, t, updateSessionIcon, updateSessionTitle]
+    [autoRenamingSessionId, t, updateSessionIcon, updateSessionTitle]
   )
 
   const deferDropdownAction = useCallback((action: () => void) => {
@@ -890,28 +891,28 @@ export function WorkspaceSidebar(): React.JSX.Element {
   const navItems = [
     {
       key: 'new-chat',
-      label: t('sidebar.newChat', { defaultValue: 'New Chat' }),
+      label: t('sidebar.newChat'),
       icon: <Pencil className="size-4 shrink-0" />,
       active: false,
       onClick: handleCreateChatSession
     },
     {
       key: 'search',
-      label: t('sidebar.searchLabel', { defaultValue: 'Search' }),
+      label: t('sidebar.searchLabel'),
       icon: <Search className="size-4 shrink-0" />,
       active: false,
       onClick: openCommandPalette
     },
     {
       key: 'plugins',
-      label: t('sidebar.pluginsLabel', { defaultValue: 'Plugins' }),
+      label: t('sidebar.pluginsLabel'),
       icon: <Wand2 className="size-4 shrink-0" />,
       active: settingsPageOpen && useUIStore.getState().settingsTab === 'plugin',
       onClick: () => useUIStore.getState().openSettingsPage('plugin')
     },
     {
       key: 'automation',
-      label: t('sidebar.automationLabel', { defaultValue: 'Automation' }),
+      label: t('sidebar.automationLabel'),
       icon: <CalendarDays className="size-4 shrink-0" />,
       active: tasksPageOpen,
       onClick: () => useUIStore.getState().openTasksPage()
@@ -948,8 +949,7 @@ export function WorkspaceSidebar(): React.JSX.Element {
       runningBackgroundSessionIds.has(session.id) ||
       streamingSessionIds.has(session.id) ||
       activeTeamSessionId === session.id
-    const unreadCount = unreadCountsBySession[session.id] ?? 0
-    const blockedCount = blockedCountsBySession[session.id] ?? 0
+    const hasWaitingReply = waitingReplySessionIds.has(session.id)
     const pendingCount = getPendingSessionMessageCountForSession(session.id)
     const canClearSession = session.messageCount > 0 || pendingCount > 0
 
@@ -982,14 +982,9 @@ export function WorkspaceSidebar(): React.JSX.Element {
               {session.title}
             </span>
             <span className="ml-auto flex shrink-0 items-center gap-1">
-              {blockedCount > 0 && (
-                <span className="rounded-full bg-amber-500/12 px-1.5 py-0.5 text-[9px] font-medium text-amber-600 dark:text-amber-400">
-                  {blockedCount > 99 ? '99+' : blockedCount}
-                </span>
-              )}
-              {unreadCount > 0 && (
-                <span className="rounded-full bg-sky-500/12 px-1.5 py-0.5 text-[9px] font-medium text-sky-600 dark:text-sky-400">
-                  {unreadCount > 99 ? '99+' : unreadCount}
+              {hasWaitingReply && (
+                <span className="whitespace-nowrap rounded-full bg-amber-500/12 px-1.5 py-0.5 text-[9px] font-medium text-amber-600 dark:text-amber-400">
+                  {t('sidebar.waitingReply', { defaultValue: 'Waiting reply' })}
                 </span>
               )}
               {pendingCount > 0 && (
@@ -1010,7 +1005,7 @@ export function WorkspaceSidebar(): React.JSX.Element {
           </ContextMenuItem>
           <ContextMenuItem onClick={() => void openDetachedSessionWindow(session.id)}>
             <ExternalLink className="size-4" />
-            {t('sidebar.openInNewWindow', { defaultValue: 'Open in new window' })}
+            {t('sidebar.openInNewWindow')}
           </ContextMenuItem>
           <ContextMenuItem
             onSelect={() =>
@@ -1038,12 +1033,8 @@ export function WorkspaceSidebar(): React.JSX.Element {
               <Wand2 className="size-4" />
             )}
             {autoRenamingSessionId === session.id
-              ? t('sidebar.smartRenaming', {
-                  defaultValue: language === 'zh' ? '智能命名中' : 'Smart renaming'
-                })
-              : t('sidebar.smartRename', {
-                  defaultValue: language === 'zh' ? '智能重命名' : 'Smart Rename'
-                })}
+              ? t('sidebar.smartRenaming')
+              : t('sidebar.smartRename')}
           </ContextMenuItem>
           <ContextMenuItem
             onClick={() => {
@@ -1179,7 +1170,7 @@ export function WorkspaceSidebar(): React.JSX.Element {
             size="icon"
             className="workspace-titlebar-action titlebar-no-drag size-7 shrink-0 rounded-md text-sidebar-foreground/70 hover:text-sidebar-foreground"
             onClick={toggleLeftSidebar}
-            title={t('commandPalette.toggleSidebar', { defaultValue: 'Toggle sidebar' })}
+            title={t('commandPalette.toggleSidebar')}
           >
             <PanelLeftClose className="size-4" />
           </Button>
@@ -1257,6 +1248,18 @@ export function WorkspaceSidebar(): React.JSX.Element {
                   >
                     <Wand2 className="size-3.5 shrink-0" />
                     <span className="truncate">{t('navRail.skills')}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => useUIStore.getState().openSoulsPage()}
+                    className={cn(
+                      'flex h-7 w-full items-center gap-2 px-2 text-[12px] font-medium transition-colors',
+                      SIDEBAR_TREE_ROW_CLASS,
+                      soulsPageOpen ? SIDEBAR_TREE_ACTIVE_CLASS : SIDEBAR_TREE_SUBITEM_HOVER_CLASS
+                    )}
+                  >
+                    <Sparkles className="size-3.5 shrink-0" />
+                    <span className="truncate">{t('navRail.souls')}</span>
                   </button>
                   <button
                     type="button"
@@ -1347,7 +1350,7 @@ export function WorkspaceSidebar(): React.JSX.Element {
                   const clearableProjectSessionCount =
                     group.sessions.length - runningProjectSessionCount
                   const projectToggleTitle = isCollapsed
-                    ? t('rightPanel.expand', { defaultValue: 'Expand' })
+                    ? t('rightPanel.expand')
                     : t('rightPanel.collapse')
                   const handleProjectRowKeyDown = (
                     event: React.KeyboardEvent<HTMLDivElement>
@@ -1395,10 +1398,10 @@ export function WorkspaceSidebar(): React.JSX.Element {
                               {project.sshConnectionId ? (
                                 <span
                                   className="inline-flex shrink-0 items-center gap-0.5 rounded border border-sky-500/30 bg-sky-500/10 px-1 py-px text-[9px] font-semibold leading-none text-sky-600 dark:text-sky-300"
-                                  title="SSH project"
+                                  title={t('sidebar.sshProject')}
                                 >
                                   <Server className="size-2.5" />
-                                  SSH
+                                  {t('sidebar.sshLabel')}
                                 </span>
                               ) : null}
                             </div>
@@ -1420,7 +1423,9 @@ export function WorkspaceSidebar(): React.JSX.Element {
                                   <Pin className="size-3.5 text-amber-500" />
                                 ) : null}
                                 <span className="text-muted-foreground/80">
-                                  {project.sshConnectionId ? 'SSH' : 'Local'}
+                                  {project.sshConnectionId
+                                    ? t('sidebar.sshLabel')
+                                    : t('sidebar.localLabel')}
                                 </span>
                                 <span>{group.sessions.length}</span>
                                 <ChevronRight
@@ -1470,7 +1475,7 @@ export function WorkspaceSidebar(): React.JSX.Element {
                                       size="icon"
                                       className={SIDEBAR_TREE_ACTION_BUTTON_CLASS}
                                       onClick={(event) => event.stopPropagation()}
-                                      title={tCommon('action.more', { defaultValue: 'More' })}
+                                      title={tCommon('action.more')}
                                     >
                                       <MoreHorizontal className="size-3.5" />
                                     </Button>
@@ -1760,7 +1765,7 @@ export function WorkspaceSidebar(): React.JSX.Element {
               <div className="flex items-center justify-between gap-2 px-1">
                 <div className="flex min-w-0 items-center gap-1.5">
                   <span className="text-[9px] font-semibold uppercase tracking-[0.06em] text-muted-foreground/80">
-                    {t('sidebar.chats', { defaultValue: 'Chats' })}
+                    {t('sidebar.chats')}
                   </span>
                   <span className="rounded-full border border-border/60 bg-muted/45 px-1 py-0.5 text-[9px] text-muted-foreground">
                     {chatSessions.length}
@@ -1773,7 +1778,7 @@ export function WorkspaceSidebar(): React.JSX.Element {
                         variant="ghost"
                         size="icon"
                         className="size-4"
-                        title={tCommon('action.more', { defaultValue: 'More' })}
+                        title={tCommon('action.more')}
                       >
                         <MoreHorizontal className="size-2.5" />
                       </Button>
@@ -1786,8 +1791,8 @@ export function WorkspaceSidebar(): React.JSX.Element {
                       <DropdownMenuSeparator />
                       <DropdownMenuItem
                         variant="destructive"
-                        onSelect={() => deferDropdownAction(() => void handleClearAllSessions())}
-                        disabled={sessions.length === 0}
+                        onSelect={() => deferDropdownAction(() => void handleClearChatSessions())}
+                        disabled={chatSessions.length === 0}
                       >
                         <Trash2 className="size-4" />
                         {t('sidebar.deleteAllSessions')}
@@ -1799,7 +1804,7 @@ export function WorkspaceSidebar(): React.JSX.Element {
                     size="icon"
                     className="size-4"
                     onClick={handleCreateChatSession}
-                    title={t('sidebar.newChat', { defaultValue: 'New Chat' })}
+                    title={t('sidebar.newChat')}
                   >
                     <Plus className="size-2.5" />
                   </Button>
@@ -1817,7 +1822,7 @@ export function WorkspaceSidebar(): React.JSX.Element {
                   )
                 ) : (
                   <div className="px-1.5 py-1 text-[10px] text-muted-foreground">
-                    {t('sidebar.noChats', { defaultValue: 'No chats yet' })}
+                    {t('sidebar.noChats')}
                   </div>
                 )}
               </div>

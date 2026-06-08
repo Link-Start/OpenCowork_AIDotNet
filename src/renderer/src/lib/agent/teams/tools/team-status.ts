@@ -1,6 +1,7 @@
 import type { ToolHandler } from '../../../tools/tool-types'
 import { encodeStructuredToolResult, encodeToolError } from '../../../tools/tool-result-format'
 import { useTeamStore } from '../../../../stores/team-store'
+import { useSettingsStore } from '../../../../stores/settings-store'
 import { getTeamRuntimeSnapshot } from '../runtime-client'
 
 /**
@@ -20,6 +21,10 @@ export const teamStatusTool: ToolHandler = {
     }
   },
   execute: async () => {
+    if (!useSettingsStore.getState().teamToolsEnabled) {
+      return encodeToolError('Team Tools are disabled in Settings.')
+    }
+
     const teamStore = useTeamStore.getState()
     const team = teamStore.activeTeam
     if (!team) {

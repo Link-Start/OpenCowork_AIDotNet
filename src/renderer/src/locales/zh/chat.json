@@ -9,6 +9,9 @@
     "placeholderInitWorkspace": "当前工作目录还没有 AGENTS.md，推荐先输入 /init 初始化项目上下文...",
     "noApiKey": "未配置 API Key，点击此处打开设置。",
     "attachImages": "附加图片（也支持粘贴或拖放）",
+    "attachMediaFailed": "添加所选文件失败",
+    "mediaFilter": "图片和文档",
+    "allFilesFilter": "所有文件",
     "dropImages": "拖放图片或文件",
     "dropFiles": "拖放文件以插入路径",
     "disableThinking": "关闭深度思考",
@@ -34,6 +37,11 @@
     "projectNameHint": "选择目录后会使用目录名作为项目名。",
     "projectNamePlaceholder": "例如：OpenCoWork",
     "createProject": "创建项目",
+    "createProjectSubtitle": "选择本地目录或 SSH 目录，项目名会自动使用目录名。",
+    "projectSource": "项目来源",
+    "sourceLocal": "本地",
+    "sourceSsh": "SSH",
+    "selectFolderFirst": "先选择目录",
     "currentWorkingFolder": "当前工作目录",
     "selectedWorkingFolder": "已选工作目录",
     "noWorkingFolderSelected": "尚未选择目录",
@@ -43,9 +51,14 @@
     "defaultProjectDirectoryPlaceholder": "留空则使用上次使用的目录",
     "browseDefaultDirectory": "浏览",
     "defaultProjectDirectoryFallback": "回退到系统 Documents 目录",
+    "systemDefaultLocation": "系统默认位置",
     "clearConversation": "清空对话",
     "clearConfirmTitle": "清空所有消息？",
     "clearConfirmDesc": "这将删除此对话中的所有消息，此操作不可撤销。",
+    "compressionBudget": "压缩预算",
+    "remaining": "剩余",
+    "compressionBudget": "压缩预算",
+    "remaining": "剩余",
     "sendTooltip": "发送 (Enter)",
     "stopTooltip": "停止 (Esc)",
     "optimizePrompt": "优化提示词",
@@ -55,6 +68,9 @@
     "optimizationResultsDesc": "选择下方的一个优化版本来使用。",
     "useThisOption": "使用此版本",
     "noWorkingFolder": "使用 {{mode}} 模式前请先选择工作目录，点击此处选择。",
+    "planModeMenu": "计划模式",
+    "pursueGoalMenu": "追求目标",
+    "planModeUnavailable": "计划模式需要项目工作目录。",
     "enterPlanMode": "进入计划模式",
     "exitPlanMode": "退出计划模式",
     "planModeActive": "计划模式 — 仅浏览代码库，不修改文件",
@@ -66,10 +82,13 @@
     "noDesktopFolders": "桌面没有可用目录",
     "selectOtherFolder": "选择其他目录",
     "selectOtherFolderHint": "打开系统目录选择器，选择任意本地目录",
+    "selectLocalProjectFolder": "选择本地工作目录",
+    "selectLocalProjectFolderHint": "打开系统目录选择器，默认从上次或默认项目位置开始。",
+    "pickerDefaultLocation": "选择器默认打开：{{path}}",
     "sshConnections": "SSH 连接",
     "noSshConnections": "暂无 SSH 连接",
     "sshDirectory": "远程目录",
-    "sshDirectoryPlaceholder": "",
+    "sshDirectoryPlaceholder": "/home/user/project",
     "sshSelect": "选择",
     "sshConnected": "已连接",
     "queueTitle": "排队消息",
@@ -77,8 +96,12 @@
     "queueRunningHint": "当前回合结束后按顺序发送",
     "queueResume": "继续发送",
     "queueEditing": "编辑排队消息",
+    "queueQuote": "引用",
     "queueImageCount": "{{count}} 张图片",
     "queueImageOnly": "[仅图片]",
+    "slashSuggestions": "命令与技能建议",
+    "loadingSlashSuggestions": "正在加载命令和技能...",
+    "noSlashSuggestionsFound": "未找到匹配的命令或技能",
     "queueCleared": "已清空排队消息",
     "queueClearConfirmTitle": "清空排队消息？",
     "queueClearConfirmDesc": "这将删除当前会话中 {{count}} 条待发送消息。",
@@ -261,6 +284,12 @@
   },
   "goal": {
     "title": "Goal",
+    "runningTitle": "进行中的目标",
+    "pausedTitle": "已暂停的目标",
+    "blockedTitle": "已阻塞的目标",
+    "usageLimitedTitle": "受配额限制的目标",
+    "completedTitle": "已完成的目标",
+    "limitedTitle": "预算受限的目标",
     "notSet": "未设置",
     "noSessionGoal": "当前会话还没有长期目标。",
     "noUsage": "0 秒",
@@ -274,6 +303,7 @@
     "show": "查看",
     "hide": "收起",
     "managerTitle": "Goal 管理器",
+    "editTitle": "编辑目标",
     "statusLabel": "状态",
     "tokensLabel": "Tokens",
     "budgetLabel": "预算",
@@ -295,11 +325,14 @@
     "status": {
       "active": "进行中",
       "paused": "已暂停",
+      "blocked": "已阻塞",
+      "usage_limited": "受配额限制",
       "budget_limited": "预算耗尽",
       "complete": "已完成"
     },
     "errors": {
-      "invalidBudget": "Token 预算必须是正整数。"
+      "invalidBudget": "Token 预算必须是正整数。",
+      "objectiveOnly": "追求目标只能从文本输入启动。"
     },
     "toasts": {
       "updateFailed": "Goal 更新失败",
@@ -317,8 +350,10 @@
       "budget_updated": "预算已更新",
       "status_changed": "状态已变化",
       "usage_accounted": "本轮用量已记账",
+      "usage_limited": "触发配额限制",
       "budget_limited": "预算已耗尽",
       "completion_deferred": "完成被暂缓",
+      "blocked": "Goal 已阻塞",
       "completed": "Goal 已完成",
       "stall_paused": "因停滞保护暂停",
       "auto_continue_blocked": "自动续跑等待中",
@@ -329,6 +364,8 @@
     "runtime": {
       "budgetReached": "Goal 预算已耗尽。我已停止为这个目标启动新工作；提高预算或替换目标后可以继续。",
       "completionDeferred": "Goal 完成被暂缓。完成门禁发现：{{blockers}}。目标仍保持 active。",
+      "blocked": "同一阻塞已连续多轮出现，Goal 已转为 blocked：{{blockers}}。",
+      "usageLimited": "Goal 因 provider 或 runtime 的配额限制而暂停：{{details}}。",
       "complete": "Goal 已完成。最终审计：{{usage}}；没有未完成任务、失败工具、排队用户消息或待处理 Plan gate。",
       "stallPaused": "Goal 已被停滞保护暂停：连续 {{count}} 轮续跑没有工具或任务进展。检查目标后可手动继续。",
       "autoContinueBlocked": "Goal 自动续跑正在等待：{{blockers}}。"
@@ -354,7 +391,8 @@
       "TaskGet": "获取任务",
       "TaskUpdate": "更新任务",
       "TaskList": "任务列表",
-      "Delete": "删除"
+      "Delete": "删除",
+      "Skill": "技能"
     }
   },
   "toolCall": {
@@ -377,12 +415,51 @@
     },
     "directoryListing": "目录列表",
     "foldersAndFiles": "{{folders}} 个文件夹 · {{files}} 个文件",
+    "lineCount": "{{count}} 行",
+    "charCount": "{{count}} 字符",
+    "tokenCount": "{{value}} tokens",
+    "outputLineCount": "{{count}} 行输出",
+    "lineRange": "{{start}}-{{end}} 行",
+    "lineRangeFrom": "从第 {{start}} 行",
+    "searchInPath": "在 {{path}}",
+    "includeGlob": "包含 {{include}}",
+    "excludeGlob": "排除 {{exclude}}",
+    "imageFile": "图片",
+    "preview": "预览",
+    "timeoutMs": "超时：{{value}}ms",
+    "lineDelta": "-{{old}} / +{{next}} 行",
+    "charDelta": "-{{old}} / +{{next}} 字符",
+    "hiddenLivePayload": "详细的 Write/Edit 内容会在工具完成后显示。",
+    "widget": {
+      "rendering": "正在渲染组件...",
+      "renderingWithChars": "正在渲染组件（{{chars}} 字符）...",
+      "waitingCode": "等待组件代码...",
+      "imageCopied": "图片已复制到剪贴板",
+      "copyImageFailed": "复制图片失败",
+      "copied": "已复制",
+      "copyImage": "复制图片到剪贴板"
+    },
+    "submitReport": {
+      "submitted": "报告已提交",
+      "submitting": "正在提交报告",
+      "live": "实时",
+      "preview": "预览",
+      "copy": "复制报告",
+      "chars": "字符",
+      "lines": "行数",
+      "blocks": "块数",
+      "previewContinues": "报告仍在流式生成，预览会继续更新...",
+      "waiting": "等待报告内容..."
+    },
     "taskList": "任务列表",
     "tasksDone": "{{completed}}/{{total}} 已完成",
     "content": "内容",
     "diff": "差异",
     "appliedSuccessfully": "已成功应用",
+    "skillUsed": "已使用技能",
+    "skillLoading": "正在加载技能",
     "receivingArgs": "正在接收参数...",
+    "executing": "正在执行...",
     "showAll": "显示全部（{{chars}} 字符，{{lines}} 行）",
     "showAllTokens": "显示全部（约 {{tokens}} tokens，{{lines}} 行）",
     "showFirst40": "显示前 40 行",
@@ -468,6 +545,62 @@
       },
       "type": {
         "summary": "模式：{{mode}}"
+      }
+    },
+    "browser": {
+      "running": "浏览器操作执行中",
+      "completed": "浏览器操作已完成",
+      "failed": "浏览器操作失败",
+      "executing": "正在执行浏览器操作...",
+      "input": "输入",
+      "output": "输出",
+      "notes": "补充说明",
+      "screenshotPreview": "截图预览",
+      "contentPreview": "内容预览",
+      "elementsPreview": "可交互元素",
+      "previewTruncated": "前 {{count}} 个字符",
+      "BrowserNavigate": {
+        "title": "浏览器导航"
+      },
+      "BrowserGetContent": {
+        "title": "浏览器内容"
+      },
+      "BrowserScreenshot": {
+        "title": "浏览器截图"
+      },
+      "BrowserSnapshot": {
+        "title": "浏览器快照"
+      },
+      "BrowserClick": {
+        "title": "浏览器点击"
+      },
+      "BrowserType": {
+        "title": "浏览器输入"
+      },
+      "BrowserScroll": {
+        "title": "浏览器滚动"
+      },
+      "fields": {
+        "title": "标题",
+        "url": "URL",
+        "type": "类型",
+        "clicked": "已点击",
+        "element": "元素",
+        "value": "值",
+        "scrollY": "滚动 Y",
+        "scrollHeight": "滚动高度",
+        "viewport": "视口",
+        "elements": "元素"
+      },
+      "summary": {
+        "content": "{{type}} · {{count}} 字符",
+        "screenshot": "{{width}} × {{height}}",
+        "image": "图片",
+        "elements": "{{count}} 个元素",
+        "snapshot": "可交互元素",
+        "type": "输入文本",
+        "typeSubmit": "{{selector}} · 提交",
+        "scrollY": "Y {{value}}"
       }
     }
   },
@@ -575,6 +708,8 @@
     "exporting": "导出中...",
     "copyAll": "复制全部",
     "copied": "已复制！",
+    "loadOlder": "加载更早消息（还有 {{count}} 条）",
+    "loadingOlder": "正在加载更早消息...",
     "scrollToBottom": "滚动到底部",
     "userLocator": {
       "title": "用户消息",
@@ -585,7 +720,10 @@
     "imageCopied": "图片已复制到剪贴板",
     "imageCopiedDesc": "可直接粘贴到聊天或文档中",
     "exportImageFailed": "导出图片失败",
-    "homeWorkspaceCaption": "工作区"
+    "homeWorkspaceCaption": "工作区",
+    "homeTitleChatQuestion": "想聊些什么？",
+    "homeTitleBuildQuestion": "想在 {{name}} 里构建什么？",
+    "thisWorkspace": "当前工作区"
   },
   "projectHome": {
     "noProjectSelected": "未选择项目",
@@ -601,10 +739,57 @@
     "actionsLabel": "快捷入口",
     "noWorkingFolder": "未配置工作目录"
   },
+  "projectArchive": {
+    "noChannelSummary": "查看项目协作频道与连接状态。",
+    "loadFailed": "加载项目记忆档案失败",
+    "saved": "项目记忆档案已保存",
+    "saveFailed": "保存项目记忆档案失败",
+    "noProjectTitle": "未选择项目",
+    "noProjectDesc": "请先返回首页选择一个项目，然后再查看项目记忆档案。",
+    "backHome": "返回首页",
+    "backProject": "返回项目主页",
+    "loading": "正在加载项目记忆档案...",
+    "unsavedState": "有未保存更改",
+    "savedState": "内容已同步",
+    "pathUnavailable": "路径不可用",
+    "reloadAction": "重新加载",
+    "effectiveHint": "优先使用工作目录下的 .agents；如果工作目录根部仍有旧位置文件，也会继续兼容读取并写回原位置。",
+    "memoryRootTitle": "项目记忆根目录",
+    "lastSavedAt": "保存于 {{time}}",
+    "upToDate": "已是最新",
+    "missingFileHint": "{{file}} 尚不存在。已加载初始模板，点击保存即可创建文件。",
+    "legacyLocationHint": "当前文件来自工作目录根部的旧位置，保存时会继续写回原位置以保持兼容。",
+    "placeholder": "在这里编辑 {{file}} ...",
+    "savingAction": "保存中...",
+    "resetAction": "重置",
+    "errorLabel": "错误：",
+    "files": {
+      "agents": {
+        "description": "项目级工作约定、边界与协作规范。"
+      },
+      "soul": {
+        "description": "项目专属的人格与风格补充，会覆盖全局 SOUL.md 的对应部分。"
+      },
+      "user": {
+        "description": "你在这个项目里的偏好、目标与协作方式。"
+      },
+      "memory": {
+        "description": "这个项目的长期记忆、决策与上下文。"
+      },
+      "daily": {
+        "title": "每日记忆",
+        "description": "记录今天的项目临时上下文，后续再整理进 MEMORY.md。"
+      }
+    }
+  },
   "skills": {
     "addActions": "添加操作",
     "addToChat": "添加到对话",
+    "attachMedia": "添加照片和文件",
     "commandsLabel": "命令",
+    "availableCommands": "可用命令",
+    "loadingCommands": "正在加载命令...",
+    "noCommands": "未找到命令",
     "skillsLabel": "技能",
     "availableSkills": "可用技能",
     "loadingSkills": "加载技能中...",
@@ -627,12 +812,26 @@
     "activeChannels": "活跃频道：",
     "activeMcpServers": "活跃的 MCP 服务器：",
     "mcpToolCount": "{{count}} 个工具",
+    "mcpToolCount_one": "{{count}} 个工具",
+    "mcpToolCount_other": "{{count}} 个工具",
     "mcpCount": "{{count}} 个 MCP"
   },
   "userMessage": {
     "you": "你",
     "copied": "已复制",
     "edit": "编辑",
+    "skillLabel": "技能",
+    "addSkill": "添加技能",
+    "changeSkill": "切换技能",
+    "removeSkill": "移除技能",
+    "selectSkill": "选择技能",
+    "imageCopied": "图片已复制",
+    "copyImageFailed": "复制图片失败",
+    "imageAttachment": "图片附件",
+    "copyImageShortcut": "聚焦图片后按 Ctrl/Cmd+C 复制图片",
+    "copyImage": "复制图片",
+    "removeImage": "移除图片",
+    "imagePreview": "图片预览",
     "saveAndResend": "保存并重发"
   },
   "assistantMessage": {
@@ -657,7 +856,7 @@
     "tps": "TPS",
     "regenerateReference": "重新生成参考",
     "continueToolExecution": "继续执行",
-    "continueToolExecutionHint": "检测到上次停在工具执行，点击后会在这条消息里继续，不会新增 AI 消息",
+    "continueToolExecutionHint": "使用已保存的工具结果在这条消息里继续，不会新增 AI 消息，也不会重新执行历史工具",
     "imageError": {
       "titleTimeout": "图片生成超时",
       "descTimeout": "请求已超过 10 分钟。建议简化提示词、降低复杂度后重试。",
@@ -735,9 +934,12 @@
   },
   "fileChange": {
     "created": "已创建",
+    "creating": "创建中",
     "new": "新建",
     "deleted": "已删除",
+    "deleting": "删除中",
     "edited": "已编辑",
+    "editing": "编辑中",
     "fileWillBeDeleted": "文件将被删除",
     "moreLines": "+{{count}} 行更多",
     "unchangedLines": "··· {{count}} 行未变更 ···",
@@ -750,16 +952,27 @@
     "patchSummary": "{{hunks}} 个 hunk · -{{deleted}} / +{{added}} 行",
     "lineCount": "{{count}} 行",
     "charCount": "{{count}} 字符",
+    "compactLineCount": "{{value}} 行",
+    "compactCharCount": "{{value}} 字符",
+    "previewOnly": "预览",
     "streaming": "流式生成中",
     "kept": "该文件已保留。",
     "restored": "该文件已恢复。",
     "rollbackConflictDefault": "该文件在撤回时发生冲突。",
     "individualActions": "你可以单独保留或撤回这个文件。",
+    "undoFileConfirmTitle": "撤销这个文件改动？",
+    "undoFileConfirmDesc": "将撤回对「{{path}}」的已记录改动，此操作不可撤销。",
+    "undoRunConfirmTitle": "撤销代码改动？",
+    "undoRunConfirmDesc": "将撤回 {{count}} 个待处理代码改动，此操作不可撤销。",
+    "undoConfirmAction": "撤销",
     "moreFiles": "还有 {{count}} 个",
     "bulkActionsHint": "你可以在下方逐个处理文件，也可以在这里直接执行批量操作。",
     "conflictedHint": "有些文件在 Agent 结束后又被改动过，所以只回滚了安全可恢复的文件。",
     "runSummary": "共改动 {{files}} 个文件 · {{pending}} 个待处理",
     "filesChanged": "{{count}} 个文件已更改",
+    "showFileList": "显示 {{count}} 个变更文件",
+    "hideFileList": "收起文件列表",
+    "reviewButton": "审核",
     "openReview": "查看更改",
     "reviewPanelTitle": "更改审查",
     "reviewPanelDescription": "右侧查看本次运行涉及的文件列表，左侧切换文件，逐个确认或撤回改动。",

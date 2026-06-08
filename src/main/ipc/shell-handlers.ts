@@ -1,4 +1,7 @@
-import { ipcMain, shell, BrowserWindow } from 'electron'
+import { ipcMain, shell, BrowserWindow, app } from 'electron'
+import { spawn } from 'child_process'
+import * as fs from 'fs'
+import * as path from 'path'
 import { safeSendToWindow } from '../window-ipc'
 import {
   createTerminalSession,
@@ -36,6 +39,7 @@ interface ShellOutputSummary {
   spawnMs?: number
   firstChunkMs?: number
   shell?: string
+  outputFile?: string
   executionEngine?: 'main'
   timedOut?: boolean
   aborted?: boolean
@@ -63,6 +67,13 @@ interface ShellStartedEvent {
   execId: string
   processId: string
   terminalId: string
+}
+
+type OpenWithAppId = 'vscode'
+
+interface OpenCommand {
+  command: string
+  args: string[]
 }
 
 function stripAnsi(raw: string): string {
@@ -177,6 +188,7 @@ function buildShellResult(payload: {
   error?: string
   processId?: string
   terminalId?: string
+  outputFile?: string
   summary: ShellOutputSummary
 } {
   const stdout = compactStreamOutput(
@@ -191,6 +203,10 @@ function buildShellResult(payload: {
     payload.exitCode,
     MAX_RETURNED_STDERR_CHARS
   )
+  const outputFile =
+    stdout.compacted || stderr.compacted
+      ? writeShellOutputArchive(payload.stdout, payload.stderr)
+      : undefined
 
   return {
     exitCode: payload.exitCode,
@@ -199,6 +215,7 @@ function buildShellResult(payload: {
     ...(payload.error ? { error: payload.error } : {}),
     ...(payload.processId ? { processId: payload.processId } : {}),
     ...(payload.terminalId ? { terminalId: payload.terminalId } : {}),
+    ...(outputFile ? { outputFile } : {}),
     summary: {
       mode: stdout.compacted || stderr.compacted ? 'compact' : 'full',
       noisy: stdout.compacted || stderr.compacted,
@@ -208,6 +225,7 @@ function buildShellResult(payload: {
       stderrLines: stderr.totalLines,
       errorLikeLines: stdout.errorLikeLines + stderr.errorLikeLines,
       warningLikeLines: stdout.warningLikeLines + stderr.warningLikeLines,
+      ...(outputFile ? { outputFile } : {}),
       ...(payload.timing
         ? {
             totalMs: payload.timing.totalMs,
@@ -225,11 +243,80 @@ function buildShellResult(payload: {
   }
 }
 
+function writeShellOutputArchive(stdout: string, stderr: string): string | undefined {
+  try {
+    const outputDir = path.join(app.getPath('userData'), 'shell-output')
+    fs.mkdirSync(outputDir, { recursive: true })
+    const filePath = path.join(outputDir, `shell-output-${Date.now()}.txt`)
+    const sections = [
+      stdout ? `# stdout\n${stripAnsi(stdout)}` : '',
+      stderr ? `# stderr\n${stripAnsi(stderr)}` : ''
+    ].filter(Boolean)
+    fs.writeFileSync(filePath, `${sections.join('\n\n')}\n`, 'utf-8')
+    return filePath
+  } catch {
+    return undefined
+  }
+}
+
 async function terminateShellTerminal(terminalId: string): Promise<void> {
   const result = killTerminalSession(terminalId)
   if (result.error) {
     throw new Error(result.error)
   }
+}
+
+function runOpenCommand({ command, args }: OpenCommand): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      detached: false,
+      stdio: 'ignore',
+      windowsHide: true
+    })
+
+    child.on('error', reject)
+    child.on('close', (code) => {
+      if (code === 0) {
+        resolve()
+        return
+      }
+      reject(new Error(`${command} exited with code ${code ?? 'unknown'}`))
+    })
+  })
+}
+
+function getOpenWithCommands(appId: OpenWithAppId, targetPath: string): OpenCommand[] {
+  if (appId !== 'vscode') return []
+
+  if (process.platform === 'darwin') {
+    return [
+      { command: '/usr/bin/open', args: ['-a', 'Visual Studio Code', targetPath] },
+      { command: 'code', args: [targetPath] }
+    ]
+  }
+
+  if (process.platform === 'win32') {
+    return [{ command: 'cmd.exe', args: ['/d', '/s', '/c', 'code', targetPath] }]
+  }
+
+  return [{ command: 'code', args: [targetPath] }]
+}
+
+async function openWithWhitelistedApp(appId: OpenWithAppId, targetPath: string): Promise<void> {
+  const commands = getOpenWithCommands(appId, targetPath)
+  if (commands.length === 0) throw new Error(`Unsupported application: ${appId}`)
+
+  let lastError: unknown
+  for (const command of commands) {
+    try {
+      await runOpenCommand(command)
+      return
+    } catch (err) {
+      lastError = err
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(`Failed to open ${targetPath}`)
 }
 
 export function registerShellHandlers(): void {
@@ -240,7 +327,10 @@ export function registerShellHandlers(): void {
 
   ipcMain.handle(
     'shell:exec',
-    async (event, args: { command: string; timeout?: number; cwd?: string; execId?: string }) => {
+    async (
+      event,
+      args: { command: string; timeout?: number; cwd?: string; execId?: string; shell?: string }
+    ) => {
       const DEFAULT_TIMEOUT = 600_000
       const MAX_TIMEOUT = 3_600_000
       const timeout = Math.min(args.timeout ?? DEFAULT_TIMEOUT, MAX_TIMEOUT)
@@ -252,6 +342,7 @@ export function registerShellHandlers(): void {
         {
           cwd: args.cwd || process.cwd(),
           command: args.command,
+          shell: args.shell,
           title: 'Shell'
         },
         event.sender
@@ -391,6 +482,51 @@ export function registerShellHandlers(): void {
   ipcMain.handle('shell:openPath', async (_event, folderPath: string) => {
     return shell.openPath(folderPath)
   })
+
+  ipcMain.handle('shell:showItemInFolder', async (_event, targetPath: string) => {
+    try {
+      const resolvedPath = path.resolve(targetPath)
+      if (!fs.existsSync(resolvedPath)) {
+        return { error: `Path does not exist: ${resolvedPath}` }
+      }
+
+      shell.showItemInFolder(resolvedPath)
+      return { success: true }
+    } catch (err) {
+      return { error: String(err) }
+    }
+  })
+
+  ipcMain.handle('shell:trashPath', async (_event, targetPath: string) => {
+    try {
+      const resolvedPath = path.resolve(targetPath)
+      if (!fs.existsSync(resolvedPath)) {
+        return { error: `Path does not exist: ${resolvedPath}` }
+      }
+
+      await shell.trashItem(resolvedPath)
+      return { success: true }
+    } catch (err) {
+      return { error: String(err) }
+    }
+  })
+
+  ipcMain.handle(
+    'shell:openWithApp',
+    async (_event, args: { path: string; appId: OpenWithAppId }) => {
+      try {
+        const resolvedPath = path.resolve(args.path)
+        if (!fs.existsSync(resolvedPath)) {
+          return { error: `Path does not exist: ${resolvedPath}` }
+        }
+
+        await openWithWhitelistedApp(args.appId, resolvedPath)
+        return { success: true }
+      } catch (err) {
+        return { error: String(err) }
+      }
+    }
+  )
 
   ipcMain.handle('shell:openExternal', async (_event, url: string) => {
     if (url && (url.startsWith('http://') || url.startsWith('https://'))) {

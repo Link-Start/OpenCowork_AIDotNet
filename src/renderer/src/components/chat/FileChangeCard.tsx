@@ -24,6 +24,7 @@ import { ipcClient } from '@renderer/lib/ipc/ipc-client'
 import { IPC } from '@renderer/lib/ipc/channels'
 import { AnimatePresence, motion } from 'motion/react'
 import { Button } from '@renderer/components/ui/button'
+import { confirm } from '@renderer/components/ui/confirm-dialog'
 import { type DiffViewerChunk, type DiffViewerLine } from './CodeDiffViewer'
 
 // ── Types ────────────────────────────────────────────────────────
@@ -113,7 +114,16 @@ function lineCount(text: string): number {
   return normalized.length === 0 ? 0 : normalized.split('\n').length
 }
 
+function formatCompactCount(value: number): string {
+  if (!Number.isFinite(value)) return '0'
+  return new Intl.NumberFormat(undefined, {
+    notation: value >= 10_000 ? 'compact' : 'standard',
+    maximumFractionDigits: 1
+  }).format(value)
+}
+
 type FilePreviewTone = 'create' | 'edit'
+type CompactActionOp = 'create' | 'modify' | 'delete'
 
 function FilePreviewShell({
   filePath,
@@ -132,14 +142,9 @@ function FilePreviewShell({
   maxHeight?: number
   children: React.ReactNode
 }): React.JSX.Element {
-  const bodyTone =
-    tone === 'create'
-      ? 'border-l-emerald-500 bg-emerald-50/80 dark:border-l-emerald-500/80 dark:bg-emerald-950/15'
-      : 'border-l-amber-500 bg-zinc-50/80 dark:border-l-amber-500/80 dark:bg-[#111214]'
-
   return (
-    <div className="overflow-hidden rounded-md border border-border/60 bg-background shadow-sm dark:border-white/[0.06] dark:bg-[#1f1f1f]">
-      <div className="flex h-8 items-center justify-between gap-3 border-b border-border/60 bg-zinc-50 px-3 dark:border-white/[0.06] dark:bg-[#262626]">
+    <div className="overflow-hidden rounded-md bg-transparent">
+      <div className="flex min-h-7 items-center justify-between gap-3 px-3 py-1">
         <div className="flex min-w-0 items-center gap-2">
           <span
             className="truncate text-[11px] font-medium text-muted-foreground"
@@ -158,7 +163,8 @@ function FilePreviewShell({
         <CompactDiffCopyButton text={copyText} />
       </div>
       <div
-        className={cn('overflow-auto border-l-4', bodyTone)}
+        className="overflow-auto rounded-md bg-transparent"
+        data-tone={tone}
         style={{ maxHeight, fontFamily: MONO_FONT }}
       >
         {children}
@@ -192,13 +198,10 @@ function CodeFrame({
       {lines.map((line, index) => (
         <div
           key={`${index}-${line.length}`}
-          className="grid min-w-full border-b border-border/30 last:border-b-0 dark:border-white/[0.03]"
+          className="grid min-w-full"
           style={{ gridTemplateColumns: `${lineNumberWidth}px max-content` }}
         >
-          <span
-            className="select-none border-r border-border/60 px-2 py-0 text-right dark:border-white/[0.06]"
-            style={{ color: lineNumberColor }}
-          >
+          <span className="select-none px-2 py-0 text-right" style={{ color: lineNumberColor }}>
             {index + 1}
           </span>
           <span className="whitespace-pre px-3 py-0 pr-8 text-foreground/85 dark:text-zinc-200">
@@ -415,16 +418,14 @@ function CompactEditDiff({
       <div
         key={key}
         className={cn(
-          'grid min-w-full border-b border-white/50 text-[11px] leading-5 last:border-b-0 dark:border-white/[0.03]',
-          line.type === 'add' && 'bg-emerald-50/95 dark:bg-emerald-950/20',
-          line.type === 'del' && 'bg-red-50/95 dark:bg-red-950/20',
+          'grid min-w-full bg-transparent text-[11px] leading-5',
           line.type === 'keep' && 'bg-transparent'
         )}
         style={{ gridTemplateColumns: '46px max-content' }}
       >
         <span
           className={cn(
-            'select-none border-r border-border/60 px-2 py-1 text-right dark:border-white/[0.06]',
+            'select-none px-2 py-1 text-right',
             line.type === 'add' && 'text-emerald-600 dark:text-emerald-300',
             line.type === 'del' && 'text-red-600 dark:text-red-300',
             line.type === 'keep' && 'text-muted-foreground dark:text-zinc-500'
@@ -465,7 +466,7 @@ function CompactEditDiff({
             <button
               key={`compact-inline-collapsed-${ci}`}
               type="button"
-              className="flex min-w-full items-center justify-center border-y border-border/60 bg-white/50 px-3 py-2 text-[10px] text-muted-foreground transition-colors hover:bg-white/80 hover:text-foreground dark:border-white/[0.06] dark:bg-white/[0.03] dark:text-zinc-500 dark:hover:bg-white/[0.06] dark:hover:text-zinc-200"
+              className="flex min-w-full items-center justify-center bg-transparent px-3 py-2 text-[10px] text-muted-foreground transition-colors hover:bg-white/50 hover:text-foreground dark:text-zinc-500 dark:hover:bg-white/[0.04] dark:hover:text-zinc-200"
               onClick={() => setExpandedChunks((prev) => new Set([...prev, ci]))}
             >
               {t('toolCall.unchangedLines', {
@@ -571,6 +572,17 @@ function FileIcon({ name }: { name: string }): React.JSX.Element {
   }
 }
 
+function CompactFileIcon({ op }: { op: CompactActionOp }): React.JSX.Element {
+  switch (op) {
+    case 'create':
+      return <FilePlus2 className="size-3.5" />
+    case 'delete':
+      return <FileX2 className="size-3.5" />
+    case 'modify':
+      return <FileEdit className="size-3.5" />
+  }
+}
+
 // ── Change Stats Badge ───────────────────────────────────────────
 
 function ChangeStats({
@@ -673,6 +685,59 @@ function ChangeStats({
   return null
 }
 
+function WriteRealtimeStats({
+  input,
+  resolvedWrite,
+  op
+}: {
+  input: Record<string, unknown>
+  resolvedWrite: ResolvedWritePayload
+  op: Extract<CompactActionOp, 'create' | 'modify'>
+}): React.JSX.Element | null {
+  const { t } = useTranslation('chat')
+  const isCreate = op === 'create'
+  const charTotal =
+    typeof input.content_chars === 'number'
+      ? input.content_chars
+      : resolvedWrite.text.length || resolvedWrite.preview.length
+  const isPreviewOnly = Boolean(input.content_truncated || input.content_omitted)
+
+  if (resolvedWrite.lineTotal <= 0 && charTotal <= 0 && !isPreviewOnly) return null
+
+  return (
+    <span className="flex shrink-0 items-center gap-1.5 text-[10px]">
+      {resolvedWrite.lineTotal > 0 && (
+        <span
+          className={cn(
+            'rounded px-1.5 py-0.5 font-medium',
+            isCreate
+              ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-300'
+              : 'bg-amber-500/10 text-amber-600 dark:text-amber-300'
+          )}
+          title={t('fileChange.lineCount', { count: resolvedWrite.lineTotal })}
+        >
+          {t('fileChange.compactLineCount', {
+            value: `${isCreate ? '+' : ''}${formatCompactCount(resolvedWrite.lineTotal)}`
+          })}
+        </span>
+      )}
+      {charTotal > 0 && (
+        <span
+          className="hidden rounded bg-background/45 px-1.5 py-0.5 text-muted-foreground/75 dark:bg-white/[0.04] sm:inline"
+          title={t('fileChange.charCount', { count: charTotal })}
+        >
+          {t('fileChange.compactCharCount', { value: formatCompactCount(charTotal) })}
+        </span>
+      )}
+      {isPreviewOnly && (
+        <span className="rounded bg-violet-500/10 px-1.5 py-0.5 text-violet-500 dark:text-violet-300">
+          {t('fileChange.previewOnly')}
+        </span>
+      )}
+    </span>
+  )
+}
+
 // ── Inline Diff View ─────────────────────────────────────────────
 
 function InlineDiff({
@@ -690,11 +755,13 @@ function InlineDiff({
 function NewFileContent({
   content,
   filePath,
-  isStreaming
+  isStreaming,
+  tone = 'create'
 }: {
   content: string
   filePath: string
   isStreaming?: boolean
+  tone?: FilePreviewTone
 }): React.JSX.Element {
   const { t } = useTranslation('chat')
   const normalizedContent = React.useMemo(() => normalizeLineEndings(content), [content])
@@ -713,10 +780,10 @@ function NewFileContent({
         added={lines}
         deleted={0}
         copyText={normalizedContent}
-        tone="create"
+        tone={tone}
         maxHeight={isStreaming ? 400 : 300}
       >
-        <CodeFrame content={displayed} filePath={filePath} tone="create" />
+        <CodeFrame content={displayed} filePath={filePath} tone={tone} />
       </FilePreviewShell>
       {isStreaming ? (
         <p className="px-1 text-[10px] text-muted-foreground/70 dark:text-zinc-500">
@@ -757,14 +824,17 @@ function SnapshotSummaryNotice({
     <div className="space-y-3 px-3 py-3 text-[11px] text-muted-foreground dark:text-zinc-400">
       <div className="space-y-1">
         <p>Large file snapshot summarized to avoid storing full before/after text in memory.</p>
-        <p className="font-mono text-[10px] text-muted-foreground/70 dark:text-zinc-600" style={{ fontFamily: MONO_FONT }}>
+        <p
+          className="font-mono text-[10px] text-muted-foreground/70 dark:text-zinc-600"
+          style={{ fontFamily: MONO_FONT }}
+        >
           {details}
         </p>
       </div>
       {children}
       {after.previewText && (
         <pre
-          className="overflow-auto whitespace-pre-wrap break-words rounded-md border border-border/60 bg-background/80 px-2.5 py-2 text-[11px] text-foreground/85 dark:border-zinc-800/80 dark:bg-[#111214] dark:text-zinc-200"
+          className="overflow-auto whitespace-pre-wrap break-words rounded-md bg-transparent px-2.5 py-2 text-[11px] text-foreground/85 dark:text-zinc-200"
           style={{ fontFamily: MONO_FONT, maxHeight: '180px' }}
         >
           {after.previewText}
@@ -782,8 +852,6 @@ function PendingEditPreview({ input }: { input: Record<string, unknown> }): Reac
   const explanation = input.explanation ? String(input.explanation) : null
   const oldStr = typeof input.old_string === 'string' ? input.old_string : ''
   const newStr = typeof input.new_string === 'string' ? input.new_string : ''
-  const oldPreview =
-    typeof input.old_string_preview === 'string' ? input.old_string_preview : oldStr
   const newPreview =
     typeof input.new_string_preview === 'string' ? input.new_string_preview : newStr
   const oldChars =
@@ -792,32 +860,37 @@ function PendingEditPreview({ input }: { input: Record<string, unknown> }): Reac
     typeof input.new_string_chars === 'number' ? input.new_string_chars : newStr.length
   const showingExcerpt = Boolean(input.old_string_truncated || input.new_string_truncated)
   const hasCounts = oldChars > 0 || newChars > 0
-  const hasDiffPreview = Boolean(oldPreview || newPreview)
+  const hasNewPreview = Boolean(newPreview)
 
   return (
-    <div className="space-y-2 px-3 py-3 text-[11px] text-foreground/85 dark:text-zinc-300">
-      <div className="flex flex-wrap items-center gap-2">
-        {filePath && !hasDiffPreview && (
-          <span className="font-mono text-[10px] text-muted-foreground dark:text-zinc-500" style={{ fontFamily: MONO_FONT }}>
-            {shortPath(filePath)}
-          </span>
+    <div className="space-y-2 text-[11px] text-foreground/85 dark:text-zinc-300">
+      <div className="space-y-2 px-3 pt-3">
+        <div className="flex flex-wrap items-center gap-2">
+          {filePath && !hasNewPreview && (
+            <span
+              className="font-mono text-[10px] text-muted-foreground dark:text-zinc-500"
+              style={{ fontFamily: MONO_FONT }}
+            >
+              {shortPath(filePath)}
+            </span>
+          )}
+          {hasCounts && (
+            <span className="text-[10px] text-muted-foreground dark:text-zinc-500">
+              {t('fileChange.charTransition', { from: oldChars, to: newChars })}
+            </span>
+          )}
+        </div>
+        {explanation && (
+          <p className="text-[11px] text-muted-foreground dark:text-zinc-400">{explanation}</p>
         )}
-        {hasCounts && (
-          <span className="text-[10px] text-muted-foreground dark:text-zinc-500">
-            {t('fileChange.charTransition', { from: oldChars, to: newChars })}
-          </span>
+        {showingExcerpt && (
+          <p className="text-[10px] text-muted-foreground/70 dark:text-zinc-600">
+            {t('fileChange.showingExcerpt')}
+          </p>
         )}
       </div>
-      {explanation && <p className="text-[11px] text-muted-foreground dark:text-zinc-400">{explanation}</p>}
-      {showingExcerpt && (
-        <p className="text-[10px] text-muted-foreground/70 dark:text-zinc-600">{t('fileChange.showingExcerpt')}</p>
-      )}
-      {hasDiffPreview && (
-        <CompactEditDiff
-          oldStr={oldPreview || ''}
-          newStr={newPreview || ''}
-          filePath={filePath}
-        />
+      {hasNewPreview && (
+        <NewFileContent content={newPreview} filePath={filePath} isStreaming tone="edit" />
       )}
     </div>
   )
@@ -927,10 +1000,12 @@ function TrackedEditDiff({
 
 function PendingWritePreview({
   input,
-  isStreaming
+  isStreaming,
+  op = 'modify'
 }: {
   input: Record<string, unknown>
   isStreaming: boolean
+  op?: Extract<CompactActionOp, 'create' | 'modify'>
 }): React.JSX.Element {
   const filePath = String(input.file_path ?? input.path ?? '')
   const content = typeof input.content === 'string' ? input.content : null
@@ -940,13 +1015,24 @@ function PendingWritePreview({
   const previewBase =
     content ?? (previewTail ? `${preview ?? ''}\n...\n${previewTail}` : preview) ?? ''
   const visiblePreview =
-    previewBase && input.content_truncated && !previewTail && content === null
+    previewBase &&
+    input.content_truncated &&
+    !previewTail &&
+    content === null &&
+    !previewBase.startsWith('…')
       ? `${previewBase}\n...`
       : previewBase
 
   if (!visiblePreview) return <></>
 
-  return <NewFileContent content={visiblePreview} filePath={filePath} isStreaming={isStreaming} />
+  return (
+    <NewFileContent
+      content={visiblePreview}
+      filePath={filePath}
+      isStreaming={isStreaming}
+      tone={op === 'create' ? 'create' : 'edit'}
+    />
+  )
 }
 
 interface ResolvedEditPayload {
@@ -1066,9 +1152,7 @@ function resolveEditSummaryDiff(
 }
 
 function trackedStatusLabelKey(change: AgentRunFileChange): string {
-  if (change.status === 'accepted') return 'fileChange.status.accepted'
   if (change.status === 'reverted') return 'fileChange.status.reverted'
-  if (change.status === 'conflicted') return 'fileChange.status.conflict'
   return 'fileChange.status.pending'
 }
 
@@ -1077,20 +1161,15 @@ function trackedTransportLabelKey(change: AgentRunFileChange): string {
 }
 
 function trackedStatusTone(change: AgentRunFileChange): string {
-  if (change.status === 'accepted')
-    return 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-500'
   if (change.status === 'reverted')
     return 'bg-muted text-foreground/70 dark:bg-zinc-500/10 dark:text-zinc-300'
-  if (change.status === 'conflicted') return 'bg-amber-500/10 text-amber-600 dark:text-amber-500'
   return change.transport === 'ssh'
     ? 'bg-sky-500/10 text-sky-600 dark:text-sky-400'
     : 'bg-blue-500/10 text-blue-600 dark:text-blue-400'
 }
 
 function trackedStatusDotTone(change: AgentRunFileChange): string {
-  if (change.status === 'accepted') return 'bg-emerald-400'
   if (change.status === 'reverted') return 'bg-zinc-500'
-  if (change.status === 'conflicted') return 'bg-amber-400'
   return change.transport === 'ssh' ? 'bg-sky-400' : 'bg-zinc-400'
 }
 
@@ -1110,18 +1189,17 @@ export function FileChangeCard({
   const resolvedEdit = React.useMemo(() => resolveEditPayload(input), [input])
   const resolvedWrite = React.useMemo(() => resolveWritePayload(input), [input])
   const isActive = status === 'streaming' || status === 'running' || status === 'pending_approval'
+  const isRealtimeWrite =
+    name === 'Write' && !trackedChange && (status === 'streaming' || status === 'running')
   const [collapsed, setCollapsed] = React.useState(!isActive)
-  const acceptFileChange = useAgentStore((state) => state.acceptFileChange)
-  const rollbackFileChange = useAgentStore((state) => state.rollbackFileChange)
-  const [isAcceptingFile, setIsAcceptingFile] = React.useState(false)
-  const [isRollingBackFile, setIsRollingBackFile] = React.useState(false)
+  const undoFileChange = useAgentStore((state) => state.undoFileChange)
+  const [isUndoingFile, setIsUndoingFile] = React.useState(false)
 
   const filePath = String(input.file_path ?? input.path ?? '')
   const elapsed =
     startedAt && completedAt ? ((completedAt - startedAt) / 1000).toFixed(1) + 's' : null
   const outputStr = typeof output === 'string' ? output : undefined
-  const isFileActionable =
-    trackedChange?.status === 'open' || trackedChange?.status === 'conflicted'
+  const isFileActionable = trackedChange?.status === 'open'
   const parsedOutput = outputStr ? decodeStructuredToolResult(outputStr) : null
   const parsedOutputError =
     parsedOutput && !Array.isArray(parsedOutput) && typeof parsedOutput.error === 'string'
@@ -1132,17 +1210,28 @@ export function FileChangeCard({
     !Array.isArray(parsedOutput) &&
     parsedOutput.success === true
   )
-  const writeOp =
+  const outputWriteOp =
     trackedChange?.op ??
     (parsedOutput &&
     !Array.isArray(parsedOutput) &&
     (parsedOutput.op === 'create' || parsedOutput.op === 'modify')
       ? (parsedOutput.op as 'create' | 'modify')
       : undefined)
-  const compactActionOp: 'create' | 'modify' | 'delete' =
-    name === 'Delete'
-      ? 'delete'
-      : (trackedChange?.op ?? (name === 'Write' ? (writeOp ?? 'create') : 'modify'))
+  const effectiveWriteOp = name === 'Write' ? (outputWriteOp ?? 'modify') : undefined
+  const compactActionOp: CompactActionOp =
+    name === 'Delete' ? 'delete' : name === 'Write' ? (effectiveWriteOp ?? 'modify') : 'modify'
+  const compactActionLabel =
+    compactActionOp === 'create'
+      ? isActive
+        ? t('fileChange.creating')
+        : t('fileChange.created')
+      : compactActionOp === 'delete'
+        ? isActive
+          ? t('fileChange.deleting')
+          : t('fileChange.deleted')
+        : isActive
+          ? t('fileChange.editing')
+          : t('fileChange.edited')
   const isOutputError = outputStr
     ? Boolean(parsedOutputError) || (!parsedOutput && outputStr.length > 0)
     : false
@@ -1152,14 +1241,7 @@ export function FileChangeCard({
     [resolvedEdit, trackedChange]
   )
   const useCompactChangeLayout = name === 'Edit' || name === 'Delete' || name === 'Write'
-  const compactActiveShellClass =
-    status === 'streaming'
-      ? 'my-0.5 rounded-lg border border-violet-500/25 bg-violet-500/[0.035] dark:bg-violet-500/[0.045]'
-      : status === 'running'
-        ? 'my-0.5 rounded-lg border border-blue-500/25 bg-blue-500/[0.035] dark:bg-blue-500/[0.045]'
-        : status === 'pending_approval'
-          ? 'my-0.5 rounded-lg border border-amber-500/25 bg-amber-500/[0.035] dark:bg-amber-500/[0.045]'
-          : ''
+  const compactActiveShellClass = 'bg-transparent'
   const canRenderTrackedWriteDiff =
     !!trackedChange &&
     trackedChange.op === 'modify' &&
@@ -1201,13 +1283,13 @@ export function FileChangeCard({
     !trackedChange &&
     status !== 'streaming' &&
     status !== 'running' &&
-    writeOp === 'modify'
+    effectiveWriteOp === 'modify'
   const showSettledWriteNewFile =
     name === 'Write' &&
     !trackedChange &&
     status !== 'streaming' &&
     status !== 'running' &&
-    writeOp !== 'modify' &&
+    effectiveWriteOp === 'create' &&
     !!resolvedWrite.preview
   const showDeleteNotice = name === 'Delete'
   const hasExpandedContent =
@@ -1230,33 +1312,28 @@ export function FileChangeCard({
         ? 'border-blue-500/30'
         : status === 'error' || (isOutputError && !isSuccess)
           ? 'border-destructive/30'
-          : trackedChange?.status === 'conflicted'
-            ? 'border-amber-500/30'
-            : trackedChange?.status === 'accepted'
-              ? 'border-emerald-500/20'
-              : name === 'Write'
-                ? 'border-green-500/20'
-                : name === 'Delete'
-                  ? 'border-red-500/20'
-                  : 'border-amber-500/20'
+          : trackedChange?.status === 'reverted'
+            ? 'border-muted-foreground/20'
+            : name === 'Write'
+              ? 'border-green-500/20'
+              : name === 'Delete'
+                ? 'border-red-500/20'
+                : 'border-amber-500/20'
 
-  const handleAcceptFile = async (): Promise<void> => {
+  const handleUndoFile = async (): Promise<void> => {
     if (!trackedChange || !isFileActionable) return
-    setIsAcceptingFile(true)
+    const confirmed = await confirm({
+      title: t('fileChange.undoFileConfirmTitle'),
+      description: t('fileChange.undoFileConfirmDesc', { path: filePath }),
+      confirmLabel: t('fileChange.undoConfirmAction'),
+      variant: 'destructive'
+    })
+    if (!confirmed) return
+    setIsUndoingFile(true)
     try {
-      await acceptFileChange(trackedChange.runId, trackedChange.id)
+      await undoFileChange(trackedChange.runId, trackedChange.id)
     } finally {
-      setIsAcceptingFile(false)
-    }
-  }
-
-  const handleRollbackFile = async (): Promise<void> => {
-    if (!trackedChange || !isFileActionable) return
-    setIsRollingBackFile(true)
-    try {
-      await rollbackFileChange(trackedChange.runId, trackedChange.id)
-    } finally {
-      setIsRollingBackFile(false)
+      setIsUndoingFile(false)
     }
   }
 
@@ -1291,63 +1368,76 @@ export function FileChangeCard({
         {useCompactChangeLayout ? (
           <div
             className={cn(
-              'flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-muted-foreground transition-colors group-hover:text-foreground',
-              isActive && 'min-h-8'
+              'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-muted-foreground transition-colors group-hover:text-foreground',
+              isActive && 'min-h-10'
             )}
             title={filePath || undefined}
           >
-            <span className="shrink-0 text-[10px] font-medium text-muted-foreground">
-              {compactActionOp === 'create'
-                ? t('fileChange.created')
-                : compactActionOp === 'delete'
-                  ? t('fileChange.deleted')
-                  : t('fileChange.edited')}
+            <span className="flex size-3.5 shrink-0 items-center justify-center text-muted-foreground/70">
+              <CompactFileIcon op={compactActionOp} />
             </span>
-            <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-sky-500 transition-colors group-hover:text-sky-600 dark:text-sky-300 dark:group-hover:text-sky-200">
-              {filePath ? (
-                fileName(filePath)
+            <span className="min-w-0 flex-1">
+              <span className="flex min-w-0 items-center gap-1.5">
+                <span className="shrink-0 text-[10px] font-medium text-muted-foreground">
+                  {compactActionLabel}
+                </span>
+                <span className="min-w-0 truncate text-[12px] font-semibold text-sky-600 transition-colors group-hover:text-sky-700 dark:text-sky-200 dark:group-hover:text-sky-100">
+                  {filePath ? (
+                    fileName(filePath)
+                  ) : (
+                    <span className="text-zinc-500 italic animate-pulse">
+                      {t('toolCall.receivingArgs')}
+                    </span>
+                  )}
+                </span>
+              </span>
+            </span>
+            <span className="flex shrink-0 items-center gap-1.5">
+              {compactEditDiff ? (
+                <>
+                  <span className="shrink-0 text-[10px] font-medium text-emerald-500 dark:text-emerald-400/90">
+                    +{compactEditDiff.added}
+                  </span>
+                  <span className="shrink-0 text-[10px] font-medium text-red-500/90 dark:text-red-400/90">
+                    -{compactEditDiff.deleted}
+                  </span>
+                </>
+              ) : isRealtimeWrite ? (
+                <WriteRealtimeStats
+                  input={input}
+                  resolvedWrite={resolvedWrite}
+                  op={compactActionOp === 'create' ? 'create' : 'modify'}
+                />
               ) : (
-                <span className="text-zinc-500 italic animate-pulse">
-                  {t('toolCall.receivingArgs')}
+                <ChangeStats name={name} input={input} trackedChange={trackedChange} minimal />
+              )}
+              {hasCompactError ? (
+                <span
+                  className="size-1.5 shrink-0 rounded-full bg-red-500 dark:bg-red-400"
+                  title={error || parsedOutputError || t('error.label', { ns: 'common' })}
+                />
+              ) : trackedChange ? (
+                <span
+                  className={cn(
+                    'size-1.5 shrink-0 rounded-full',
+                    trackedStatusDotTone(trackedChange)
+                  )}
+                  title={`${t(trackedTransportLabelKey(trackedChange))} / ${t(trackedStatusLabelKey(trackedChange))}`}
+                />
+              ) : (
+                <CompactStatusDot status={status} />
+              )}
+              {elapsed && (
+                <span className="shrink-0 text-[9px] tabular-nums text-muted-foreground/70">
+                  {elapsed}
                 </span>
               )}
+              {collapsed ? (
+                <ChevronRight className="size-3 shrink-0 text-muted-foreground/70" />
+              ) : (
+                <ChevronDown className="size-3 shrink-0 text-muted-foreground/70" />
+              )}
             </span>
-            {compactEditDiff ? (
-              <>
-                <span className="shrink-0 text-[10px] font-medium text-emerald-500 dark:text-emerald-400/90">
-                  +{compactEditDiff.added}
-                </span>
-                <span className="shrink-0 text-[10px] font-medium text-red-500/90 dark:text-red-400/90">
-                  -{compactEditDiff.deleted}
-                </span>
-              </>
-            ) : (
-              <ChangeStats name={name} input={input} trackedChange={trackedChange} minimal />
-            )}
-            {hasCompactError ? (
-              <span
-                className="size-1.5 shrink-0 rounded-full bg-red-500 dark:bg-red-400"
-                title={error || parsedOutputError || t('error.label', { ns: 'common' })}
-              />
-            ) : trackedChange ? (
-              <span
-                className={cn(
-                  'size-1.5 shrink-0 rounded-full',
-                  trackedStatusDotTone(trackedChange)
-                )}
-                title={`${t(trackedTransportLabelKey(trackedChange))} / ${t(trackedStatusLabelKey(trackedChange))}`}
-              />
-            ) : (
-              <CompactStatusDot status={status} />
-            )}
-            {elapsed && (
-              <span className="shrink-0 text-[9px] tabular-nums text-muted-foreground/70">{elapsed}</span>
-            )}
-            {collapsed ? (
-              <ChevronRight className="size-3 shrink-0 text-muted-foreground/70" />
-            ) : (
-              <ChevronDown className="size-3 shrink-0 text-muted-foreground/70" />
-            )}
           </div>
         ) : (
           <>
@@ -1383,7 +1473,9 @@ export function FileChangeCard({
               </span>
             )}
             {elapsed && (
-              <span className="text-[9px] text-muted-foreground/70 tabular-nums shrink-0">{elapsed}</span>
+              <span className="text-[9px] text-muted-foreground/70 tabular-nums shrink-0">
+                {elapsed}
+              </span>
             )}
             <StatusIndicator status={status} />
           </>
@@ -1436,10 +1528,14 @@ export function FileChangeCard({
               <SnapshotSummaryNotice after={trackedChange.after} />
             )}
             {showPendingWriteStreaming && (
-              <PendingWritePreview input={input} isStreaming={status === 'streaming'} />
+              <PendingWritePreview
+                input={input}
+                isStreaming={status === 'streaming'}
+                op={compactActionOp === 'create' ? 'create' : 'modify'}
+              />
             )}
             {showSettledWriteModifyPreview && (
-              <PendingWritePreview input={input} isStreaming={false} />
+              <PendingWritePreview input={input} isStreaming={false} op="modify" />
             )}
             {showSettledWriteNewFile && (
               <NewFileContent
@@ -1468,52 +1564,22 @@ export function FileChangeCard({
         >
           <div className="flex items-center justify-between gap-2">
             <p className="text-[10px] text-muted-foreground">
-              {trackedChange.status === 'accepted'
-                ? t('fileChange.kept')
-                : trackedChange.status === 'reverted'
-                  ? t('fileChange.restored')
-                  : trackedChange.status === 'conflicted'
-                    ? (trackedChange.conflict ?? t('fileChange.rollbackConflictDefault'))
-                    : t('fileChange.individualActions')}
+              {trackedChange.status === 'reverted'
+                ? t('fileChange.restored')
+                : t('fileChange.individualActions')}
             </p>
             <div className="flex items-center gap-2">
               <Button
                 type="button"
                 size="xs"
-                variant={useCompactChangeLayout ? 'ghost' : 'outline'}
+                variant={useCompactChangeLayout ? 'ghost' : 'destructive'}
                 className={
-                  useCompactChangeLayout
-                    ? 'text-emerald-600 hover:bg-zinc-100 dark:text-emerald-300 dark:hover:bg-white/[0.04]'
-                    : undefined
+                  useCompactChangeLayout ? 'text-zinc-200 hover:bg-white/[0.04]' : undefined
                 }
-                onClick={handleAcceptFile}
-                disabled={!isFileActionable || isAcceptingFile || isRollingBackFile}
+                onClick={handleUndoFile}
+                disabled={!isFileActionable || isUndoingFile}
               >
-                {isAcceptingFile ? <Loader2 className="size-3 animate-spin" /> : null}
-                {t('action.allow', { ns: 'common' })}
-              </Button>
-              <Button
-                type="button"
-                size="xs"
-                variant={
-                  useCompactChangeLayout
-                    ? 'ghost'
-                    : trackedChange.status === 'conflicted'
-                      ? 'outline'
-                      : 'destructive'
-                }
-                className={
-                  useCompactChangeLayout
-                    ? cn(
-                        'hover:bg-white/[0.04]',
-                        trackedChange.status === 'conflicted' ? 'text-amber-300' : 'text-zinc-200'
-                      )
-                    : undefined
-                }
-                onClick={handleRollbackFile}
-                disabled={!isFileActionable || isAcceptingFile || isRollingBackFile}
-              >
-                {isRollingBackFile ? <Loader2 className="size-3 animate-spin" /> : null}
+                {isUndoingFile ? <Loader2 className="size-3 animate-spin" /> : null}
                 {t('action.undo', { ns: 'common' })}
               </Button>
             </div>

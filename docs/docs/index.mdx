@@ -1,79 +1,74 @@
 ---
-title: 欢迎使用 OpenCowork
-description: OpenCowork 是一个基于 Electron + React + TypeScript 的桌面 AI Agent 应用。
+title: OpenCowork
+description: Local-first desktop workspace for multi-agent AI collaboration, local tools, and workplace messaging.
 ---
 
-# 欢迎使用 OpenCowork
+# OpenCowork
 
-OpenCowork 是由 [AIDotNet](https://github.com/AIDotNet) 团队打造的多 Agent 协作工作台，基于 **Electron + React + TypeScript** 构建，支持 18+ AI 提供商、20+ 工具能力，并与飞书、钉钉、Telegram 等消息平台无缝衔接，可在本地安全地 orchestration 你的自动化工作流。
+OpenCowork 是一个 **local-first 桌面 AI Agent 工作站**。它把聊天、工具调用、文件读写、Shell、MCP、子代理、Agent 团队、Cron 任务和工作消息平台接入放在同一个本地应用里。
 
-OpenCowork is an opinionated yet extensible desktop AI Agent platform. It ships with a production-ready agent loop, tool registry, SQLite persistence, and a plugin-friendly UI so that teams can orchestrate complex automations entirely on-device.
+<SignalGrid>
+  <Signal title="runtime" value="Electron + local tools">
+    main process 持有文件、Shell、SQLite、MCP、SSH、Cron 和 channel 权限。
+  </Signal>
+  <Signal title="agents" value="Sub-agents + teams">
+    会话可以调用工具、压缩上下文、拆分子代理，并在团队模式中协作。
+  </Signal>
+  <Signal title="channels" value="Workplace messaging">
+    支持飞书、钉钉、Discord、Telegram、QQ、微信、企业微信和 WhatsApp。
+  </Signal>
+</SignalGrid>
 
-> ⚡ 通过 Agent Loop + Tool System，你可以把检索、写作、脚本执行、数据库操作等任务交给多个 AI Agent 协同完成，同时保留本地审阅与审批流程。
+<DocCards>
+  <DocCard title="Get started" href="/docs/start" description="安装、配置，并跑通第一条本地 Agent 会话。" eyebrow="first path" />
+  <DocCard title="Channels" href="/docs/channels" description="把 OpenCowork 接入工作消息平台和社区聊天工具。" />
+  <DocCard title="Agents" href="/docs/agents" description="理解 agent loop、会话、上下文压缩、子代理和团队协作。" />
+</DocCards>
 
-## 快速导航 / Quick Navigation
+## Documentation index
 
-<Cards>
-  <Card
-    title="快速开始"
-    href="/docs/getting-started/introduction"
-    description="了解 OpenCowork 的核心特性并完成安装"
-  />
-  <Card
-    title="核心概念"
-    href="/docs/core-concepts/agent-loop"
-    description="深入理解 Agent 循环与工具系统"
-  />
-  <Card
-    title="功能特性"
-    href="/docs/features/chat-modes"
-    description="探索聊天模式、子代理、团队协作"
-  />
-  <Card title="插件系统" href="/docs/plugins/overview" description="配置消息平台自动回复" />
-  <Card
-    title="AI 提供商"
-    href="/docs/providers/overview"
-    description="配置 Claude、GPT、DeepSeek 等模型"
-  />
-  <Card
-    title="架构设计"
-    href="/docs/architecture/overview"
-    description="了解 Electron 进程模型与数据库设计"
-  />
-</Cards>
+完整页面索引可以从 [`/llms.txt`](/llms.txt) 获取，完整 Markdown 语料可以从 [`/llms-full.txt`](/llms-full.txt) 获取。它们用于让 AI 助手先发现页面，再深入阅读具体主题。
 
-## 为什么选择 OpenCowork / Why OpenCowork
+<CommandGroup title="LLM-friendly entrypoints" description="给 AI 助手或外部索引器使用。">
+  <CommandItem label="Page list" command="/llms.txt" />
+  <CommandItem label="Full corpus" command="/llms-full.txt" />
+  <CommandItem label="Single page" command="/docs/agents/agent-loop.mdx" />
+</CommandGroup>
 
-- **多 Agent 协作 (Multi-Agent Teams)**：内置 Team & SubAgent 运行器，可让多个 Agent 并行 / 串行处理任务，通过审批流插入人工决策。
-- **工具生态 (Rich Tooling)**：提供文件系统、Shell、搜索、Todo、预览等 15+ 工具，并支持自定义技能（Skills）与外部 API 代理。
-- **本地优先 (Local-first)**：Electron 主进程管理数据库、进程与密钥，所有消息与配置都保留在本地机器，便于审计与自托管。
-- **跨平台通知 (Messaging Integrations)**：内置飞书、钉钉、Telegram 等连接器，自动将 Agent 输出同步到你的工作群或机器人。
+## What ships today
 
-## 即刻开始 / Get Started in Minutes
+| Area | Current implementation |
+| --- | --- |
+| Desktop runtime | Electron 36, React 19, TypeScript strict, Tailwind CSS v4 |
+| Local system access | Main process owns file I/O, shell, database, MCP, SSH, Cron, channels |
+| Agent runtime | Renderer-driven loop with tool phases, sub-agents, teams, plans, and goals |
+| Messaging channels | Feishu, DingTalk, WeCom, QQ, Weixin, Telegram, Discord, WhatsApp |
+| Model providers | OpenAI, Anthropic, DeepSeek, Google, Ollama, Qwen, Moonshot, MiniMax, Baidu, Azure OpenAI, Copilot, Codex, and compatible endpoints |
+| Persistence | SQLite under `~/.open-cowork/`, plus JSON config and local agent/skill files |
 
-1. **下载与安装**：参考 [安装指南](/docs/getting-started/installation) 获取最新版本，支持 Windows / macOS / Linux。
-2. **配置提供商**：在「AI 提供商」面板中填入 API Key，可一次性接入 Claude、GPT、DeepSeek、月之暗面等模型。
-3. **创建工作台**：使用预置的「聊天模式」「Agent 团队」模板，或通过 `agents/*.md` 自定义专属 Agent。
-4. **串联自动化**：借助工具系统编排文件写入、Shell 执行与外部 Webhook，使 Agent 产出的结果落地到实际业务流程。
+## Start here
 
-## 功能速览 / Feature Glimpse
+<DocCards>
+  <DocCard title="Install" href="/docs/install" description="下载桌面应用，或从源码启动文档和应用。" />
+  <DocCard title="Capabilities" href="/docs/capabilities" description="查看工具系统、MCP、计划模式、文件预览和插件能力。" />
+  <DocCard title="Models" href="/docs/models" description="配置 provider、模型预设、本地模型和兼容 API。" />
+  <DocCard title="Ops" href="/docs/ops" description="配置、定时任务、SQLite 数据和运行时维护。" />
+  <DocCard title="Reference" href="/docs/reference" description="进程模型、IPC、状态管理、构建和贡献指南。" />
+  <DocCard title="Help" href="/docs/help" description="排障、FAQ 和社区支持入口。" />
+</DocCards>
 
-| 模块          | 描述                                                                    |
-| ------------- | ----------------------------------------------------------------------- |
-| Agent Loop    | 基于 AsyncGenerator 的流式循环，实时展示模型思考、工具调用与结果。      |
-| Tool Registry | 文件、搜索、Shell、Todo、技能加载等工具统一注册，支持热插拔。           |
-| IPC & DB      | 通过 Electron IPC 连接主进程 SQLite（WAL），保障数据可靠与高性能。      |
-| UI/UX         | React 19 + Tailwind CSS 4 + shadcn/ui，提供聊天、协作、设置等完整界面。 |
+## Local-first shape
 
-## 加入社群 / Join the Community
+```txt
+Main process     system tools, SQLite, channels, MCP, SSH, Cron
+Preload bridge   narrow, typed IPC surface
+Renderer UI      React workspace, chat, previews, stores, agent loop
+Shared types     stream protocol, tool contracts, team runtime events
+```
 
-与其他开发者一起讨论多 Agent 的最佳实践、分享自动化成果，或第一时间获取版本更新。
+## Community
 
 <figure>
-  <img src="/fieshu.png" alt="OpenCowork 飞书交流群二维码" width="360" />
-  <figcaption>
-    扫码进入飞书群，获取实时更新与支持 / Scan the QR code to join the Feishu group.
-  </figcaption>
+  <img src="/fieshu.png" alt="OpenCowork 飞书交流群二维码" width="300" />
+  <figcaption>扫码进入飞书群，获取更新与支持 / Scan the QR code to join the Feishu group.</figcaption>
 </figure>
-
-> 需要企业级支持或定制功能？欢迎在飞书群内留下需求，或直接在 [GitHub Issues](https://github.com/AIDotNet/OpenCowork/issues) 反馈。

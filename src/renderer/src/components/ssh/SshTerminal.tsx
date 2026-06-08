@@ -1,5 +1,6 @@
 import { useEffect, useRef, useCallback, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { useTheme } from 'next-themes'
 import { Terminal as XTerm } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
@@ -8,7 +9,7 @@ import { Unicode11Addon } from '@xterm/addon-unicode11'
 import '@xterm/xterm/css/xterm.css'
 import { ipcClient } from '@renderer/lib/ipc/ipc-client'
 import { IPC } from '@renderer/lib/ipc/channels'
-import { getTerminalTheme } from '@renderer/lib/theme-presets'
+import { getTerminalTheme, resolveAppThemeMode } from '@renderer/lib/theme-presets'
 import { useSettingsStore } from '@renderer/stores/settings-store'
 import { useSshStore } from '@renderer/stores/ssh-store'
 import { Badge } from '@renderer/components/ui/badge'
@@ -30,8 +31,13 @@ interface SshTerminalProps {
 
 export function SshTerminal({ sessionId }: SshTerminalProps): React.JSX.Element {
   const { t } = useTranslation('ssh')
+  const { resolvedTheme } = useTheme()
+  const theme = useSettingsStore((state) => state.theme)
   const terminalThemePreset = useSettingsStore((state) => state.sshTerminalThemePreset)
-  const terminalTheme = getTerminalTheme(terminalThemePreset, 'dark')
+  const terminalTheme = getTerminalTheme(
+    terminalThemePreset,
+    resolveAppThemeMode(theme === 'system' ? resolvedTheme : theme)
+  )
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<XTerm | null>(null)
   const fitAddonRef = useRef<FitAddon | null>(null)
@@ -70,11 +76,35 @@ export function SshTerminal({ sessionId }: SshTerminalProps): React.JSX.Element 
     term.unicode.activeVersion = '11'
 
     term.open(containerRef.current)
-    fitAddon.fit()
 
     termRef.current = term
     fitAddonRef.current = fitAddon
     searchAddonRef.current = searchAddon
+
+    const notifyRemoteResize = (): void => {
+      ipcClient.send(IPC.SSH_RESIZE, {
+        sessionId,
+        cols: term.cols,
+        rows: term.rows
+      })
+    }
+
+    const fitTerminal = (): void => {
+      try {
+        fitAddon.fit()
+        notifyRemoteResize()
+      } catch {
+        // ignore
+      }
+    }
+
+    const scheduleFit = (): void => {
+      requestAnimationFrame(() => {
+        fitTerminal()
+      })
+    }
+
+    scheduleFit()
 
     // Track selection changes
     const selectionDisposable = term.onSelectionChange(() => {
@@ -160,50 +190,45 @@ export function SshTerminal({ sessionId }: SshTerminalProps): React.JSX.Element 
 
     // Fit on window resize
     const handleWindowResize = (): void => {
-      fitAddon.fit()
+      scheduleFit()
     }
     window.addEventListener('resize', handleWindowResize)
 
+    const visualViewport = window.visualViewport
+    const handleViewportResize = (): void => {
+      scheduleFit()
+    }
+    visualViewport?.addEventListener('resize', handleViewportResize)
+
     // ResizeObserver for container resize
     const resizeObserver = new ResizeObserver(() => {
-      requestAnimationFrame(() => {
-        try {
-          fitAddon.fit()
-        } catch {
-          // ignore
-        }
-      })
+      scheduleFit()
     })
     resizeObserver.observe(containerRef.current)
 
     // Re-fit when terminal becomes visible again (e.g. page switch back)
     const intersectionObserver = new IntersectionObserver((entries) => {
       if (entries[0]?.isIntersecting) {
-        requestAnimationFrame(() => {
-          try {
-            fitAddon.fit()
-            ipcClient.send(IPC.SSH_RESIZE, {
-              sessionId,
-              cols: term.cols,
-              rows: term.rows
-            })
-          } catch {
-            // ignore
-          }
-        })
+        scheduleFit()
       }
     })
     intersectionObserver.observe(containerRef.current)
 
-    // Send initial size to remote
-    setTimeout(() => {
-      fitAddon.fit()
-      ipcClient.send(IPC.SSH_RESIZE, {
-        sessionId,
-        cols: term.cols,
-        rows: term.rows
+    let fontsReadyDisposed = false
+    const fontReady = document.fonts?.ready
+    if (fontReady) {
+      void fontReady.then(() => {
+        if (fontsReadyDisposed) return
+        scheduleFit()
       })
+    }
+
+    const initialFitTimer = window.setTimeout(() => {
+      scheduleFit()
     }, 100)
+    const delayedFitTimer = window.setTimeout(() => {
+      scheduleFit()
+    }, 350)
 
     return () => {
       dataDisposable.dispose()
@@ -212,8 +237,12 @@ export function SshTerminal({ sessionId }: SshTerminalProps): React.JSX.Element 
       selectionDisposable.dispose()
       outputCleanup()
       window.removeEventListener('resize', handleWindowResize)
+      visualViewport?.removeEventListener('resize', handleViewportResize)
       resizeObserver.disconnect()
       intersectionObserver.disconnect()
+      window.clearTimeout(initialFitTimer)
+      window.clearTimeout(delayedFitTimer)
+      fontsReadyDisposed = true
       term.dispose()
       termRef.current = null
       fitAddonRef.current = null
