@@ -66,6 +66,20 @@ interface TerminalExitEvent {
   signal?: number
 }
 
+interface TerminalSessionListEntry {
+  id: string
+  shell: string
+  cwd: string
+  cols: number
+  rows: number
+  createdAt: number
+  title: string
+  command?: string
+  exitCode?: number
+  exitSignal?: number
+  buffer?: TerminalOutputChunk[]
+}
+
 const terminalSessions = new Map<string, TerminalSession>()
 const terminalOutputListeners = new Set<(event: TerminalOutputEvent) => void>()
 const terminalExitListeners = new Set<(event: TerminalExitEvent) => void>()
@@ -139,6 +153,25 @@ function createWindowEvent(windowId: number | null, channel: string, payload: un
       : null) ?? BrowserWindow.getAllWindows()[0]
   if (!win) return
   safeSendToWindow(win, channel, payload)
+}
+
+function toTerminalSessionListEntry(
+  session: TerminalSession,
+  includeBuffer = true
+): TerminalSessionListEntry {
+  return {
+    id: session.id,
+    shell: session.shell,
+    cwd: session.cwd,
+    cols: session.cols,
+    rows: session.rows,
+    createdAt: session.createdAt,
+    title: session.title,
+    ...(session.command ? { command: session.command } : {}),
+    ...(session.exitCode !== undefined ? { exitCode: session.exitCode } : {}),
+    ...(session.exitSignal !== undefined ? { exitSignal: session.exitSignal } : {}),
+    ...(includeBuffer ? { buffer: session.outputBuffer } : {})
+  }
 }
 
 function emitTerminalOutput(event: TerminalOutputEvent): void {
@@ -224,6 +257,11 @@ export async function createTerminalSession(
       }
 
       terminalSessions.set(id, session)
+      createWindowEvent(
+        session.windowId,
+        'terminal:created',
+        toTerminalSessionListEntry(session, false)
+      )
 
       pty.onData((data) => {
         const chunk = appendTerminalOutput(session, data)
@@ -343,25 +381,27 @@ export function registerTerminalHandlers(): void {
   })
 
   ipcMain.handle('terminal:list', async () => {
-    return Array.from(terminalSessions.values()).map((session) => ({
-      id: session.id,
-      shell: session.shell,
-      cwd: session.cwd,
-      cols: session.cols,
-      rows: session.rows,
-      createdAt: session.createdAt,
-      title: session.title,
-      command: session.command,
-      exitCode: session.exitCode,
-      exitSignal: session.exitSignal,
-      buffer: session.outputBuffer
-    }))
+    return Array.from(terminalSessions.values()).map((session) =>
+      toTerminalSessionListEntry(session)
+    )
   })
 }
 
 export function getTerminalSessionSnapshot(id: string): TerminalSession | undefined {
   const session = terminalSessions.get(id)
   return session ? { ...session, outputBuffer: [...session.outputBuffer] } : undefined
+}
+
+export function writeTerminalSession(id: string, data: string): { success?: true; error?: string } {
+  const session = terminalSessions.get(id)
+  if (!session) return { error: 'Terminal not found' }
+  if (session.exitCode !== undefined) return { error: 'Terminal already exited' }
+  try {
+    session.pty.write(data)
+    return { success: true }
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) }
+  }
 }
 
 export function killTerminalSession(id: string): { success?: true; error?: string } {

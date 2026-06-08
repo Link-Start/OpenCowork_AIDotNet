@@ -1,27 +1,26 @@
-import { ipcMain, BrowserWindow } from 'electron'
+import { ipcMain, BrowserWindow, type WebContents } from 'electron'
 import { safeSendToWindow } from '../window-ipc'
-import { spawn, type ChildProcess } from 'child_process'
-
-const PROCESS_OUTPUT_ENCODING = 'utf-8'
-
-function createOutputDecoder(): TextDecoder {
-  return new TextDecoder(PROCESS_OUTPUT_ENCODING)
-}
-
-function decodeOutputChunk(decoder: TextDecoder, data: Buffer): string {
-  return decoder.decode(data, { stream: true })
-}
+import {
+  createTerminalSession,
+  getTerminalSessionSnapshot,
+  killTerminalSession,
+  onTerminalSessionExit,
+  onTerminalSessionOutput,
+  writeTerminalSession
+} from './terminal-handlers'
 
 interface ProcessMetadata {
   source?: string
   sessionId?: string
   toolUseId?: string
   description?: string
+  terminalId?: string
 }
 
 interface ManagedProcess {
   id: string
-  process: ChildProcess
+  terminalId: string
+  windowId: number | null
   cwd: string
   command: string
   shell?: string
@@ -30,7 +29,9 @@ interface ManagedProcess {
   port?: number
   exitCode?: number | null
   stopping?: boolean
+  exited?: boolean
   output: string[]
+  cleanup?: () => void
 }
 
 const processes = new Map<string, ManagedProcess>()
@@ -41,96 +42,155 @@ function detectPort(line: string): number | undefined {
   return m ? parseInt(m[1], 10) : undefined
 }
 
+function resolveOwnerWindowId(sender?: WebContents | null): number | null {
+  return sender ? (BrowserWindow.fromWebContents(sender)?.id ?? null) : null
+}
+
+function getManagedWindow(managed: ManagedProcess): BrowserWindow | null {
+  return (
+    (typeof managed.windowId === 'number'
+      ? BrowserWindow.getAllWindows().find((candidate) => candidate.id === managed.windowId)
+      : null) ??
+    BrowserWindow.getAllWindows()[0] ??
+    null
+  )
+}
+
+function getManagedMetadata(managed: ManagedProcess): ProcessMetadata {
+  return {
+    ...(managed.metadata ?? {}),
+    terminalId: managed.terminalId
+  }
+}
+
+function sendProcessOutput(
+  managed: ManagedProcess,
+  payload: {
+    data?: string
+    exited?: boolean
+    exitCode?: number | null
+  }
+): void {
+  const win = getManagedWindow(managed)
+  if (!win) return
+  safeSendToWindow(win, 'process:output', {
+    id: managed.id,
+    data: payload.data,
+    port: managed.port,
+    exited: payload.exited,
+    exitCode: payload.exitCode,
+    metadata: getManagedMetadata(managed)
+  })
+}
+
+function appendManagedOutput(managed: ManagedProcess, chunk: string): void {
+  if (!chunk) return
+  managed.output.push(chunk)
+  if (managed.output.length > 500) managed.output.shift()
+
+  if (!managed.port) {
+    const port = detectPort(chunk)
+    if (port) managed.port = port
+  }
+}
+
+function finalizeManagedProcess(
+  managed: ManagedProcess,
+  exitCode: number | null,
+  message?: string
+): void {
+  if (managed.exited) return
+  managed.exited = true
+  managed.exitCode = exitCode
+  managed.cleanup?.()
+  managed.cleanup = undefined
+
+  if (message) appendManagedOutput(managed, message)
+  sendProcessOutput(managed, {
+    data: message,
+    exited: true,
+    exitCode
+  })
+  processes.delete(managed.id)
+}
+
 export function registerProcessManagerHandlers(): void {
   ipcMain.handle(
     'process:spawn',
     async (
-      _event,
+      event,
       args: { command: string; cwd?: string; shell?: string; metadata?: ProcessMetadata }
     ) => {
       const id = `proc-${nextId++}`
       const configuredShell = args.shell?.trim() || undefined
-      const child = spawn(args.command, {
-        cwd: args.cwd || process.cwd(),
-        shell: configuredShell ?? true,
-        stdio: ['pipe', 'pipe', 'pipe'],
-        ...(process.platform === 'win32' ? {} : { detached: true })
-      })
+      const cwd = args.cwd || process.cwd()
+      const created = await createTerminalSession(
+        {
+          cwd,
+          command: args.command,
+          shell: configuredShell,
+          title: args.metadata?.description?.trim() || 'Background Shell'
+        },
+        event.sender
+      )
 
-      const stdoutDecoder = createOutputDecoder()
-      const stderrDecoder = createOutputDecoder()
+      if (!created.id) {
+        return { error: created.error ?? 'Failed to create terminal session' }
+      }
 
       const managed: ManagedProcess = {
         id,
-        process: child,
-        cwd: args.cwd || process.cwd(),
+        terminalId: created.id,
+        windowId: resolveOwnerWindowId(event.sender),
+        cwd: created.cwd ?? cwd,
         command: args.command,
         shell: configuredShell,
         createdAt: Date.now(),
-        metadata: args.metadata,
+        metadata: {
+          ...(args.metadata ?? {}),
+          terminalId: created.id
+        },
         output: []
       }
       processes.set(id, managed)
 
-      const handleData = (stream: 'stdout' | 'stderr', data: Buffer): void => {
-        const decoder = stream === 'stdout' ? stdoutDecoder : stderrDecoder
-        const chunk = decodeOutputChunk(decoder, data)
-        managed.output.push(chunk)
-        if (managed.output.length > 500) managed.output.shift()
+      const cleanupOutput = onTerminalSessionOutput((payload) => {
+        if (payload.id !== managed.terminalId || !payload.data) return
+        appendManagedOutput(managed, payload.data)
+        sendProcessOutput(managed, { data: payload.data })
+      })
 
-        if (!managed.port) {
-          const port = detectPort(chunk)
-          if (port) managed.port = port
-        }
+      const cleanupExit = onTerminalSessionExit((payload) => {
+        if (payload.id !== managed.terminalId) return
+        finalizeManagedProcess(
+          managed,
+          payload.exitCode,
+          managed.stopping
+            ? '\n[Process stopped by user]\n'
+            : `\n[Process exited with code ${payload.exitCode}]\n`
+        )
+      })
 
-        const win = BrowserWindow.getAllWindows()[0]
-        if (win) {
-          safeSendToWindow(win, 'process:output', {
-            id,
-            data: chunk,
-            port: managed.port,
-            metadata: managed.metadata
-          })
-        }
+      managed.cleanup = () => {
+        cleanupOutput()
+        cleanupExit()
       }
 
-      child.stdout?.on('data', (data: Buffer) => handleData('stdout', data))
-      child.stderr?.on('data', (data: Buffer) => handleData('stderr', data))
+      const snapshot = getTerminalSessionSnapshot(managed.terminalId)
+      const replay = snapshot?.outputBuffer.map((chunk) => chunk.data).join('') ?? ''
+      if (replay) {
+        appendManagedOutput(managed, replay)
+        sendProcessOutput(managed, { data: replay })
+      }
+      if (snapshot?.exitCode !== undefined) {
+        finalizeManagedProcess(
+          managed,
+          snapshot.exitCode,
+          `\n[Process exited with code ${snapshot.exitCode}]\n`
+        )
+      }
 
-      child.on('exit', (code) => {
-        managed.exitCode = code
-        managed.output.push(stdoutDecoder.decode(), stderrDecoder.decode())
-        const win = BrowserWindow.getAllWindows()[0]
-        if (win) {
-          safeSendToWindow(win, 'process:output', {
-            id,
-            data: managed.stopping
-              ? '\n[Process stopped by user]\n'
-              : `\n[Process exited with code ${code}]\n`,
-            exited: true,
-            exitCode: code,
-            metadata: managed.metadata
-          })
-        }
-        processes.delete(id)
-      })
-
-      child.on('error', (err) => {
-        managed.output.push(stdoutDecoder.decode(), stderrDecoder.decode())
-        const win = BrowserWindow.getAllWindows()[0]
-        if (win) {
-          safeSendToWindow(win, 'process:output', {
-            id,
-            data: `\n[Process error: ${err.message}]\n`,
-            exited: true,
-            exitCode: 1,
-            metadata: managed.metadata
-          })
-        }
-        processes.delete(id)
-      })
-
-      return { id }
+      return { id, terminalId: managed.terminalId }
     }
   )
 
@@ -138,34 +198,11 @@ export function registerProcessManagerHandlers(): void {
     const managed = processes.get(args.id)
     if (!managed) return { error: 'Process not found' }
     try {
-      if (process.platform === 'win32') {
-        const pid = managed.process.pid
-        if (!pid) return { error: 'Process pid not available' }
-        managed.stopping = true
-        const taskKillResult = await new Promise<{ ok: boolean; err?: string }>((resolve) => {
-          const killer = spawn('taskkill', ['/pid', String(pid), '/f', '/t'], {
-            shell: true,
-            windowsHide: true
-          })
-          let stderr = ''
-          const stderrDecoder = createOutputDecoder()
-          killer.stderr?.on('data', (data: Buffer) => {
-            stderr += decodeOutputChunk(stderrDecoder, data)
-          })
-          killer.on('error', (err) => resolve({ ok: false, err: err.message }))
-          killer.on('close', (code) => {
-            stderr += stderrDecoder.decode()
-            if (code === 0) resolve({ ok: true })
-            else resolve({ ok: false, err: stderr.trim() || `taskkill exited with code ${code}` })
-          })
-        })
-        if (!taskKillResult.ok) {
-          managed.stopping = false
-          return { error: taskKillResult.err ?? 'Failed to stop process' }
-        }
-      } else {
-        managed.stopping = true
-        managed.process.kill('SIGTERM')
+      managed.stopping = true
+      const result = killTerminalSession(managed.terminalId)
+      if (result.error) {
+        managed.stopping = false
+        return { error: result.error }
       }
       return { success: true }
     } catch (err) {
@@ -179,14 +216,14 @@ export function registerProcessManagerHandlers(): void {
     async (_event, args: { id: string; input: string; appendNewline?: boolean }) => {
       const managed = processes.get(args.id)
       if (!managed) return { error: 'Process not found' }
-      if (managed.process.exitCode !== null) return { error: 'Process already exited' }
-      if (!managed.process.stdin || managed.process.stdin.destroyed) {
-        return { error: 'Process stdin not available' }
+      if (managed.exited || managed.exitCode !== undefined) {
+        return { error: 'Process already exited' }
       }
+      const session = getTerminalSessionSnapshot(managed.terminalId)
+      if (!session || session.exitCode !== undefined) return { error: 'Process already exited' }
       try {
-        const payload = args.appendNewline === false ? args.input : `${args.input}\n`
-        managed.process.stdin.write(payload)
-        return { success: true }
+        const payload = args.appendNewline === false ? args.input : `${args.input}\r`
+        return writeTerminalSession(managed.terminalId, payload)
       } catch (err) {
         return { error: String(err) }
       }
@@ -197,9 +234,9 @@ export function registerProcessManagerHandlers(): void {
     const managed = processes.get(args.id)
     if (!managed) return { running: false }
     return {
-      running: managed.process.exitCode === null,
+      running: !managed.exited,
       port: managed.port,
-      metadata: managed.metadata,
+      metadata: getManagedMetadata(managed),
       createdAt: managed.createdAt,
       exitCode: managed.exitCode
     }
@@ -223,8 +260,8 @@ export function registerProcessManagerHandlers(): void {
         cwd: m.cwd,
         port: m.port,
         createdAt: m.createdAt,
-        metadata: m.metadata,
-        running: m.process.exitCode === null,
+        metadata: getManagedMetadata(m),
+        running: !m.exited,
         exitCode: m.exitCode
       })
     })
@@ -235,11 +272,8 @@ export function registerProcessManagerHandlers(): void {
 export function killAllManagedProcesses(): void {
   processes.forEach((managed) => {
     try {
-      if (process.platform === 'win32') {
-        spawn('taskkill', ['/pid', String(managed.process.pid), '/f', '/t'], { shell: true })
-      } else {
-        managed.process.kill('SIGTERM')
-      }
+      killTerminalSession(managed.terminalId)
+      managed.cleanup?.()
     } catch {
       // ignore
     }

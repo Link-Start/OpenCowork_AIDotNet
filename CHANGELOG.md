@@ -2,6 +2,38 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.114] - 2026-06-05
+
+### Added
+
+- Added Runtime Status Panel with Git integration: branch info, ahead/behind status, changed file count, and diff line summaries for the working directory.
+- Added SSH connection context display in the runtime status panel showing connection name and working folder.
+- Added source files panel in runtime status showing selected files from input drafts.
+- Added model management defaults system: creating provider models auto-applies managed model parameters when the model ID matches.
+- Added preset vs custom provider categorization in model management ("预置" / "自定义").
+- Added `responsesImageGeneration.partialImages` config option for OpenAI Responses models.
+- Added `runtimeStatusPanelOpen` state to UI store with toggle/set and persistence support.
+- Added compact request view logic (`applyLatestCompactRequestView`) to filter UI-only messages and show only the latest compaction boundary in sent requests.
+
+### Changed
+
+- Rewrote RuntimeStatusPanel: switched from hover-triggered narrow panel to a toggleable panel with dedicated open/close button in the title bar.
+- Redesigned FileChangeCard layout: replaced inline CompactEditDiff with NewFileContent component for new file previews.
+- Improved Write/Edit tool live streaming previews: show tail content previews instead of hiding until complete (`content_preview`, `old_string_preview`, `new_string_preview`).
+- Enhanced GoalRuntimeService with status change detection (completion/blocked transitions) and more robust lifecycle management.
+- Improved model management search placeholder to "搜索模型/服务商..." for broader search scope.
+- Updated alert-dialog action/cancel buttons with `min-w-0 max-w-full` for better text overflow handling.
+
+### Fixed
+
+- Fixed goal continuation dispatch to properly fire on goal status transitions in chat actions.
+- Fixed pending write preview truncation: no longer appends trailing ellipsis when content already starts with '…'.
+- Fixed real-time Write FileChangeCard defaulting to collapsed state.
+
+### Removed
+
+- Removed background session toast warning from ask-user-tool.
+
 ## [0.9.113] - 2026-06-04
 
 ### Added

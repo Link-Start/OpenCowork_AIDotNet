@@ -11,37 +11,6 @@ function unavailable(name: string, details: string): ReturnType<typeof encodeStr
   })
 }
 
-const agentHandler: ToolHandler = {
-  definition: {
-    name: 'Agent',
-    description: 'Launch a subagent in its own context window. Code-agent-compatible alias for Task.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        description: { type: 'string', description: 'Short task description' },
-        prompt: { type: 'string', description: 'Task instruction for the subagent' },
-        subagent_type: { type: 'string', description: 'Subagent type. Defaults to custom.' },
-        model: { type: 'string', description: 'Optional model override' }
-      },
-      required: ['prompt']
-    }
-  },
-  execute: async (input, ctx) => {
-    const task = toolRegistry.get('Task')
-    if (!task) return encodeToolError('Task tool is not registered')
-    return task.execute(
-      {
-        description: input.description ?? 'subagent task',
-        prompt: input.prompt,
-        subagent_type: input.subagent_type ?? 'custom',
-        model: input.model
-      },
-      ctx
-    )
-  },
-  requiresApproval: () => false
-}
-
 const todoWriteHandler: ToolHandler = {
   definition: {
     name: 'TodoWrite',
@@ -147,21 +116,19 @@ const toolSearchHandler: ToolHandler = {
       typeof input.limit === 'number' && Number.isFinite(input.limit)
         ? Math.max(1, Math.min(Math.floor(input.limit), 50))
         : 20
-    const allMatches = toolRegistry
-      .getDefinitions()
-      .filter((definition) => {
-        if (!query) return true
-        return (
-          definition.name.toLowerCase().includes(query) ||
-          String(definition.description ?? '').toLowerCase().includes(query)
-        )
-      })
-    const matches = allMatches
-      .slice(0, limit)
-      .map((definition) => ({
-        name: definition.name,
-        description: definition.description
-      }))
+    const allMatches = toolRegistry.getDefinitions().filter((definition) => {
+      if (!query) return true
+      return (
+        definition.name.toLowerCase().includes(query) ||
+        String(definition.description ?? '')
+          .toLowerCase()
+          .includes(query)
+      )
+    })
+    const matches = allMatches.slice(0, limit).map((definition) => ({
+      name: definition.name,
+      description: definition.description
+    }))
     return encodeStructuredToolResult({ total: allMatches.length, tools: matches })
   },
   requiresApproval: () => false
@@ -200,7 +167,8 @@ const powerShellHandler: ToolHandler = {
 const monitorHandler: ToolHandler = {
   definition: {
     name: 'Monitor',
-    description: 'Run a background command and monitor its output through OpenCowork background tasks.',
+    description:
+      'Run a background command and monitor its output through OpenCowork background tasks.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -229,7 +197,6 @@ const monitorHandler: ToolHandler = {
 }
 
 export function registerCodeCompatibleTools(): void {
-  toolRegistry.register(agentHandler)
   toolRegistry.register(todoWriteHandler)
   toolRegistry.register(listMcpResourcesHandler)
   toolRegistry.register(readMcpResourceHandler)

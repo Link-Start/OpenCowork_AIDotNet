@@ -56,6 +56,7 @@ export const IPC = {
   TERMINAL_RESIZE: 'terminal:resize',
   TERMINAL_KILL: 'terminal:kill',
   TERMINAL_LIST: 'terminal:list',
+  TERMINAL_CREATED: 'terminal:created',
   TERMINAL_OUTPUT: 'terminal:output',
   TERMINAL_EXIT: 'terminal:exit',
 

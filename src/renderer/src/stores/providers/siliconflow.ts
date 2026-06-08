@@ -121,6 +121,18 @@ export const siliconflowPreset: BuiltinProviderPreset = {
     },
     // ── Moonshot / Kimi ──
     {
+      id: 'moonshotai/Kimi-K2.6',
+      name: 'Kimi K2.6',
+      icon: 'kimi',
+      enabled: true,
+      contextLength: 262_144,
+      maxOutputTokens: 8_192,
+      supportsVision: true,
+      supportsFunctionCall: true,
+      inputPrice: 0.15,
+      outputPrice: 0.9
+    },
+    {
       id: 'moonshotai/Kimi-K2.5',
       name: 'Kimi K2.5',
       icon: 'kimi',

@@ -25,62 +25,12 @@ function lineCount(text: string): number {
   return normalized.length === 0 ? 0 : normalized.split('\n').length
 }
 
-function sharedPrefixLength(a: string, b: string): number {
-  const max = Math.min(a.length, b.length)
-  let index = 0
-  while (index < max && a[index] === b[index]) index += 1
-  return index
-}
-
-function sharedSuffixLength(a: string, b: string, prefixLength: number): number {
-  const max = Math.min(a.length, b.length) - prefixLength
-  let index = 0
-  while (index < max && a[a.length - 1 - index] === b[b.length - 1 - index]) {
-    index += 1
-  }
-  return index
-}
-
-function excerptAroundRange(text: string, start: number, end: number, maxChars: number): string {
-  if (text.length <= maxChars) return text
-
-  const changedLength = Math.max(0, end - start)
-  const desiredStart = Math.max(0, start - Math.floor((maxChars - changedLength) / 2))
-  const desiredEnd = Math.min(text.length, desiredStart + maxChars)
-  const actualStart = Math.max(0, desiredEnd - maxChars)
-  const slice = text.slice(actualStart, desiredEnd)
-
-  const prefix = actualStart > 0 ? '…' : ''
-  const suffix = desiredEnd < text.length ? '…' : ''
-  return `${prefix}${slice}${suffix}`
-}
-
 function tailPreview(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text
   const slice = text.slice(-maxChars)
   const firstLineBreak = slice.indexOf('\n')
   const body = firstLineBreak > 0 ? slice.slice(firstLineBreak + 1) : slice
   return body ? `…\n${body}` : '…'
-}
-
-function buildEditPreviewPair(
-  oldStr: string,
-  newStr: string,
-  maxChars: number = EDIT_TOOL_PREVIEW_CHARS
-): { oldPreview: string; newPreview: string } {
-  if (oldStr.length <= maxChars && newStr.length <= maxChars) {
-    return { oldPreview: oldStr, newPreview: newStr }
-  }
-
-  const prefixLength = sharedPrefixLength(oldStr, newStr)
-  const suffixLength = sharedSuffixLength(oldStr, newStr, prefixLength)
-  const oldEnd = Math.max(prefixLength, oldStr.length - suffixLength)
-  const newEnd = Math.max(prefixLength, newStr.length - suffixLength)
-
-  return {
-    oldPreview: excerptAroundRange(oldStr, prefixLength, oldEnd, maxChars),
-    newPreview: excerptAroundRange(newStr, prefixLength, newEnd, maxChars)
-  }
 }
 
 function fnv1aHash(text: string): string {
@@ -124,35 +74,6 @@ function summarizeLargeText(
       ? { [options?.tailKey ?? 'content_preview_tail']: text.slice(-previewTailChars) }
       : {}),
     content_truncated: true
-  }
-}
-
-function compactMultiEditInputForHistory(input: Record<string, unknown>): Record<string, unknown> {
-  if (!Array.isArray(input.edits)) return input
-
-  const edits = input.edits.map((item, index) => {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) return { index, invalid: true }
-    const edit = item as Record<string, unknown>
-    const oldStr = typeof edit.old_string === 'string' ? edit.old_string : ''
-    const newStr = typeof edit.new_string === 'string' ? edit.new_string : ''
-    const { oldPreview, newPreview } = buildEditPreviewPair(oldStr, newStr)
-    return {
-      index,
-      ...(edit.replace_all !== undefined ? { replace_all: edit.replace_all } : {}),
-      old_string_preview: oldPreview,
-      old_string_chars: oldStr.length,
-      old_string_hash: oldStr ? fnv1aHash(oldStr) : undefined,
-      new_string_preview: newPreview,
-      new_string_chars: newStr.length,
-      new_string_hash: newStr ? fnv1aHash(newStr) : undefined
-    }
-  })
-
-  return {
-    ...(input.file_path !== undefined ? { file_path: input.file_path } : {}),
-    ...(input.path !== undefined ? { path: input.path } : {}),
-    edits,
-    full_content_available_in_history: false
   }
 }
 
@@ -320,10 +241,6 @@ export function summarizeToolInputForHistory(
       ...newSummary,
       full_content_available_in_history: false
     }
-  }
-
-  if (toolName === 'MultiEdit') {
-    return compactMultiEditInputForHistory(input)
   }
 
   if (toolName === 'NotebookEdit') {

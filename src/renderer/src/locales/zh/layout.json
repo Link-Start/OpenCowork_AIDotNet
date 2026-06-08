@@ -237,7 +237,9 @@
     "noWorkingFolder": "未选择",
     "noSources": "暂无来源",
     "sourcesSummary": "{{first}}, {{second}} 等 {{count}} 个",
-    "noTasks": "暂无任务"
+    "noTasks": "暂无任务",
+    "runningTerminals": "运行中的终端",
+    "closeTerminal": "关闭终端"
   },
   "browser": {
     "back": "后退",

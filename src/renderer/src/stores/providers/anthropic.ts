@@ -8,7 +8,52 @@ export const anthropicPreset: BuiltinProviderPreset = {
   homepage: 'https://anthropic.com',
   apiKeyUrl: 'https://console.anthropic.com/settings/keys',
   defaultModels: [
-    // Claude 4.6 / 4.5 series (cache write: 1.25x input, cache read: 0.1x input)
+    // Claude 4.8 (latest flagship — adaptive thinking, 1M context)
+    {
+      id: 'claude-opus-4-8',
+      name: 'Claude Opus 4.8',
+      icon: 'claude',
+      enabled: true,
+      contextLength: 1_000_000,
+      maxOutputTokens: 128_000,
+      supportsVision: true,
+      supportsFunctionCall: true,
+      inputPrice: 5,
+      outputPrice: 25,
+      cacheCreationPrice: 6.25,
+      cacheHitPrice: 0.5,
+      supportsThinking: true,
+      thinkingConfig: {
+        bodyParams: { thinking: { type: 'adaptive' } },
+        forceTemperature: 1,
+        reasoningEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
+        defaultReasoningEffort: 'high'
+      }
+    },
+    // Claude 4.7 (previous flagship, now legacy)
+    {
+      id: 'claude-opus-4-7',
+      name: 'Claude Opus 4.7',
+      icon: 'claude',
+      type: 'anthropic',
+      enabled: true,
+      contextLength: 1_000_000,
+      maxOutputTokens: 128_000,
+      supportsVision: true,
+      supportsFunctionCall: true,
+      inputPrice: 5,
+      outputPrice: 25,
+      cacheCreationPrice: 6.25,
+      cacheHitPrice: 0.5,
+      supportsThinking: true,
+      thinkingConfig: {
+        bodyParams: { thinking: { type: 'adaptive' } },
+        forceTemperature: 1,
+        reasoningEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
+        defaultReasoningEffort: 'high'
+      }
+    },
+    // Claude 4.6 series (adaptive thinking, 1M context)
     {
       id: 'claude-opus-4-6',
       name: 'Claude Opus 4.6',
@@ -35,7 +80,7 @@ export const anthropicPreset: BuiltinProviderPreset = {
       name: 'Claude Sonnet 4.6',
       icon: 'claude',
       enabled: true,
-      contextLength: 200_000,
+      contextLength: 1_000_000,
       maxOutputTokens: 64_000,
       supportsVision: true,
       supportsFunctionCall: true,
@@ -78,7 +123,7 @@ export const anthropicPreset: BuiltinProviderPreset = {
       icon: 'claude',
       enabled: true,
       contextLength: 200_000,
-      maxOutputTokens: 8_192,
+      maxOutputTokens: 64_000,
       supportsVision: true,
       supportsFunctionCall: true,
       inputPrice: 1,

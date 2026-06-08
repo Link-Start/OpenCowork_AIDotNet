@@ -40,15 +40,15 @@ export const moonshotCodingPreset: BuiltinProviderPreset = {
   defaultModels: [
     {
       id: 'kimi-for-coding',
-      name: 'Kimi for Coding',
+      name: 'Kimi K2.6 for Coding',
       icon: 'kimi',
       enabled: true,
       contextLength: 262_144,
       maxOutputTokens: 32_768,
       supportsVision: true,
       supportsFunctionCall: true,
-      inputPrice: 0.23,
-      outputPrice: 3,
+      inputPrice: 0.15,
+      outputPrice: 0.9,
       supportsThinking: true,
       thinkingConfig: {
         bodyParams: { thinking: { type: 'enabled' } },
@@ -67,8 +67,26 @@ export const moonshotPreset: BuiltinProviderPreset = {
   homepage: 'https://platform.moonshot.cn',
   apiKeyUrl: 'https://platform.moonshot.cn/console/api-keys',
   defaultModels: [
-    // Kimi K2.x (OpenRouter USD pricing)
-    // refs: https://openrouter.ai/moonshotai/kimi-k2.5, https://openrouter.ai/moonshotai/kimi-k2-thinking
+    // Kimi K2.6 (latest)
+    {
+      id: 'kimi-k2.6',
+      name: 'Kimi K2.6',
+      icon: 'kimi',
+      enabled: true,
+      contextLength: 262_144,
+      maxOutputTokens: 32_768,
+      supportsVision: true,
+      supportsFunctionCall: true,
+      inputPrice: 0.15,
+      outputPrice: 0.9,
+      supportsThinking: true,
+      thinkingConfig: {
+        bodyParams: { thinking: { type: 'enabled' } },
+        disabledBodyParams: { thinking: { type: 'disabled' } },
+        forceTemperature: 1
+      }
+    },
+    // Kimi K2.5
     {
       id: 'kimi-k2.5',
       name: 'Kimi K2.5',

@@ -824,6 +824,17 @@ export interface BackgroundProcessState {
   updatedAt: number
 }
 
+export interface ForegroundShellExecState {
+  execId: string
+  processId?: string
+  terminalId?: string
+  command?: string
+  cwd?: string
+  sessionId?: string
+  startedAt: number
+  updatedAt: number
+}
+
 interface ProcessListItem {
   id: string
   command: string
@@ -1167,10 +1178,20 @@ interface AgentStore {
 
   /** Background command sessions (spawned by Bash with run_in_background=true) */
   backgroundProcesses: Record<string, BackgroundProcessState>
-  /** Foreground shell exec mapping (toolUseId -> execId), used for in-card stop actions */
-  foregroundShellExecByToolUseId: Record<string, string>
+  /** Foreground shell exec mapping, used for in-card terminal display and stop actions */
+  foregroundShellExecByToolUseId: Record<string, ForegroundShellExecState>
   initBackgroundProcessTracking: () => Promise<void>
-  registerForegroundShellExec: (toolUseId: string, execId: string) => void
+  registerForegroundShellExec: (
+    toolUseId: string,
+    execId: string,
+    metadata?: { command?: string; cwd?: string; sessionId?: string }
+  ) => void
+  updateForegroundShellExec: (
+    toolUseId: string,
+    patch: Partial<
+      Pick<ForegroundShellExecState, 'processId' | 'terminalId' | 'command' | 'cwd' | 'sessionId'>
+    >
+  ) => void
   clearForegroundShellExec: (toolUseId: string) => void
   abortForegroundShellExec: (toolUseId: string) => Promise<void>
   registerBackgroundProcess: (process: {
@@ -1446,9 +1467,29 @@ export const useAgentStore = create<AgentStore>()(
         })
       },
 
-      registerForegroundShellExec: (toolUseId, execId) => {
+      registerForegroundShellExec: (toolUseId, execId, metadata) => {
         set((state) => {
-          state.foregroundShellExecByToolUseId[toolUseId] = execId
+          const now = Date.now()
+          state.foregroundShellExecByToolUseId[toolUseId] = {
+            execId,
+            command: metadata?.command,
+            cwd: metadata?.cwd,
+            sessionId: metadata?.sessionId,
+            startedAt: state.foregroundShellExecByToolUseId[toolUseId]?.startedAt ?? now,
+            updatedAt: now
+          }
+        })
+      },
+
+      updateForegroundShellExec: (toolUseId, patch) => {
+        set((state) => {
+          const current = state.foregroundShellExecByToolUseId[toolUseId]
+          if (!current) return
+          state.foregroundShellExecByToolUseId[toolUseId] = {
+            ...current,
+            ...patch,
+            updatedAt: Date.now()
+          }
         })
       },
 
@@ -1459,9 +1500,9 @@ export const useAgentStore = create<AgentStore>()(
       },
 
       abortForegroundShellExec: async (toolUseId) => {
-        const execId = useAgentStore.getState().foregroundShellExecByToolUseId[toolUseId]
-        if (!execId) return
-        ipcClient.send(IPC.SHELL_ABORT, { execId })
+        const exec = useAgentStore.getState().foregroundShellExecByToolUseId[toolUseId]
+        if (!exec?.execId) return
+        ipcClient.send(IPC.SHELL_ABORT, { execId: exec.execId })
         set((state) => {
           delete state.foregroundShellExecByToolUseId[toolUseId]
         })
@@ -2020,6 +2061,7 @@ export const useAgentStore = create<AgentStore>()(
 
       clearSessionData: (sessionId) => {
         const processIdsToKill: string[] = []
+        const shellExecIdsToAbort: string[] = []
         set((state) => {
           // Remove active subagents belonging to the session
           for (const [key, sa] of Object.entries(state.activeSubAgents)) {
@@ -2054,6 +2096,13 @@ export const useAgentStore = create<AgentStore>()(
 
           rebuildRunningSubAgentDerived(state)
 
+          for (const [key, shellExec] of Object.entries(state.foregroundShellExecByToolUseId)) {
+            if (shellExec.sessionId === sessionId) {
+              shellExecIdsToAbort.push(shellExec.execId)
+              delete state.foregroundShellExecByToolUseId[key]
+            }
+          }
+
           // Remove background processes bound to this session
           for (const [key, process] of Object.entries(state.backgroundProcesses)) {
             if (process.sessionId === sessionId) {
@@ -2066,6 +2115,9 @@ export const useAgentStore = create<AgentStore>()(
         queueAgentHistoryPersistence()
         for (const id of processIdsToKill) {
           ipcClient.invoke(IPC.PROCESS_KILL, { id }).catch(() => {})
+        }
+        for (const execId of shellExecIdsToAbort) {
+          ipcClient.send(IPC.SHELL_ABORT, { execId })
         }
       },
 

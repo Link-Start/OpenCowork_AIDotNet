@@ -303,6 +303,14 @@ export const giteeAiPreset: BuiltinProviderPreset = {
 
     // ── Kimi / MiniMax ──
     {
+      id: 'Kimi-K2.6',
+      name: 'Kimi K2.6',
+      icon: 'kimi',
+      enabled: true,
+      inputPrice: 0.15,
+      outputPrice: 0.9
+    },
+    {
       id: 'Kimi-K2.5',
       name: 'Kimi K2.5',
       icon: 'kimi',

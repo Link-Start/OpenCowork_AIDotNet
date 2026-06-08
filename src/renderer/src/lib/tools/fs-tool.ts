@@ -5,7 +5,7 @@ import { encodeStructuredToolResult, encodeToolError } from './tool-result-forma
 import type { FileReadSnapshot, ToolHandler, ToolContext } from './tool-types'
 
 type EolStyle = '\n' | '\r\n' | null
-type TextWriteToolName = 'Write' | 'Edit' | 'MultiEdit' | 'NotebookEdit'
+type TextWriteToolName = 'Write' | 'Edit' | 'NotebookEdit'
 
 type LsEntry = { name: string; type: string; path: string }
 type LsLimitReason = 'max_results' | 'max_output_bytes' | null
@@ -613,103 +613,6 @@ const editHandler: ToolHandler = {
   }
 }
 
-const multiEditHandler: ToolHandler = {
-  definition: {
-    name: 'MultiEdit',
-    description:
-      'Perform multiple exact string replacements in one file. Replacements are applied in order and written atomically only if every edit succeeds.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        file_path: {
-          type: 'string',
-          description: 'Absolute path or relative to the working folder'
-        },
-        edits: {
-          type: 'array',
-          items: {
-            type: 'object',
-            properties: {
-              old_string: { type: 'string', description: 'The text to replace' },
-              new_string: { type: 'string', description: 'The text to replace it with' },
-              replace_all: {
-                type: 'boolean',
-                description: 'Replace all occurrences of old_string'
-              }
-            },
-            required: ['old_string', 'new_string']
-          },
-          description: 'Ordered list of exact replacements'
-        }
-      },
-      required: ['file_path', 'edits']
-    }
-  },
-  execute: async (input, ctx) => {
-    const inputPath = getFileToolInputPath(input)
-    if (!inputPath) return encodeToolError('MultiEdit requires a non-empty "file_path" string')
-    if (!Array.isArray(input.edits) || input.edits.length === 0) {
-      return encodeToolError('MultiEdit requires a non-empty edits array')
-    }
-
-    const resolvedPath = resolveToolPath(inputPath, ctx.workingFolder)
-    const guardError = await assertCurrentFileMatchesLastRead({
-      ctx,
-      filePath: resolvedPath,
-      toolName: 'MultiEdit',
-      allowMissingFile: false
-    })
-    if (guardError) return encodeToolError(guardError)
-
-    const readCh = isSsh(ctx) ? IPC.SSH_FS_READ_FILE : IPC.FS_READ_FILE
-    const readArgs = isSsh(ctx) ? sshArgs(ctx, { path: resolvedPath }) : { path: resolvedPath }
-    const contentResult = await ctx.ipc.invoke(readCh, readArgs)
-    if (isErrorResult(contentResult)) return encodeToolError(`Read failed: ${contentResult.error}`)
-
-    const content = String(contentResult)
-    let updated = content
-    const applied: Array<{ index: number; occurrences: number; replaceAll: boolean }> = []
-
-    for (let index = 0; index < input.edits.length; index += 1) {
-      const edit = input.edits[index]
-      if (!edit || typeof edit !== 'object') {
-        return encodeToolError(`Edit ${index} must be an object`)
-      }
-      const record = edit as Record<string, unknown>
-      const oldStr = String(record.old_string ?? '')
-      const newStr = String(record.new_string ?? '')
-      const replaceAll = Boolean(record.replace_all)
-      const editResult = applyExactReplacement({ content: updated, oldStr, newStr, replaceAll })
-      if ('error' in editResult) {
-        return encodeToolError(`Edit ${index} failed: ${editResult.error}`)
-      }
-      updated = editResult.updated
-      applied.push({ index, occurrences: editResult.occurrences, replaceAll })
-    }
-
-    const writeCh = isSsh(ctx) ? IPC.SSH_FS_WRITE_FILE : IPC.FS_WRITE_FILE
-    const writeArgs = isSsh(ctx)
-      ? sshWriteArgs(ctx, resolvedPath, updated, 'MultiEdit', content)
-      : localWriteArgs(ctx, resolvedPath, updated, 'MultiEdit', content)
-    const writeResult = await ctx.ipc.invoke(writeCh, writeArgs)
-    if (isErrorResult(writeResult)) return encodeToolError(`Write failed: ${writeResult.error}`)
-
-    await recordRead(ctx, resolvedPath)
-    return encodeStructuredToolResult({ success: true, path: resolvedPath, edits: applied })
-  },
-  requiresApproval: (input, ctx) => {
-    if (isSsh(ctx)) return false
-    const inputPath = getFileToolInputPath(input)
-    if (!inputPath) return false
-    const filePath = resolveToolPath(inputPath, ctx.workingFolder)
-    if (ctx.channelPermissions) {
-      return !isPluginPathAllowed(filePath, ctx, 'write')
-    }
-    if (!ctx.workingFolder) return true
-    return !filePath.startsWith(ctx.workingFolder)
-  }
-}
-
 const notebookEditHandler: ToolHandler = {
   definition: {
     name: 'NotebookEdit',
@@ -769,7 +672,9 @@ const notebookEditHandler: ToolHandler = {
     try {
       notebook = JSON.parse(String(contentResult)) as { cells?: unknown[] }
     } catch (error) {
-      return encodeToolError(`Invalid notebook JSON: ${error instanceof Error ? error.message : error}`)
+      return encodeToolError(
+        `Invalid notebook JSON: ${error instanceof Error ? error.message : error}`
+      )
     }
 
     if (!Array.isArray(notebook.cells)) {
@@ -903,7 +808,6 @@ export function registerFsTools(): void {
   toolRegistry.register(readHandler)
   toolRegistry.register(writeHandler)
   toolRegistry.register(editHandler)
-  toolRegistry.register(multiEditHandler)
   toolRegistry.register(notebookEditHandler)
   toolRegistry.register(lsHandler)
 }

@@ -10,6 +10,48 @@ export const openrouterPreset: BuiltinProviderPreset = {
   defaultModels: [
     // ── Anthropic ──
     {
+      id: 'anthropic/claude-opus-4.8',
+      name: 'Claude Opus 4.8',
+      icon: 'claude',
+      enabled: true,
+      contextLength: 1_000_000,
+      maxOutputTokens: 32_768,
+      supportsVision: true,
+      supportsFunctionCall: true,
+      inputPrice: 5,
+      outputPrice: 25,
+      cacheCreationPrice: 6.25,
+      cacheHitPrice: 0.5
+    },
+    {
+      id: 'anthropic/claude-sonnet-4.6',
+      name: 'Claude Sonnet 4.6',
+      icon: 'claude',
+      enabled: true,
+      contextLength: 1_000_000,
+      maxOutputTokens: 16_384,
+      supportsVision: true,
+      supportsFunctionCall: true,
+      inputPrice: 3,
+      outputPrice: 15,
+      cacheCreationPrice: 3.75,
+      cacheHitPrice: 0.3
+    },
+    {
+      id: 'anthropic/claude-haiku-4.5',
+      name: 'Claude Haiku 4.5',
+      icon: 'claude',
+      enabled: true,
+      contextLength: 200_000,
+      maxOutputTokens: 16_384,
+      supportsVision: true,
+      supportsFunctionCall: true,
+      inputPrice: 1,
+      outputPrice: 5,
+      cacheCreationPrice: 1.25,
+      cacheHitPrice: 0.1
+    },
+    {
       id: 'anthropic/claude-opus-4.6',
       name: 'Claude Opus 4.6',
       icon: 'claude',
@@ -22,20 +64,6 @@ export const openrouterPreset: BuiltinProviderPreset = {
       outputPrice: 25,
       cacheCreationPrice: 6.25,
       cacheHitPrice: 0.5
-    },
-    {
-      id: 'anthropic/claude-sonnet-4.5',
-      name: 'Claude Sonnet 4.5',
-      icon: 'claude',
-      enabled: true,
-      contextLength: 1_000_000,
-      maxOutputTokens: 16_384,
-      supportsVision: true,
-      supportsFunctionCall: true,
-      inputPrice: 3,
-      outputPrice: 15,
-      cacheCreationPrice: 3.75,
-      cacheHitPrice: 0.3
     },
     {
       id: 'anthropic/claude-opus-4.5',
@@ -217,6 +245,45 @@ export const openrouterPreset: BuiltinProviderPreset = {
         bodyParams: { reasoning_effort: 'high' },
         reasoningEffortLevels: ['high'],
         defaultReasoningEffort: 'high'
+      }
+    },
+    // ── OpenAI — GPT-5.4 / 5.5 ──
+    {
+      id: 'openai/gpt-5.5',
+      name: 'GPT-5.5',
+      icon: 'openai',
+      enabled: true,
+      contextLength: 1_048_576,
+      maxOutputTokens: 32_768,
+      supportsVision: true,
+      supportsFunctionCall: true,
+      inputPrice: 5,
+      outputPrice: 30,
+      cacheHitPrice: 0.5,
+      supportsThinking: true,
+      thinkingConfig: {
+        bodyParams: { reasoning_effort: 'medium' },
+        reasoningEffortLevels: ['none', 'low', 'medium', 'high', 'xhigh'],
+        defaultReasoningEffort: 'medium'
+      }
+    },
+    {
+      id: 'openai/gpt-5.4',
+      name: 'GPT-5.4',
+      icon: 'openai',
+      enabled: true,
+      contextLength: 1_048_576,
+      maxOutputTokens: 32_768,
+      supportsVision: true,
+      supportsFunctionCall: true,
+      inputPrice: 2.5,
+      outputPrice: 15,
+      cacheHitPrice: 0.25,
+      supportsThinking: true,
+      thinkingConfig: {
+        bodyParams: { reasoning_effort: 'medium' },
+        reasoningEffortLevels: ['none', 'low', 'medium', 'high', 'xhigh'],
+        defaultReasoningEffort: 'medium'
       }
     },
     // ── OpenAI — O-series ──

@@ -23,7 +23,6 @@ import {
   Monitor,
   Box,
   Database,
-  Brain,
   Target,
   LogIn,
   LogOut,
@@ -940,9 +939,10 @@ function BashOutputBlock({
   const sendBackgroundProcessInput = useAgentStore((s) => s.sendBackgroundProcessInput)
   const stopBackgroundProcess = useAgentStore((s) => s.stopBackgroundProcess)
   const abortForegroundShellExec = useAgentStore((s) => s.abortForegroundShellExec)
-  const foregroundExecId = useAgentStore((s) =>
+  const foregroundExec = useAgentStore((s) =>
     toolUseId ? s.foregroundShellExecByToolUseId[toolUseId] : undefined
   )
+  const foregroundExecId = foregroundExec?.execId
   const [liveShellOutput, setLiveShellOutput] = React.useState<LiveShellOutputState>({
     execId: null,
     stdout: '',
@@ -996,7 +996,12 @@ function BashOutputBlock({
   const processId = parsed?.processId ? String(parsed.processId) : null
   const process = useAgentStore((s) => (processId ? s.backgroundProcesses[processId] : undefined))
   const inputTerminalId = React.useMemo(() => getBashInputTerminalId(input), [input])
-  const terminalId = process?.terminalId ?? parsed?.terminalId ?? inputTerminalId ?? null
+  const terminalId =
+    process?.terminalId ??
+    parsed?.terminalId ??
+    foregroundExec?.terminalId ??
+    inputTerminalId ??
+    null
   const isProcessRunning = process?.status === 'running'
   const exitCode = process?.exitCode ?? parsed?.exitCode
   const statusText = process ? t(`toolCall.processStatus.${process.status}`) : null
@@ -2646,7 +2651,6 @@ export function ToolStatusDot({
 
 const COMMAND_TOOL_NAMES = new Set(['Bash', 'PowerShell'])
 const COMPACT_BUILTIN_TOOL_NAMES = new Set([
-  'Agent',
   'AskUserQuestion',
   'Bash',
   'BrowserClick',
@@ -2674,7 +2678,6 @@ const COMPACT_BUILTIN_TOOL_NAMES = new Set([
   'MemoryRead',
   'MemorySearch',
   'Monitor',
-  'MultiEdit',
   'NotebookEdit',
   'Notify',
   'PowerShell',
@@ -2813,7 +2816,7 @@ function genericCompactToolHeaderModel({
 
 function getBuiltinToolIcon(name: string): React.ReactNode {
   if (['Write', 'SavePlan'].includes(name)) return <FileCode className="size-3.5" />
-  if (['Edit', 'MultiEdit', 'NotebookEdit'].includes(name)) return <FileCode className="size-3.5" />
+  if (['Edit', 'NotebookEdit'].includes(name)) return <FileCode className="size-3.5" />
   if (name === 'Delete') return <Trash2 className="size-3.5" />
   if (name.startsWith('Task') || name === 'TodoWrite') return <ListTodo className="size-3.5" />
   if (name.startsWith('Cron')) return <CalendarClock className="size-3.5" />
@@ -2830,7 +2833,6 @@ function getBuiltinToolIcon(name: string): React.ReactNode {
   }
   if (name.includes('McpResource')) return <Database className="size-3.5" />
   if (name === 'ToolSearch') return <Wrench className="size-3.5" />
-  if (name === 'Agent') return <Brain className="size-3.5" />
   if (name === 'Monitor') return <SquareTerminal className="size-3.5" />
   if (name === 'EnterPlanMode') return <LogIn className="size-3.5" />
   if (name === 'ExitPlanMode') return <LogOut className="size-3.5" />
@@ -2898,7 +2900,7 @@ function buildCompactToolHeaderModel({
     }
   }
 
-  if (['Write', 'Edit', 'Delete', 'MultiEdit', 'NotebookEdit', 'SavePlan'].includes(name)) {
+  if (['Write', 'Edit', 'Delete', 'NotebookEdit', 'SavePlan'].includes(name)) {
     const targetPath = fileToolPath(input)
     const pathSummary = compactToolPathSummary(targetPath)
     const badges: CompactToolHeaderBadge[] = []
@@ -3060,7 +3062,6 @@ function buildCompactToolHeaderModel({
   if (
     [
       'Notify',
-      'Agent',
       'ListMcpResourcesTool',
       'ReadMcpResourceTool',
       'ToolSearch',

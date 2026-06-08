@@ -2,8 +2,19 @@ import * as React from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import { useTranslation } from 'react-i18next'
 import { useShallow } from 'zustand/react/shallow'
-import { Folder, GitBranch, GitCompare, Laptop, ListChecks, Loader2, Server } from 'lucide-react'
+import {
+  Folder,
+  GitBranch,
+  GitCompare,
+  Laptop,
+  ListChecks,
+  Loader2,
+  Server,
+  SquareTerminal,
+  X
+} from 'lucide-react'
 import { TodoStatusList } from '@renderer/components/chat/TodoCard'
+import { Button } from '@renderer/components/ui/button'
 import { ipcClient } from '@renderer/lib/ipc/ipc-client'
 import { IPC } from '@renderer/lib/ipc/channels'
 import { cn } from '@renderer/lib/utils'
@@ -13,6 +24,7 @@ import { getSessionInputDraftKey, useInputDraftStore } from '@renderer/stores/in
 import { useSshStore } from '@renderer/stores/ssh-store'
 import { useTaskStore, type TaskItem } from '@renderer/stores/task-store'
 import { useTeamStore } from '@renderer/stores/team-store'
+import { useTerminalStore, type LocalTerminalSession } from '@renderer/stores/terminal-store'
 import { useUIStore } from '@renderer/stores/ui-store'
 import type { TeamTask } from '@renderer/lib/agent/teams/types'
 
@@ -255,6 +267,51 @@ function ContextRow({
   )
 }
 
+function terminalLabel(terminal: LocalTerminalSession): string {
+  return terminal.command?.trim() || terminal.title || compactPath(terminal.shell) || terminal.id
+}
+
+function RunningTerminalRow({
+  terminal,
+  onClose,
+  closeTitle
+}: {
+  terminal: LocalTerminalSession
+  onClose: (id: string) => void
+  closeTitle: string
+}): React.JSX.Element {
+  const label = terminalLabel(terminal)
+  const meta = compactPath(terminal.cwd) || compactPath(terminal.shell) || terminal.id
+
+  return (
+    <div className="group flex min-w-0 items-center gap-2 rounded-md border border-border/60 bg-muted/15 px-2 py-1.5">
+      <span className="size-1.5 shrink-0 rounded-full bg-emerald-500" />
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-[11px] font-medium text-foreground/85" title={label}>
+          {label}
+        </div>
+        <div
+          className="truncate text-[10px] text-muted-foreground/65"
+          title={terminal.cwd || terminal.shell}
+        >
+          {meta}
+        </div>
+      </div>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon-sm"
+        className="size-6 shrink-0 text-muted-foreground opacity-70 hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100"
+        title={closeTitle}
+        aria-label={closeTitle}
+        onClick={() => onClose(terminal.id)}
+      >
+        <X className="size-3" />
+      </Button>
+    </div>
+  )
+}
+
 export function RuntimeStatusPanel({
   sessionId = null
 }: RuntimeStatusPanelProps): React.JSX.Element {
@@ -304,6 +361,16 @@ export function RuntimeStatusPanel({
       : null
   )
   const gitSummary = useRuntimeGitSummary(context.workingFolder, context.sshConnectionId)
+  const initTerminals = useTerminalStore((state) => state.init)
+  const refreshTerminalSessions = useTerminalStore((state) => state.refreshSessions)
+  const closeTerminalSession = useTerminalStore((state) => state.closeSession)
+  const runningTerminals = useTerminalStore(
+    useShallow((state) =>
+      Object.values(state.sessions)
+        .filter((terminal) => terminal.status === 'running')
+        .sort((a, b) => b.createdAt - a.createdAt)
+    )
+  )
 
   const teamTasks = React.useMemo(
     () => (activeTeam?.tasks ?? []).map(teamTaskToItem),
@@ -311,6 +378,16 @@ export function RuntimeStatusPanel({
   )
   const tasks = sessionTasks.length > 0 ? sessionTasks : teamTasks
   const visible = Boolean(resolvedSessionId && runtimeStatusPanelOpen && !rightPanelOpen)
+
+  React.useEffect(() => {
+    initTerminals()
+  }, [initTerminals])
+
+  React.useEffect(() => {
+    if (!visible) return
+    void refreshTerminalSessions()
+  }, [refreshTerminalSessions, visible])
+
   const targetLabel = context.sshConnectionId
     ? sshConnectionName
       ? t('runtimeStatus.sshNamed', { name: sshConnectionName })
@@ -458,6 +535,31 @@ export function RuntimeStatusPanel({
                   </div>
                 )}
               </section>
+
+              {runningTerminals.length > 0 ? (
+                <>
+                  <div className="h-px bg-border/70" />
+                  <section className="space-y-2">
+                    <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+                      <SquareTerminal className="size-3.5" />
+                      <span>{t('runtimeStatus.runningTerminals')}</span>
+                      <span className="rounded-full bg-emerald-500/10 px-1.5 py-0.5 text-[10px] text-emerald-600 dark:text-emerald-300">
+                        {runningTerminals.length}
+                      </span>
+                    </div>
+                    <div className="space-y-1.5">
+                      {runningTerminals.map((terminal) => (
+                        <RunningTerminalRow
+                          key={terminal.id}
+                          terminal={terminal}
+                          closeTitle={t('runtimeStatus.closeTerminal')}
+                          onClose={(id) => void closeTerminalSession(id)}
+                        />
+                      ))}
+                    </div>
+                  </section>
+                </>
+              ) : null}
             </div>
           </motion.aside>
         ) : null}

@@ -345,7 +345,7 @@ const bashHandler: ToolHandler = {
                 ? 'Auto-detected long-running command'
                 : undefined
         }
-      })) as { id?: string; error?: string }
+      })) as { id?: string; terminalId?: string; error?: string }
 
       if (!result?.id) {
         return encodeBashToolResult({
@@ -361,6 +361,7 @@ const bashHandler: ToolHandler = {
         sessionId: ctx.sessionId,
         toolUseId,
         source: 'bash-tool',
+        terminalId: result.terminalId,
         description:
           typeof input.description === 'string'
             ? input.description
@@ -374,6 +375,7 @@ const bashHandler: ToolHandler = {
         background: true,
         autoBackground,
         processId: result.id,
+        terminalId: result.terminalId,
         command,
         sessionId: ctx.sessionId ?? null,
         cwd,
@@ -398,9 +400,19 @@ const bashHandler: ToolHandler = {
     let foregroundResultMetadata: { processId?: string; terminalId?: string } | undefined
     const updateLivePreview = (): void => {
       if (!toolUseId) return
+      const terminalInput = foregroundResultMetadata?.terminalId
+        ? {
+            ...input,
+            ...(foregroundResultMetadata.processId
+              ? { processId: foregroundResultMetadata.processId }
+              : {}),
+            terminalId: foregroundResultMetadata.terminalId
+          }
+        : undefined
       useAgentStore.getState().updateToolCall(
         toolUseId,
         {
+          ...(terminalInput ? { input: terminalInput } : {}),
           output: buildLivePreviewPayload(preview, foregroundResultMetadata)
         },
         ctx.sessionId
@@ -418,6 +430,12 @@ const bashHandler: ToolHandler = {
       foregroundResultMetadata = {
         processId: data.processId ?? foregroundResultMetadata?.processId,
         terminalId: data.terminalId ?? foregroundResultMetadata?.terminalId
+      }
+      if (toolUseId) {
+        useAgentStore.getState().updateForegroundShellExec(toolUseId, {
+          processId: foregroundResultMetadata.processId,
+          terminalId: foregroundResultMetadata.terminalId
+        })
       }
       flushOutput()
     })
@@ -447,7 +465,9 @@ const bashHandler: ToolHandler = {
     }
     ctx.signal.addEventListener('abort', abortHandler, { once: true })
     if (toolUseId) {
-      useAgentStore.getState().registerForegroundShellExec(toolUseId, execId)
+      useAgentStore
+        .getState()
+        .registerForegroundShellExec(toolUseId, execId, { command, cwd, sessionId: ctx.sessionId })
     }
 
     try {

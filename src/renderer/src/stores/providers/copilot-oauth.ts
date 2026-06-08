@@ -125,11 +125,34 @@ export const copilotOAuthPreset: BuiltinProviderPreset = {
       enableSystemPromptCache: true
     },
     {
+      id: 'claude-opus-4-8',
+      name: 'Claude Opus 4.8',
+      icon: 'claude',
+      enabled: true,
+      contextLength: 1_000_000,
+      maxOutputTokens: 128_000,
+      supportsVision: true,
+      supportsFunctionCall: true,
+      inputPrice: 5,
+      outputPrice: 25,
+      cacheCreationPrice: 6.25,
+      cacheHitPrice: 0.5,
+      premiumRequestMultiplier: 3,
+      availablePlans: ['pro', 'pro+', 'business', 'enterprise'],
+      supportsThinking: true,
+      thinkingConfig: {
+        bodyParams: { thinking: { type: 'adaptive' } },
+        forceTemperature: 1,
+        reasoningEffortLevels: ['low', 'medium', 'high', 'xhigh', 'max'],
+        defaultReasoningEffort: 'high'
+      }
+    },
+    {
       id: 'claude-sonnet-4-6',
       name: 'Claude Sonnet 4.6',
       icon: 'claude',
       enabled: true,
-      contextLength: 200_000,
+      contextLength: 1_000_000,
       maxOutputTokens: 64_384,
       supportsVision: true,
       supportsFunctionCall: true,

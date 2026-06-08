@@ -50,6 +50,25 @@ export const baiduCodingPreset: BuiltinProviderPreset = {
       outputPrice: 1.7
     },
     {
+      id: 'kimi-k2.6',
+      name: 'Kimi K2.6',
+      icon: 'kimi',
+      enabled: true,
+      contextLength: 262_144,
+      maxOutputTokens: 32_768,
+      supportsVision: true,
+      supportsFunctionCall: true,
+      inputPrice: 0.15,
+      outputPrice: 0.9,
+      cacheHitPrice: 0.023,
+      supportsThinking: true,
+      thinkingConfig: {
+        bodyParams: { thinking: { type: 'enabled' } },
+        disabledBodyParams: { thinking: { type: 'disabled' } },
+        forceTemperature: 1
+      }
+    },
+    {
       id: 'kimi-k2.5',
       name: 'Kimi K2.5',
       icon: 'kimi',
@@ -75,6 +94,21 @@ export const baiduCodingPreset: BuiltinProviderPreset = {
       enabled: true,
       contextLength: 204_800,
       maxOutputTokens: 64_384,
+      supportsVision: false,
+      supportsFunctionCall: true,
+      inputPrice: 0.3,
+      outputPrice: 1.1,
+      cacheHitPrice: 0.03,
+      cacheCreationPrice: 0.4,
+      type: 'anthropic'
+    },
+    {
+      id: 'MiniMax-M2.7',
+      name: 'MiniMax M2.7',
+      icon: 'minimax',
+      enabled: true,
+      contextLength: 204_800,
+      maxOutputTokens: 131_072,
       supportsVision: false,
       supportsFunctionCall: true,
       inputPrice: 0.3,
@@ -117,7 +151,22 @@ export const baiduPreset: BuiltinProviderPreset = {
       supportsFunctionCall: true
     },
     { id: 'glm-4.7', name: 'GLM 4.7', icon: 'chatglm', enabled: true, supportsFunctionCall: true },
+    { id: 'kimi-k2.6', name: 'Kimi K2.6', icon: 'kimi', enabled: true, supportsFunctionCall: true },
     { id: 'kimi-k2.5', name: 'Kimi K2.5', icon: 'kimi', enabled: true, supportsFunctionCall: true },
+    {
+      id: 'MiniMax-M2.7',
+      name: 'MiniMax M2.7',
+      icon: 'minimax',
+      enabled: true,
+      supportsFunctionCall: true
+    },
+    {
+      id: 'MiniMax-M2.5',
+      name: 'MiniMax M2.5',
+      icon: 'minimax',
+      enabled: true,
+      supportsFunctionCall: true
+    },
     {
       id: 'MiniMax-M2.1',
       name: 'MiniMax M2.1',

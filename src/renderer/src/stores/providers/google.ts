@@ -8,10 +8,25 @@ export const googlePreset: BuiltinProviderPreset = {
   homepage: 'https://ai.google.dev',
   apiKeyUrl: 'https://aistudio.google.com/apikey',
   defaultModels: [
-    // Gemini 3 (preview)
+    // Gemini 3.5 (stable)
     {
-      id: 'gemini-3-pro-preview',
-      name: 'Gemini 3 Pro Preview',
+      id: 'gemini-3.5-flash',
+      name: 'Gemini 3.5 Flash',
+      icon: 'gemini',
+      enabled: true,
+      contextLength: 1_048_576,
+      maxOutputTokens: 65_536,
+      supportsVision: true,
+      supportsFunctionCall: true,
+      inputPrice: 1,
+      outputPrice: 4,
+      supportsThinking: true,
+      thinkingConfig: { bodyParams: { reasoning_effort: 'medium' } }
+    },
+    // Gemini 3.1 (preview)
+    {
+      id: 'gemini-3.1-pro-preview',
+      name: 'Gemini 3.1 Pro Preview',
       icon: 'gemini',
       enabled: true,
       contextLength: 1_048_576,
@@ -33,7 +48,7 @@ export const googlePreset: BuiltinProviderPreset = {
       inputPrice: 0.5,
       outputPrice: 3
     },
-    // Gemini 2.5
+    // Gemini 2.5 Pro (stable)
     {
       id: 'gemini-2.5-pro',
       name: 'Gemini 2.5 Pro',
@@ -91,8 +106,8 @@ export const googlePreset: BuiltinProviderPreset = {
     },
     // Gemini image generation
     {
-      id: 'gemini-3.1-flash-image-preview',
-      name: 'Gemini 3.1 Flash Image Preview',
+      id: 'gemini-3.1-flash-image',
+      name: 'Nano Banana 2 (Gemini 3.1 Flash Image)',
       icon: 'gemini',
       enabled: true,
       category: 'image',
@@ -101,8 +116,18 @@ export const googlePreset: BuiltinProviderPreset = {
       supportsFunctionCall: false
     },
     {
-      id: 'gemini-3-pro-image-preview',
-      name: 'Gemini 3 Pro Image Preview',
+      id: 'gemini-3-pro-image',
+      name: 'Nano Banana Pro (Gemini 3 Pro Image)',
+      icon: 'gemini',
+      enabled: true,
+      category: 'image',
+      type: 'gemini',
+      supportsVision: true,
+      supportsFunctionCall: false
+    },
+    {
+      id: 'gemini-2.5-flash-image',
+      name: 'Nano Banana (Gemini 2.5 Flash Image)',
       icon: 'gemini',
       enabled: true,
       category: 'image',

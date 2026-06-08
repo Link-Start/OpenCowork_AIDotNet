@@ -237,7 +237,9 @@
     "noWorkingFolder": "Not selected",
     "noSources": "No sources",
     "sourcesSummary": "{{first}}, {{second}} and {{count}} more",
-    "noTasks": "No tasks yet"
+    "noTasks": "No tasks yet",
+    "runningTerminals": "Running terminals",
+    "closeTerminal": "Close terminal"
   },
   "browser": {
     "back": "Back",

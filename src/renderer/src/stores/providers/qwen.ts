@@ -77,6 +77,24 @@ export const qwenCodingPreset: BuiltinProviderPreset = {
       thinkingConfig: { bodyParams: { enable_thinking: true } }
     },
     {
+      id: 'kimi-k2.6',
+      name: 'Kimi K2.6',
+      icon: 'kimi',
+      enabled: true,
+      contextLength: 262_144,
+      maxOutputTokens: 32_768,
+      supportsVision: true,
+      supportsFunctionCall: true,
+      inputPrice: 0.15,
+      outputPrice: 0.9,
+      supportsThinking: true,
+      thinkingConfig: {
+        bodyParams: { thinking: { type: 'enabled' } },
+        disabledBodyParams: { thinking: { type: 'disabled' } },
+        forceTemperature: 1
+      }
+    },
+    {
       id: 'kimi-k2.5',
       name: 'Kimi K2.5',
       icon: 'kimi',
