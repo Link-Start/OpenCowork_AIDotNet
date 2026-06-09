@@ -5,7 +5,6 @@ import { confirm } from '@renderer/components/ui/confirm-dialog'
 import { MONO_FONT } from '@renderer/lib/constants'
 import { useAgentStore, type AgentRunChangeSet } from '@renderer/stores/agent-store'
 import { useUIStore } from '@renderer/stores/ui-store'
-import type { UnifiedMessage } from '@renderer/lib/api/types'
 import { useAggregatedChangeSummaries } from './change-summary-utils'
 import {
   aggregateDisplayableRunFileChanges,
@@ -15,70 +14,72 @@ import {
 
 interface SessionChangeSummaryCardProps {
   sessionId?: string | null
-  assistantMessageIds?: readonly string[]
-  messages?: readonly UnifiedMessage[]
+  messageId?: string
   toolUseIds?: readonly string[]
 }
 
 const DEFAULT_EXPANDED_FILE_LIMIT = 4
 
-function changeSetMatchesSession(
+function changeSetMatchesMessage(
   changeSet: AgentRunChangeSet,
+  messageId: string | undefined,
   sessionId: string | null | undefined,
-  assistantMessageIds: Set<string>
+  toolUseIdSet: Set<string>
 ): boolean {
-  return (
-    (!!sessionId &&
-      (changeSet.sessionId === sessionId ||
-        changeSet.changes.some((change) => change.sessionId === sessionId))) ||
-    assistantMessageIds.has(changeSet.assistantMessageId) ||
-    assistantMessageIds.has(changeSet.runId)
-  )
+  if (messageId && (changeSet.runId === messageId || changeSet.assistantMessageId === messageId)) {
+    return true
+  }
+
+  if (toolUseIdSet.size === 0) return false
+
+  if (
+    sessionId &&
+    changeSet.sessionId &&
+    changeSet.sessionId !== sessionId &&
+    !changeSet.changes.some((change) => change.sessionId === sessionId)
+  ) {
+    return false
+  }
+
+  return changeSet.changes.some((change) => change.toolUseId && toolUseIdSet.has(change.toolUseId))
 }
 
-function useSessionChangeSets({
+function useMessageChangeSets({
+  messageId,
   sessionId,
-  assistantMessageIds = []
+  toolUseIds = []
 }: SessionChangeSummaryCardProps): AgentRunChangeSet[] {
   const runChangesByRunId = useAgentStore((state) => state.runChangesByRunId)
 
   return React.useMemo(() => {
-    const assistantMessageIdSet = new Set(assistantMessageIds)
     const seen = new Set<string>()
+    const toolUseIdSet = new Set(toolUseIds)
 
     return Object.values(runChangesByRunId)
       .filter((changeSet) => {
         if (seen.has(changeSet.runId)) return false
         seen.add(changeSet.runId)
-        return changeSetMatchesSession(changeSet, sessionId, assistantMessageIdSet)
+        return changeSetMatchesMessage(changeSet, messageId, sessionId, toolUseIdSet)
       })
       .sort((left, right) => left.createdAt - right.createdAt)
-  }, [assistantMessageIds, runChangesByRunId, sessionId])
+  }, [messageId, runChangesByRunId, sessionId, toolUseIds])
 }
 
 export function SessionChangeSummaryCard({
   sessionId,
-  assistantMessageIds = []
+  messageId,
+  toolUseIds = []
 }: SessionChangeSummaryCardProps): React.JSX.Element | null {
   const { t } = useTranslation(['chat', 'common'])
-  const refreshSessionRunChanges = useAgentStore((state) => state.refreshSessionRunChanges)
   const undoFileChange = useAgentStore((state) => state.undoFileChange)
   const undoRunChanges = useAgentStore((state) => state.undoRunChanges)
   const openDetailPanel = useUIStore((state) => state.openDetailPanel)
-  const changeSets = useSessionChangeSets({ sessionId, assistantMessageIds })
+  const changeSets = useMessageChangeSets({ sessionId, messageId, toolUseIds })
   const latestChangeSet = React.useMemo(
     () => latestDisplayableRunChangeSet(changeSets),
     [changeSets]
   )
   const [isUndoing, setIsUndoing] = React.useState(false)
-  const requestedRefreshKeyRef = React.useRef<string | null>(null)
-
-  React.useEffect(() => {
-    if (!sessionId) return
-    if (requestedRefreshKeyRef.current === sessionId) return
-    requestedRefreshKeyRef.current = sessionId
-    void refreshSessionRunChanges(sessionId)
-  }, [refreshSessionRunChanges, sessionId])
 
   const aggregatedChanges = React.useMemo(
     () =>

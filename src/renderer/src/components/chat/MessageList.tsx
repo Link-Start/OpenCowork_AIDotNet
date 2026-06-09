@@ -134,7 +134,6 @@ interface MessageRowProps {
   message: UnifiedMessage
   sessionId?: string | null
   sessionAssistantMessageIds?: readonly string[]
-  sessionMessages?: readonly UnifiedMessage[]
   sessionToolUseIds?: readonly string[]
   isStreaming: boolean
   isLastUserMessage: boolean
@@ -423,7 +422,6 @@ function areMessageRowPropsEqual(prev: MessageRowProps, next: MessageRowProps): 
     prev.message === next.message &&
     prev.sessionId === next.sessionId &&
     areStringArraysEqual(prev.sessionAssistantMessageIds, next.sessionAssistantMessageIds) &&
-    prev.sessionMessages === next.sessionMessages &&
     areStringArraysEqual(prev.sessionToolUseIds, next.sessionToolUseIds) &&
     prev.isStreaming === next.isStreaming &&
     prev.isLastUserMessage === next.isLastUserMessage &&
@@ -661,7 +659,6 @@ const MessageRow = React.memo(function MessageRow({
   message,
   sessionId,
   sessionAssistantMessageIds,
-  sessionMessages,
   sessionToolUseIds,
   isStreaming,
   isLastUserMessage,
@@ -682,6 +679,7 @@ const MessageRow = React.memo(function MessageRow({
 }: MessageRowProps): React.JSX.Element {
   const isAnchor = anchorMessageId === message.id
   const isHighlighted = highlightMessageId === message.id
+  const messageToolUseIds = React.useMemo(() => getMessageToolUseIds(message), [message])
 
   return (
     <div
@@ -712,12 +710,11 @@ const MessageRow = React.memo(function MessageRow({
         hiddenToolUseIds={hiddenToolUseIds}
         requestRetryState={requestRetryState}
       />
-      {message.role === 'assistant' && isLastAssistantMessage && !isStreaming && sessionId ? (
+      {message.role === 'assistant' && !isStreaming && sessionId ? (
         <SessionChangeSummaryCard
           sessionId={sessionId}
-          assistantMessageIds={sessionAssistantMessageIds}
-          messages={sessionMessages}
-          toolUseIds={sessionToolUseIds}
+          messageId={message.id}
+          toolUseIds={messageToolUseIds}
         />
       ) : null}
     </div>
@@ -1481,7 +1478,6 @@ function MessageListInner(props: MessageListProps): React.JSX.Element {
                 message={message}
                 sessionId={targetSessionId}
                 sessionAssistantMessageIds={sessionAssistantMessageIds}
-                sessionMessages={messages}
                 sessionToolUseIds={sessionToolUseIds}
                 isStreaming={streamingMessageId === row.messageId}
                 isLastUserMessage={row.isLastUserMessage}
@@ -1551,7 +1547,6 @@ function MessageListInner(props: MessageListProps): React.JSX.Element {
                   message={pendingAssistantMessage}
                   sessionId={targetSessionId}
                   sessionAssistantMessageIds={sessionAssistantMessageIds}
-                  sessionMessages={messages}
                   sessionToolUseIds={sessionToolUseIds}
                   isStreaming
                   isLastUserMessage={false}
@@ -1585,7 +1580,6 @@ function MessageListInner(props: MessageListProps): React.JSX.Element {
                 message={message}
                 sessionId={targetSessionId}
                 sessionAssistantMessageIds={sessionAssistantMessageIds}
-                sessionMessages={messages}
                 sessionToolUseIds={sessionToolUseIds}
                 isStreaming={isStreaming}
                 isLastUserMessage={isLastUserMessage}
